@@ -173,7 +173,7 @@ function makeReport(over: Partial<AttributionReport> = {}): AttributionReport {
       orderFilterScope: "all orders",
       matchedOrders: 0,
       matchUnavailableRows: 0,
-      notes: ["a pre-0b-1 mass update whose summary event was never written is invisible to R0"],
+      notes: ["an older mass update whose summary event was never written is invisible to R0"],
     },
     count: 4,
     moreCount: 0,

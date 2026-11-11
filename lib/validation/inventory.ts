@@ -1,20 +1,28 @@
 import { z } from 'zod';
 import { inventory_logs_logType } from '@prisma/client';
-import { DEDUCTION_INTENTS } from '@/lib/inventory/intent';
+import { ADJUST_REQUEST_INTENTS, type DeductionIntent } from '@/lib/inventory/intent';
 import {
   MAX_BATCH_ADJUST_ITEMS,
   MAX_BATCH_TRANSFERS,
   capMessage,
 } from '@/lib/inventory/request-limits';
+import { BatchIdParamSchema } from '@/lib/validation/batches';
+import { refuse } from '@/lib/validation/refuse';
 
 const positiveInt = z.number().int().positive();
 
 /**
- * W2-1 (pack REV-11 T7): the intent chip's closed vocabulary, shared by both
- * surfaces' request schemas so neither can drift from lib/inventory/intent.ts.
- * `recount` / `receiving` are NOT here and never were — see that module.
+ * The adjust ROUTE's intent vocabulary (reconciliation Part 2, pack CB3a-i.2):
+ * the chip's three values (W2-1, pack REV-11 T7) plus the two request-only
+ * intents `count` and `correction` — lib/inventory/intent.ts
+ * `ADJUST_REQUEST_INTENTS`, so the wire cannot drift from that module. Its one
+ * consumer is AdjustWithIntentSchema below; the workbench's schema reads
+ * WORKBENCH_INTENTS. Accepting `count` / `correction` HERE means only that they
+ * parse: `parseAdjustShape` runs their rows of the truth table and the route
+ * then refuses them as not available yet. `recount` / `receiving` are NOT here
+ * and never were — see that module.
  */
-export const DeductionIntentSchema = z.enum(DEDUCTION_INTENTS);
+export const AdjustRequestIntentSchema = z.enum(ADJUST_REQUEST_INTENTS);
 
 /**
  * An external order id, bounded by external_orders.id's native shape
@@ -77,12 +85,198 @@ export const InventoryAdjustmentSchema = z.object({
  * cross-field rule (an auto-add is an ADD, so `delta > 0`) as an ordinary 400,
  * because a `.refine` at the object level would hide `.shape` from the MCP
  * adapter (house rule 1).
+ *
+ * Reconciliation Part 2 (pack CB3a-i.2): `delta` is OPTIONAL here — a count
+ * sends a counted quantity, not a delta — and the non-zero refine survives on
+ * the optional, so `delta: 0` still meets 'Delta must not be zero'. WHETHER a
+ * field may or must be present is decided per request kind by
+ * `parseAdjustShape` below, never here. BatchInventoryAdjustmentSchema reuses
+ * the base schema, where `delta` stays required.
  */
 export const AdjustWithIntentSchema = InventoryAdjustmentSchema.extend({
-  intent: DeductionIntentSchema.optional(),
+  delta: InventoryAdjustmentSchema.shape.delta.optional(),
+  intent: AdjustRequestIntentSchema.optional(),
   selectedExternalOrderId: selectedExternalOrderId.optional(),
+  // The order number an operator TYPED (the reference field). Free text until
+  // the route's resolver decides whether it names exactly one order.
+  orderReference: z.string().trim().min(1).max(40).optional(),
+  countedQuantity: z.number().int().min(0).optional(),
+  // A ledger batch id: the reverse/move routes' own guard, never re-spelled.
+  reversesBatchId: BatchIdParamSchema.optional(),
   autoAddForTransfer: z.boolean().optional(),
 });
+
+/**
+ * The adjust request truth table's FROZEN sentences (pack CB3a-i.2 + the
+ * P2-B3-1 deltas). One owner: this file. Each is the whole 400 an operator or
+ * an API caller reads, so a change to one is a wire change.
+ */
+export const ADJUST_SHAPE_SENTENCES = Object.freeze({
+  countCarriesNoDelta: 'a count carries no delta — send countedQuantity',
+  countNeedsQuantity: 'a count needs the counted quantity',
+  countNeedsVersion: 'a count needs the row version it was read at',
+  countReversesNothing: 'a count reverses nothing',
+  countNotAttributed: 'a count is not attributed',
+  countNotATransfer: 'a count is not a transfer',
+  correctionNeedsUnits: 'a correction needs the units to put back',
+  correctionDownwardIsCount: 'a downward fix is a count',
+  correctionNotACount: 'a correction is not a count',
+  correctionCarriesNoVersion: 'a correction carries no version — the batch lock is its guard',
+  correctionAttributedByBatch: 'a correction is attributed by its batch, not a reference',
+  correctionNotATransfer: 'a correction is not a transfer',
+  deltaNeedsUnits: 'an adjustment needs the units to add or remove',
+  deltaNoCountedQuantity: 'only a count carries a counted quantity',
+  deltaNoReversal: 'only a correction reverses a batch',
+  referenceNeedsOrderIntent: 'a reference needs the order intent',
+  referenceOrPickNotBoth: 'pick the order or type the reference, not both',
+  referenceOnlyForStockOut:
+    'a reference attributes stock that left — put stock back with a correction',
+} as const);
+
+/**
+ * What one adjust request IS, once its kind is known (seam S-B8). `kind` is a
+ * SERVER-side derivation from `intent` — it never rides the wire (zod would
+ * strip it). The optional keys are ABSENT when the request did not send them,
+ * never `undefined`-valued.
+ */
+export type AdjustShape =
+  | {
+      kind: 'count';
+      productId: number;
+      locationId: number;
+      countedQuantity: number;
+      expectedVersion: number;
+      reason?: string;
+      notes?: string;
+    }
+  | {
+      kind: 'correction';
+      productId: number;
+      locationId: number;
+      delta: number;
+      reversesBatchId?: string;
+      reason?: string;
+      notes?: string;
+    }
+  | {
+      kind: 'delta';
+      productId: number;
+      locationId: number;
+      delta: number;
+      intent?: DeductionIntent;
+      selectedExternalOrderId?: string;
+      orderReference?: string;
+      autoAddForTransfer?: boolean;
+      reason?: string;
+      notes?: string;
+      expectedVersion?: number;
+    };
+
+/**
+ * THE ADJUST REQUEST TRUTH TABLE, executable (pack CB3a-i.2; TOTAL).
+ *
+ * A post-parse PARSER, never a `.refine` (house rule 1: the MCP adapter reads
+ * `.shape`). It runs on AdjustWithIntentSchema's OUTPUT, so "present" means
+ * DEFINED on the parsed object: unknown keys are already stripped, and an
+ * explicit `null` has already met zod's own message. Each broken cell is one
+ * 400 through `refuse` — the field's path and the cell's frozen sentence.
+ *
+ * The kind comes from `intent`: `count` -> count, `correction` -> correction,
+ * anything else (`order` / `damage-loss` / `other` / absent) -> delta.
+ *
+ * ONE BODY, SEVERAL BROKEN CELLS: the cells are checked in the table's column
+ * order, left to right — delta, countedQuantity, expectedVersion,
+ * reversesBatchId, orderReference, selectedExternalOrderId,
+ * autoAddForTransfer — so the leftmost broken column's sentence is the one the
+ * caller reads. Inside the delta row's orderReference cell the three rules run
+ * in the order the table states them: the order intent, then id-and-reference,
+ * then a positive delta.
+ *
+ * Two cells are enforced elsewhere, by design: a delta row's
+ * `autoAddForTransfer: true` with `delta < 0` is the route's own 400 (CR-3),
+ * which runs right after this parse; and `logType` is ignored in every row
+ * (the schema pins its literal, the writer decides what is written).
+ */
+export function parseAdjustShape(body: AdjustWithIntentInput): AdjustShape {
+  const S = ADJUST_SHAPE_SENTENCES;
+  const {
+    productId,
+    locationId,
+    intent,
+    delta,
+    countedQuantity,
+    expectedVersion,
+    reversesBatchId,
+    orderReference,
+    selectedExternalOrderId,
+    autoAddForTransfer,
+  } = body;
+  // reason / notes are optional in every row and carried when present.
+  const words = {
+    ...(body.reason !== undefined ? { reason: body.reason } : {}),
+    ...(body.notes !== undefined ? { notes: body.notes } : {}),
+  };
+
+  if (intent === 'count') {
+    if (delta !== undefined) refuse(['delta'], S.countCarriesNoDelta);
+    if (countedQuantity === undefined) refuse(['countedQuantity'], S.countNeedsQuantity);
+    if (expectedVersion === undefined) refuse(['expectedVersion'], S.countNeedsVersion);
+    if (reversesBatchId !== undefined) refuse(['reversesBatchId'], S.countReversesNothing);
+    if (orderReference !== undefined) refuse(['orderReference'], S.countNotAttributed);
+    if (selectedExternalOrderId !== undefined) {
+      refuse(['selectedExternalOrderId'], S.countNotAttributed);
+    }
+    if (autoAddForTransfer === true) refuse(['autoAddForTransfer'], S.countNotATransfer);
+    return { kind: 'count', productId, locationId, countedQuantity, expectedVersion, ...words };
+  }
+
+  if (intent === 'correction') {
+    if (delta === undefined) refuse(['delta'], S.correctionNeedsUnits);
+    // `delta: 0` never reaches here: the base refine refuses it first.
+    if (delta <= 0) refuse(['delta'], S.correctionDownwardIsCount);
+    if (countedQuantity !== undefined) refuse(['countedQuantity'], S.correctionNotACount);
+    if (expectedVersion !== undefined) refuse(['expectedVersion'], S.correctionCarriesNoVersion);
+    if (orderReference !== undefined) refuse(['orderReference'], S.correctionAttributedByBatch);
+    if (selectedExternalOrderId !== undefined) {
+      refuse(['selectedExternalOrderId'], S.correctionAttributedByBatch);
+    }
+    if (autoAddForTransfer === true) refuse(['autoAddForTransfer'], S.correctionNotATransfer);
+    return {
+      kind: 'correction',
+      productId,
+      locationId,
+      delta,
+      ...(reversesBatchId !== undefined ? { reversesBatchId } : {}),
+      ...words,
+    };
+  }
+
+  if (delta === undefined) refuse(['delta'], S.deltaNeedsUnits);
+  if (countedQuantity !== undefined) refuse(['countedQuantity'], S.deltaNoCountedQuantity);
+  if (reversesBatchId !== undefined) refuse(['reversesBatchId'], S.deltaNoReversal);
+  if (orderReference !== undefined) {
+    if (intent !== 'order') refuse(['orderReference'], S.referenceNeedsOrderIntent);
+    if (selectedExternalOrderId !== undefined) {
+      refuse(['orderReference'], S.referenceOrPickNotBoth);
+    }
+    if (delta > 0) refuse(['orderReference'], S.referenceOnlyForStockOut);
+  }
+  // A `selectedExternalOrderId` on a POSITIVE `order` delta is accepted and
+  // still stamps, as it did before this table existed — no UI sends one (the
+  // residual, stated in pack § P2-B3-1).
+  return {
+    kind: 'delta',
+    productId,
+    locationId,
+    delta,
+    ...(intent !== undefined ? { intent } : {}),
+    ...(selectedExternalOrderId !== undefined ? { selectedExternalOrderId } : {}),
+    ...(orderReference !== undefined ? { orderReference } : {}),
+    ...(autoAddForTransfer !== undefined ? { autoAddForTransfer } : {}),
+    ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+    ...words,
+  };
+}
 
 export const BatchInventoryAdjustmentSchema = z.object({
   // Reconciliation Part 2 (pack CB1b.5): the request-size maximum. The journal

@@ -8,13 +8,18 @@ import { lockFirst } from "@/lib/inventory/order-lock";
 import { inventory_logs_logType } from "@prisma/client";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
 import prisma from "@/lib/prisma";
-import { AdjustWithIntentSchema } from "@/lib/validation/inventory";
+import { AdjustWithIntentSchema, parseAdjustShape } from "@/lib/validation/inventory";
+import { refuse } from "@/lib/validation/refuse";
 import { mapDeductionIntent } from "@/lib/inventory/intent";
 import { resolveSelectedExternalOrderId } from "@/lib/orders/resolve-selected-order";
+import {
+  resolveOrderReference,
+  type OrderReferenceResolution,
+} from "@/lib/orders/resolve-order-reference";
 import { AppError } from "@/lib/error-handling";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 import { recordAttributionAttempt } from "@/lib/attribution/attempts";
-import { classifyAdjust } from "@/lib/attribution/classify";
+import { classifyAdjust, type AdjustLocals } from "@/lib/attribution/classify";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +53,16 @@ export const POST = apiHandler(async (request: NextRequest) => {
 
   const body = AdjustWithIntentSchema.parse(rawBody);
 
+  // Reconciliation Part 2 (pack CB3a-i.2/.4): WHAT this request is, decided
+  // once by the request truth table — every cross-field refusal is a 400 with
+  // its frozen sentence, before anything is read or written. From here on the
+  // route reads `shape`, never `body`.
+  const shape = parseAdjustShape(body);
+  // `count` and `correction` PARSE through the full table and stop here: this
+  // route does not implement them yet. A valid request of either kind gets one
+  // honest 400 rather than a quiet ADJUSTMENT row.
+  if (shape.kind !== "delta") refuse(["intent"], "this intent is not available yet");
+
   // CR-3: the auto-add flag is PARSED now, not read off the raw body. It carries
   // two consequences an approved caller must not be able to assert freely — the
   // INVENTORY_TRANSFER_AUTO_ADD actionType, and the suppression of the live
@@ -55,9 +70,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // cross-field rule: an auto-add ADDS the shortfall a transfer needs. A
   // negative delta carrying it removed stock, filed a false "transfer auto-add"
   // audit event, and recorded no attempt at all. Refused at the route (house
-  // rule 1 keeps `.refine` off the object schema), BEFORE any write.
-  const autoAddForTransfer = body.autoAddForTransfer === true;
-  if (autoAddForTransfer && body.delta < 0) {
+  // rule 1 keeps `.refine` off the object schema), BEFORE any write — and
+  // behind the truth table, which owns every other cell of this request.
+  const autoAddForTransfer = shape.autoAddForTransfer === true;
+  if (autoAddForTransfer && shape.delta < 0) {
     throw new AppError(
       "auto-add-for-transfer is an ADD — a negative delta cannot carry it",
       "VALIDATION_ERROR",
@@ -69,7 +85,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // reason; `damage-loss` -> reasonCode DAMAGE and no order; `other` (also the
   // untapped default) -> neither, and above all NEVER CORRECTION, which would
   // silently drop this depletion out of the LOCKED reorder-demand predicate.
-  const intentMapping = mapDeductionIntent(body.intent);
+  const intentMapping = mapDeductionIntent(shape.intent);
 
   // The order id is UNTRUSTED INPUT on a stock-writing route. It is resolved and
   // membership-checked BEFORE anything is written, so an unverifiable id aborts
@@ -80,19 +96,74 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // the check whenever the intent happened not to be `order` would let a forged
   // id ride through unexamined on its way to being ignored — an id we accept and
   // silently drop is exactly the "not evidence" problem in a quieter costume.
-  // An `order` intent with NO id resolves nothing and stamps nothing; the
-  // operator's statement still lands in the audit event below, never invented.
-  const resolvedOrderId = body.selectedExternalOrderId
-    ? await resolveSelectedExternalOrderId(body.selectedExternalOrderId, user)
+  // An `order` intent with NO id and NO typed reference resolves nothing and
+  // stamps nothing; the operator's statement still lands in the audit event
+  // below, never invented.
+  const idSupplied = shape.selectedExternalOrderId !== undefined;
+  const resolvedOrderId = shape.selectedExternalOrderId
+    ? await resolveSelectedExternalOrderId(shape.selectedExternalOrderId, user)
     : null;
-  const orderRecordId = intentMapping.attributesOrder ? resolvedOrderId : null;
+  const selectedStamp = intentMapping.attributesOrder ? resolvedOrderId : null;
+
+  // REFERENCE RESOLUTION (pack CB3a-ii.3, the delta arm): the order number the
+  // operator TYPED, on a removal under the `order` chip with no order picked.
+  // The truth table admits a reference only under `order`, never beside a
+  // picked id and never on an add, so this condition is the eligibility rule
+  // spelled once for this route. Read OUTSIDE the transaction, like the picked
+  // id above.
+  //
+  // DELIBERATE SECOND COPY of deduct-simple's resolution round: the failure
+  // posture (app/api/inventory/deduct-simple/route.ts — the try/catch, the
+  // redacted log, the swallow) and the resolver -> { kind } mapping below. The
+  // extraction is registered for the hygiene round; no refactor of that
+  // shipped route rides this one.
+  //
+  // Opportunistic enrichment, not the validation of a claim: a named decline
+  // (unusable / unmatched / ambiguous / not-a-member) stamps nothing and the
+  // removal commits; anything THROWN is an ops event — logged by failure class
+  // only, never the typed text (free text is where customer names arrive) —
+  // and the removal still commits, unstamped. A database hiccup never turns a
+  // deduction that succeeds today into a 500.
+  let referenceResolution: OrderReferenceResolution | null = null;
+  let resolverThrew = false;
+  if (
+    shape.intent === "order" &&
+    shape.delta < 0 &&
+    shape.orderReference &&
+    !shape.selectedExternalOrderId
+  ) {
+    try {
+      referenceResolution = await resolveOrderReference(shape.orderReference, user);
+    } catch {
+      console.error(
+        "[adjust] reference resolution failed (infrastructure); deduction proceeds unattributed"
+      );
+      referenceResolution = null;
+      resolverThrew = true;
+    }
+  }
+
+  // What the resolution round did, in the vocabulary the D2 classifier reads.
+  const resolver: AdjustLocals["resolver"] = resolverThrew
+    ? { kind: "threw" }
+    : referenceResolution === null
+      ? { kind: "skipped" }
+      : referenceResolution.outcome === "resolved"
+        ? { kind: "resolved" }
+        : { kind: "declined", outcome: referenceResolution.outcome };
+
+  // The stamp: the picked id, else the resolved order's STORED id — never the
+  // typed text.
+  const orderRecordId =
+    selectedStamp ??
+    (referenceResolution?.outcome === "resolved" ? referenceResolution.orderRecordId : null);
 
   // If removing stock, validate availability
-  if (body.delta < 0) {
+  if (shape.delta < 0) {
     const validation = await validateStockAvailability(
-      body.productId,
-      body.locationId,
-      Math.abs(body.delta)
+      shape.productId,
+      shape.locationId,
+      Math.abs(shape.delta)
     );
 
     if (!validation.isValid) {
@@ -102,10 +173,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
 
   // Get product info for the change record
   const product = await prisma.product.findUnique({
-    where: { id: body.productId },
+    where: { id: shape.productId },
     select: { name: true },
   });
-  const productName = product?.name ?? `Product ${body.productId}`;
+  const productName = product?.name ?? `Product ${shape.productId}`;
 
   // One batch id per request flow; recorded inside the adjustment's transaction.
   const batchId = newBatchId();
@@ -117,12 +188,15 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // INVENTORY_ADJUSTMENT.
   const result = await createInventoryAdjustment(
     user.id,
-    body.productId,
-    body.locationId,
-    body.delta,
+    shape.productId,
+    shape.locationId,
+    shape.delta,
     {
-      logType: body.logType || inventory_logs_logType.ADJUSTMENT,
-      expectedVersion: body.expectedVersion,
+      // Always the literal: a request's `logType` is IGNORED (pack CB3a-ii.3).
+      // The schema only ever admitted ADJUSTMENT, and the server decides what
+      // it writes.
+      logType: inventory_logs_logType.ADJUSTMENT,
+      expectedVersion: shape.expectedVersion,
       // Phase C (P-C5/P-C1): the coded reason rides onto the ledger row; the same
       // batchId stamps the row so it joins the audit event; the free-text reason /
       // notes ride onto the audit event details (below).
@@ -151,31 +225,37 @@ export const POST = apiHandler(async (request: NextRequest) => {
             ? "INVENTORY_TRANSFER_AUTO_ADD"
             : "INVENTORY_ADJUSTMENT",
           entityType: "INVENTORY",
-          entityId: body.productId,
+          entityId: shape.productId,
           action: autoAddForTransfer
-            ? `Auto-added ${body.delta} units of "${productName}" at location ${body.locationId} to complete a transfer`
-            : `Adjusted inventory for "${productName}" by ${body.delta > 0 ? "+" : ""}${body.delta}`,
+            ? `Auto-added ${shape.delta} units of "${productName}" at location ${shape.locationId} to complete a transfer`
+            : `Adjusted inventory for "${productName}" by ${shape.delta > 0 ? "+" : ""}${shape.delta}`,
           // Phase C (P-C5): persist the operator's own words when supplied — zod
           // used to strip these. Included only when present so no-reason callers
           // (transfer auto-add, workbench undo, journal) keep their lean details.
           details: {
             ...(autoAddForTransfer
               ? {
-                  productId: body.productId,
+                  productId: shape.productId,
                   productName,
-                  delta: body.delta,
-                  locationId: body.locationId,
+                  delta: shape.delta,
+                  locationId: shape.locationId,
                 }
-              : { productName, delta: body.delta, locationId: body.locationId }),
-            ...(body.reason ? { reason: body.reason } : {}),
-            ...(body.notes ? { notes: body.notes } : {}),
+              : { productName, delta: shape.delta, locationId: shape.locationId }),
+            ...(shape.reason ? { reason: shape.reason } : {}),
+            ...(shape.notes ? { notes: shape.notes } : {}),
             // W2-1: the operator's own statement, accrued verbatim. Included
             // ONLY when the chip was actually tapped — truthful-data north star:
             // an untapped chip is a structurally-absent key, never a null one,
             // because a null would be counted as a classification that happened.
             // This is also what keeps `order`-with-no-id from being a silent
             // no-op: the intent survives even when there is nothing to stamp.
-            ...(body.intent ? { intent: body.intent } : {}),
+            ...(shape.intent ? { intent: shape.intent } : {}),
+            // Reconciliation Part 2 (pack CB3a-i.3): the order number the
+            // operator TYPED, accrued verbatim whatever the resolver made of it
+            // — resolved, declined, or failed — as deduct-simple accrues its
+            // own. ABSENT when nothing was typed. It goes on this EVENT only:
+            // the attempt row's details are a closed set and never carry it.
+            ...(shape.orderReference ? { orderReference: shape.orderReference } : {}),
           },
           batchId,
         });
@@ -185,19 +265,23 @@ export const POST = apiHandler(async (request: NextRequest) => {
         // a transfer auto-add completes a move; neither had an attribution
         // question to answer, and recording "we could not attribute it" for them
         // would populate the report with movements that never asked.
-        if (body.delta < 0 && !autoAddForTransfer) {
+        if (shape.delta < 0 && !autoAddForTransfer) {
           await recordAttributionAttempt(tx, {
             ...classifyAdjust({
-              stamped: orderRecordId !== null,
-              idSupplied: body.selectedExternalOrderId !== undefined,
-              intent: body.intent,
+              // The SELECTED stamp only; a reference-resolved stamp is the
+              // resolver's row (3b), not row 1.
+              stamped: idSupplied && orderRecordId !== null,
+              idSupplied,
+              intent: shape.intent,
+              referenceTyped: shape.orderReference !== undefined,
+              resolver,
             }),
             batchId,
             ledgerRowId: log.id,
             source: "live-adjust",
             actorUserId: user.id,
             orderRecordId,
-            ...(body.intent ? { details: { intent: body.intent } } : {}),
+            ...(shape.intent ? { details: { intent: shape.intent } } : {}),
           });
         }
       },

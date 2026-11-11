@@ -38,11 +38,20 @@ jest.mock("@/lib/rateLimit", () => ({
 // jest's hoist plugin allows out-of-scope bindings whose names begin with
 // `mock`, so this keeps the file free of the require() the lint profile forbids.
 jest.mock("@/lib/prisma", () => ({ __esModule: true, default: mockDeep() }));
+// Reconciliation Part 2 (P2-B3-1): the T7 mapper is WRAPPED, never replaced —
+// every route here still maps through the real table — so the wire-refusal
+// pins can prove a refused `count` / `correction` never reaches it.
+jest.mock("@/lib/inventory/intent", () => {
+  const actual =
+    jest.requireActual<typeof import("@/lib/inventory/intent")>("@/lib/inventory/intent");
+  return { ...actual, mapDeductionIntent: jest.fn(actual.mapDeductionIntent) };
+});
 
 import { NextRequest } from "next/server";
 import prisma from "@/lib/prisma";
 import { requireApproved, requireCompanyMembership, requireCSRF } from "@/lib/api-utils";
 import { AppError } from "@/lib/error-handling";
+import { mapDeductionIntent } from "@/lib/inventory/intent";
 import { SimpleDeductSchema } from "@/lib/validation/workbench";
 import { AdjustWithIntentSchema } from "@/lib/validation/inventory";
 import { isReorderDemandRow, shrinkageReasonOf } from "@/lib/reports/metrics-contract";
@@ -52,6 +61,16 @@ import { POST as DEDUCT } from "@/app/api/inventory/deduct-simple/route";
 const db = prisma as unknown as DeepMockProxy<typeof prisma>;
 const ORDER_CUID = "cmdq7f3k80001s6h4p2n9wxyz";
 const COMPANY_ID = "company-abc";
+
+/**
+ * The adjust route behind the REAL `apiHandler` — what an API caller actually
+ * receives. The mock above makes `apiHandler` a pass-through so most pins can
+ * read the thrown error; the wire pins need the 400 body the wrapper renders
+ * (`{ error, code: 'VALIDATION_ERROR' }`, lib/api-utils.ts).
+ */
+const ADJUST_WIRE = jest
+  .requireActual<typeof import("@/lib/api-utils")>("@/lib/api-utils")
+  .apiHandler(ADJUST);
 
 /**
  * getShrinkageSummary's `domain` (lib/analytics/queries.ts): the logTypes the
@@ -627,8 +646,11 @@ describe("AdjustWithIntentSchema — the chip is optional and closed-vocabulary"
     expect(AdjustWithIntentSchema.safeParse(base).success).toBe(true);
   });
 
-  it("accepts exactly the three chip values", () => {
-    for (const intent of ["order", "damage-loss", "other"]) {
+  it("the SCHEMA accepts the three chip values and the two request-only intents, nothing else", () => {
+    // `count` / `correction` PARSE here (P2-B3-1). The schema accepting them is
+    // not the ROUTE accepting them: the request truth table and the route's
+    // guard decide that (the wire pins below; adjust-shape.test.ts).
+    for (const intent of ["order", "damage-loss", "other", "count", "correction"]) {
       expect(AdjustWithIntentSchema.safeParse({ ...base, intent }).success).toBe(true);
     }
     expect(AdjustWithIntentSchema.safeParse({ ...base, intent: "recount" }).success).toBe(false);
@@ -704,6 +726,78 @@ describe("adjust route — the order lock rides the primitive's hook", () => {
     );
   });
 
+  // Reconciliation Part 2 (pack CB3a-ii.3): the NEW stamp source. The typed
+  // number is resolved OUTSIDE the transaction; what the lock asks for is the
+  // order's STORED id the resolver returned, never the text the operator typed.
+  it("REFERENCE-RESOLVED: the lock SELECT is statement 1, asked with the RESOLVED stored id", async () => {
+    db.externalOrder.findMany.mockResolvedValue([
+      { id: ORDER_CUID, orderNumber: "12345", companyId: COMPANY_ID },
+    ] as any);
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    const res = await ADJUST(
+      post("http://x/api/inventory/adjust", {
+        productId: 5,
+        locationId: 2,
+        delta: -3,
+        intent: "order",
+        orderReference: "12345",
+      })
+    );
+    expect(res.status).toBe(200);
+
+    expect(isOrderLockSelect(rawCalls[0].sql)).toBe(true);
+    expect((rawFns.$queryRaw.mock.calls[0][0] as any).values).toEqual([ORDER_CUID]);
+    expect((rawFns.$queryRaw.mock.calls[0][0] as any).values).not.toContain("12345");
+    // ...before the prelock, which is before the ledger write.
+    expect(rawCalls[1].sql).toContain("INSERT INTO product_locations");
+    expect(rawFns.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(
+      tx.inventory_logs.create.mock.invocationCallOrder[0]
+    );
+    // The resolution itself was read OUTSIDE the transaction, before it opened.
+    expect(db.externalOrder.findMany.mock.invocationCallOrder[0]).toBeLessThan(
+      (db.$transaction as unknown as jest.Mock).mock.invocationCallOrder[0]
+    );
+    expect((tx.inventory_logs.create.mock.calls[0][0].data as any).orderRecordId).toBe(ORDER_CUID);
+  });
+
+  it("ORDER_GONE: the resolved order vanished before the lock -> 409, and nothing is written", async () => {
+    db.externalOrder.findMany.mockResolvedValue([
+      { id: ORDER_CUID, orderNumber: "12345", companyId: COMPANY_ID },
+    ] as any);
+    const tx = makeTx();
+    // The order existed when the reference was resolved and is gone when the
+    // lock reads it: the lock finds no row for a REQUIRED id.
+    rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) => {
+      const sql = sqlTextOf(args[0]);
+      if (isOrderLockSelect(sql)) return [];
+      return isPrelockSelect(sql) ? STOCKED : [];
+    });
+    driveTxWith(tx);
+
+    await expect(
+      ADJUST(
+        post("http://x/api/inventory/adjust", {
+          productId: 5,
+          locationId: 2,
+          delta: -3,
+          intent: "order",
+          orderReference: "12345",
+        })
+      )
+    ).rejects.toMatchObject({ code: "ORDER_GONE", statusCode: 409 });
+
+    // The lock was the transaction's ONE statement: no prelock, no ledger row,
+    // no stock write, no audit event, no attempt row.
+    expect(rawCalls).toHaveLength(1);
+    expect(isOrderLockSelect(rawCalls[0].sql)).toBe(true);
+    expect(tx.inventory_logs.create).not.toHaveBeenCalled();
+    expect(tx.product_locations.upsert).not.toHaveBeenCalled();
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
+    expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();
+  });
+
   it("UNSTAMPED: no order, no lock — the prelock is the first statement", async () => {
     const tx = makeTx();
     driveTxWith(tx);
@@ -734,5 +828,386 @@ describe("adjust route — the order lock rides the primitive's hook", () => {
     expect(typeof body.batchId).toBe("string");
     expect((tx.inventory_logs.create.mock.calls[0][0].data as any).batchId).toBe(body.batchId);
     expect((tx.auditLog.create.mock.calls[0][0] as any).data.batchId).toBe(body.batchId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reconciliation Part 2 — P2-B3-1 (pack CB3a-i.3 + CB3a-ii.3, the delta arm):
+// THE TYPED REFERENCE on the adjust surface, over EVERY resolver outcome.
+//
+// Under the `order` chip a removal may carry the order number the operator
+// TYPED. The route resolves it OUTSIDE the transaction with deduct-simple's
+// posture: a named decline stamps nothing, a thrown lookup stamps nothing, and
+// in every case the removal COMMITS (200) — the deduction was legal before the
+// field existed and it stays legal. Each outcome records its own class; the
+// typed text rides on the audit EVENT and never on the attempt row.
+// ---------------------------------------------------------------------------
+
+describe("adjust route — the typed reference, every resolver outcome", () => {
+  const REF = "12345";
+  const ORDER_B = "cmdq7f3k80099s6h4p2n9zzzz";
+  const FOREIGN_COMPANY = "company-other";
+
+  type ResolverCase = {
+    name: string;
+    body: Record<string, unknown>;
+    arrange: () => void;
+    outcome: "attributed" | "declined" | "none";
+    evidence: string | null;
+    reason: string | null;
+    stamp: string | null;
+    /** The `details.orderReference` the event must carry — absent when undefined. */
+    typed: string | undefined;
+    /** Whether the reference lookup may run at all. */
+    looksUp: boolean;
+  };
+
+  const CASES: ResolverCase[] = [
+    {
+      name: "skipped (the order chip, nothing typed) -> none/order-intent-no-id, unstamped",
+      body: { intent: "order" },
+      arrange: () => {},
+      outcome: "none",
+      evidence: null,
+      reason: "order-intent-no-id",
+      stamp: null,
+      typed: undefined,
+      looksUp: false,
+    },
+    {
+      name: "threw (the lookup's infrastructure failed) -> declined/resolver-error, unstamped, still 200",
+      body: { intent: "order", orderReference: REF },
+      arrange: () => {
+        db.externalOrder.findMany.mockRejectedValue(new Error(`connection lost ${REF}`));
+      },
+      outcome: "declined",
+      evidence: null,
+      reason: "resolver-error",
+      stamp: null,
+      typed: REF,
+      looksUp: true,
+    },
+    {
+      name: "resolved (one order the operator may see) -> attributed/reference-resolved, stamped",
+      body: { intent: "order", orderReference: REF },
+      arrange: () => {
+        db.externalOrder.findMany.mockResolvedValue([
+          { id: ORDER_CUID, orderNumber: REF, companyId: COMPANY_ID },
+        ] as any);
+      },
+      outcome: "attributed",
+      evidence: "reference-resolved",
+      reason: null,
+      stamp: ORDER_CUID,
+      typed: REF,
+      looksUp: true,
+    },
+    {
+      name: "unusable (not an order number) -> declined/unusable, never reaches the database",
+      body: { intent: "order", orderReference: "walk-in 88" },
+      arrange: () => {},
+      outcome: "declined",
+      evidence: null,
+      reason: "unusable",
+      stamp: null,
+      typed: "walk-in 88",
+      looksUp: false,
+    },
+    {
+      name: "unmatched (no order has that number) -> declined/unmatched",
+      body: { intent: "order", orderReference: "99999" },
+      arrange: () => {
+        db.externalOrder.findMany.mockResolvedValue([] as any);
+      },
+      outcome: "declined",
+      evidence: null,
+      reason: "unmatched",
+      stamp: null,
+      typed: "99999",
+      looksUp: true,
+    },
+    {
+      name: "ambiguous (two orders share the number) -> declined/ambiguous",
+      body: { intent: "order", orderReference: REF },
+      arrange: () => {
+        db.externalOrder.findMany.mockResolvedValue([
+          { id: ORDER_CUID, orderNumber: REF, companyId: COMPANY_ID },
+          { id: ORDER_B, orderNumber: REF, companyId: FOREIGN_COMPANY },
+        ] as any);
+      },
+      outcome: "declined",
+      evidence: null,
+      reason: "ambiguous",
+      stamp: null,
+      typed: REF,
+      looksUp: true,
+    },
+    {
+      name: "not-a-member (the one order is another company's) -> declined/not-a-member",
+      body: { intent: "order", orderReference: REF },
+      arrange: () => {
+        db.externalOrder.findMany.mockResolvedValue([
+          { id: ORDER_B, orderNumber: REF, companyId: FOREIGN_COMPANY },
+        ] as any);
+        (requireCompanyMembership as jest.Mock).mockRejectedValue(
+          new AppError("Resource not found", "NOT_FOUND", 404)
+        );
+      },
+      outcome: "declined",
+      evidence: null,
+      reason: "not-a-member",
+      stamp: null,
+      typed: REF,
+      looksUp: true,
+    },
+    {
+      name: "selected (a picked order) -> attributed/selected, stamped, the resolver never runs",
+      body: { intent: "order", selectedExternalOrderId: ORDER_CUID },
+      arrange: () => {
+        db.externalOrder.findUnique.mockResolvedValue({ companyId: COMPANY_ID } as any);
+      },
+      outcome: "attributed",
+      evidence: "selected",
+      reason: null,
+      stamp: ORDER_CUID,
+      typed: undefined,
+      looksUp: false,
+    },
+  ];
+
+  let consoleError: jest.SpyInstance;
+  beforeEach(() => {
+    // The `threw` case logs its redacted ops line; keep the run quiet and
+    // readable by the redaction pin below.
+    consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleError.mockRestore();
+  });
+
+  it.each(CASES)("$name", async (c) => {
+    c.arrange();
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    const res = await ADJUST(
+      post("http://x/api/inventory/adjust", { productId: 5, locationId: 2, delta: -3, ...c.body })
+    );
+
+    // The removal COMMITS in every case — including when the lookup threw.
+    expect(res.status).toBe(200);
+    expect(tx.inventory_logs.create).toHaveBeenCalledTimes(1);
+
+    // The ledger write carries the stamp: the picked or the resolved STORED id.
+    const row = tx.inventory_logs.create.mock.calls[0][0].data as unknown as LedgerRowData;
+    expect(row.orderRecordId ?? null).toBe(c.stamp);
+    expect(row.logType).toBe("ADJUSTMENT");
+
+    // The typed text is accrued on the audit EVENT, whatever became of it.
+    const event = tx.auditLog.create.mock.calls[0][0].data as any;
+    expect(event.actionType).toBe("INVENTORY_ADJUSTMENT");
+    if (c.typed === undefined) {
+      expect("orderReference" in event.details).toBe(false);
+    } else {
+      expect(event.details.orderReference).toBe(c.typed);
+    }
+    expect(event.details.intent).toBe("order");
+
+    // The attempt row: its class, its stamp — and never the typed text.
+    expect(tx.orderAttributionAttempt.create).toHaveBeenCalledTimes(1);
+    const attempt = (tx.orderAttributionAttempt.create.mock.calls[0][0] as any).data;
+    expect(attempt).toEqual({
+      batchId: expect.any(String),
+      ledgerRowId: 555,
+      outcome: c.outcome,
+      evidence: c.evidence,
+      reason: c.reason,
+      orderRecordId: c.stamp,
+      previousOrderRecordId: null,
+      source: "live-adjust",
+      actorUserId: 7,
+      details: { intent: "order" },
+    });
+    if (c.typed !== undefined) expect(JSON.stringify(attempt)).not.toContain(c.typed);
+
+    // A declined order is never named back: not on the event, not on the attempt.
+    if (c.stamp === null) {
+      expect(JSON.stringify(event)).not.toContain(ORDER_B);
+      expect(JSON.stringify(event)).not.toContain(FOREIGN_COMPANY);
+    }
+
+    if (!c.looksUp) expect(db.externalOrder.findMany).not.toHaveBeenCalled();
+  });
+
+  it("threw: the redacted ops line names the failure class, never the typed text", async () => {
+    db.externalOrder.findMany.mockRejectedValue(new Error(`boom ${REF} boom`));
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    const res = await ADJUST(
+      post("http://x/api/inventory/adjust", {
+        productId: 5,
+        locationId: 2,
+        delta: -3,
+        intent: "order",
+        orderReference: REF,
+      })
+    );
+    expect(res.status).toBe(200);
+
+    const logged = consoleError.mock.calls.map((call) => call.join(" ")).join("\n");
+    expect(logged).toContain("reference resolution");
+    expect(logged).not.toContain(REF);
+  });
+
+  it("not-a-member: the membership probe is asked of the RESOLVED order's company", async () => {
+    db.externalOrder.findMany.mockResolvedValue([
+      { id: ORDER_CUID, orderNumber: REF, companyId: COMPANY_ID },
+    ] as any);
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    await ADJUST(
+      post("http://x/api/inventory/adjust", {
+        productId: 5,
+        locationId: 2,
+        delta: -3,
+        intent: "order",
+        orderReference: `  ${REF}  `,
+      })
+    );
+
+    // Trimmed at the parse, looked up by the trimmed value, probed against
+    // the company the database returned — never a company the caller named.
+    expect(db.externalOrder.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { orderNumber: REF } })
+    );
+    expect(requireCompanyMembership).toHaveBeenCalledWith(7, COMPANY_ID, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P2-B3-1 (pack CB3a-i.2/.4): what the request truth table and the route's
+// guard refuse, as an API caller receives it — one 400, the frozen sentence,
+// `code: 'VALIDATION_ERROR'`, and nothing read past the parse or written.
+// ---------------------------------------------------------------------------
+
+describe("adjust route — the request truth table and the guard, on the wire", () => {
+  function expectNothingWritten(tx: ReturnType<typeof makeTx>) {
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(tx.inventory_logs.create).not.toHaveBeenCalled();
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
+    expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();
+    // Nothing past the parse ran: no order resolved, no stock checked.
+    expect(db.externalOrder.findUnique).not.toHaveBeenCalled();
+    expect(db.externalOrder.findMany).not.toHaveBeenCalled();
+    expect(db.product_locations.findUnique).not.toHaveBeenCalled();
+  }
+
+  it.each([
+    [
+      "a VALID count",
+      { productId: 5, locationId: 2, intent: "count", countedQuantity: 7, expectedVersion: 1 },
+    ],
+    [
+      "a VALID correction",
+      {
+        productId: 5,
+        locationId: 2,
+        intent: "correction",
+        delta: 2,
+        reversesBatchId: "3F2504E0-4F89-41D3-9A0C-0305E82C3301",
+        reason: "put back",
+      },
+    ],
+  ])(
+    "%s body -> 400 'this intent is not available yet', never mapped, nothing written",
+    async (_label, body) => {
+      const tx = makeTx();
+      driveTxWith(tx);
+
+      const res = await ADJUST_WIRE(post("http://x/api/inventory/adjust", body));
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: "this intent is not available yet",
+        code: "VALIDATION_ERROR",
+      });
+      // The T7 mapper never saw it: no half-state in which a count books an
+      // ADJUSTMENT row through the old path.
+      expect(mapDeductionIntent).not.toHaveBeenCalled();
+      expectNothingWritten(tx);
+    }
+  );
+
+  it("an API-sent POSITIVE delta with a typed reference -> 400 with its sentence", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    const res = await ADJUST_WIRE(
+      post("http://x/api/inventory/adjust", {
+        productId: 5,
+        locationId: 2,
+        delta: 3,
+        intent: "order",
+        orderReference: "12345",
+      })
+    );
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "a reference attributes stock that left — put stock back with a correction",
+      code: "VALIDATION_ERROR",
+    });
+    expectNothingWritten(tx);
+  });
+
+  it("a picked id AND a typed reference -> 400, and no event is written", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    const res = await ADJUST_WIRE(
+      post("http://x/api/inventory/adjust", {
+        productId: 5,
+        locationId: 2,
+        delta: -3,
+        intent: "order",
+        selectedExternalOrderId: ORDER_CUID,
+        orderReference: "12345",
+      })
+    );
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "pick the order or type the reference, not both",
+      code: "VALIDATION_ERROR",
+    });
+    expectNothingWritten(tx);
+  });
+
+  it("body.logType is IGNORED: the ledger row is the literal ADJUSTMENT", async () => {
+    const sent = await adjustRow({ intent: "other", logType: "ADJUSTMENT" });
+    expect(sent.row.logType).toBe("ADJUSTMENT");
+
+    const absent = await adjustRow({ intent: "other" });
+    expect(absent.row.logType).toBe("ADJUSTMENT");
+  });
+
+  it("a forged logType still never reaches the route (the schema's literal pin)", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    const res = await ADJUST_WIRE(
+      post("http://x/api/inventory/adjust", {
+        productId: 5,
+        locationId: 2,
+        delta: -3,
+        logType: "CORRECTION",
+      })
+    );
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_ERROR");
+    expectNothingWritten(tx);
   });
 });

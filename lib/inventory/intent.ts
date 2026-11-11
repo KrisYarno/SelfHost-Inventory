@@ -31,6 +31,15 @@
  * only loss-reporting surface never looks. Not offering the choice is more
  * honest than accepting it into a blind spot.
  *
+ * THE ADJUST ROUTE'S WIRE VOCABULARY IS WIDER THAN THE CHIP'S (reconciliation
+ * Part 2, pack CB3a-i.1). `ADJUST_REQUEST_INTENTS` adds two REQUEST-ONLY
+ * intents, `count` and `correction`. They are modes above the chip, never chip
+ * values, so they are absent from the table above and from `INTENT_MAPPING`.
+ * Today both are parsed (the adjust request's full truth table runs —
+ * `parseAdjustShape`, lib/validation/inventory.ts) and refused as not
+ * available yet. `DEDUCTION_INTENTS` stays the chip's three values, which is
+ * why `mapDeductionIntent('count')` cannot compile.
+ *
  * Pure: no React, no Next, no Prisma. The ROUTES are where the mapping is
  * pinned (pack T7); this module exists so the two surfaces cannot each invent
  * their own version of the table, not to be the place the contract is proven.
@@ -39,6 +48,14 @@
 /** The chip's full vocabulary — every value any surface may offer. */
 export const DEDUCTION_INTENTS = ["order", "damage-loss", "other"] as const;
 export type DeductionIntent = (typeof DEDUCTION_INTENTS)[number];
+
+/**
+ * The adjust ROUTE's request vocabulary: the chip's three values plus the two
+ * request-only intents (see the header). Read by the adjust request schema
+ * only — no surface offers `count` or `correction` as a chip value.
+ */
+export const ADJUST_REQUEST_INTENTS = [...DEDUCTION_INTENTS, "count", "correction"] as const;
+export type AdjustRequestIntent = (typeof ADJUST_REQUEST_INTENTS)[number];
 
 /**
  * What the workbench's manual leg may offer: `damage-loss` is absent BY

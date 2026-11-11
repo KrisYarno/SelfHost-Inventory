@@ -99,6 +99,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
   }
 
   // What the resolution round did, in the vocabulary the D2 classifier reads.
+  //
+  // The adjust route (app/api/inventory/adjust/route.ts) carries a DELIBERATE
+  // second copy of this round — the failure posture above and this mapping.
+  // The extraction is registered for the hygiene round; change both or neither.
   const resolver: DeductSimpleLocals["resolver"] = resolverThrew
     ? { kind: "threw" }
     : referenceResolution === null

@@ -82,7 +82,7 @@ export const DERIVED_SENTENCES: Readonly<Record<DerivedRuleId, string>> = Object
   R4: 'the operator said this was not an order',
   R5: 'a reference was typed and nothing recorded whether it matched',
   R6: 'the operator said order, but no order was identified',
-  R7: 'unknown — before the lane',
+  R7: 'unknown — before recording began',
 });
 
 /**

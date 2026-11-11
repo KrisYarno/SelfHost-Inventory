@@ -373,7 +373,7 @@ const REDACTED_REASON = 'order belongs to a company you are not a member of';
 
 /** The standing disclosure R0 cannot make for itself (pack amendment 3c). */
 const R0_INVISIBLE_NOTE =
-  'a pre-0b-1 mass update whose summary event was never written is invisible to R0 and appears here as an unknown-class batch with a large row count';
+  'an older mass update whose summary event was never written is invisible to R0 and appears here as an unknown-class batch with a large row count';
 
 const NO_MEMBER_ORDER_NOTE = 'no order matching that number in your companies';
 
@@ -393,9 +393,9 @@ const DEFINITIONS: Readonly<Record<string, string>> = Object.freeze({
   noBatchRows:
     'outbound rows in the window carrying no batch id (before 2026-07-10) — they cannot be grouped, so they are outside this report',
   historicalMassUpdate:
-    'population batches excluded by R0 — pre-0b-1 mass-update sessions that wrote their rows under one batch id',
+    'population batches excluded by R0 — older mass-update sessions that wrote their rows under one batch id',
   derived:
-    'computed at read time because no attempt row exists — before the lane, or a path that did not record',
+    'computed at read time because no attempt row exists — before recording began, or a path that did not record',
   derivedShare:
     'the share of the attributable batches in this window whose class was derived rather than recorded',
   moreCount:

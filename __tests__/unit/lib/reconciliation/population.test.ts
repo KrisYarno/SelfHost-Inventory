@@ -53,7 +53,7 @@ describe('ATTRIBUTABLE_PREDICATE — the one home', () => {
 
   it('carries the definition string verbatim (it rides to the report header)', () => {
     expect(ATTRIBUTABLE_DEFINITION).toBe(
-      'a SUBSET of physical outbound (isPhysicalOutboundRow in metrics-contract includes COUNT/CORRECTION; this population is SALE/ADJUSTMENT deducts with a batch id), grouped by batchId, minus pre-0b-1 mass-update sessions (R0)'
+      'a SUBSET of physical outbound (isPhysicalOutboundRow in metrics-contract includes COUNT/CORRECTION; this population is SALE/ADJUSTMENT deducts with a batch id), grouped by batchId, minus older mass-update sessions (R0)'
     );
   });
 });

@@ -44,11 +44,24 @@ export type DeductSimpleLocals = {
     | { kind: 'declined'; outcome: 'unusable' | 'unmatched' | 'ambiguous' | 'not-a-member' };
 };
 
+/**
+ * The adjust route's own locals (reconciliation Part 2, pack CB3a-i.3 — the
+ * route reads them off its parsed `shape`, the delta arm).
+ */
 export type AdjustLocals = {
-  /** `orderRecordId !== null` — id validated AND `intent === 'order'`. */
+  /**
+   * `idSupplied && orderRecordId !== null` — the SELECTED stamp: a picked id,
+   * validated, under `intent === 'order'`. A stamp from a RESOLVED reference
+   * is not this; it is the resolver's row.
+   */
   stamped: boolean;
+  /** `shape.selectedExternalOrderId !== undefined`. */
   idSupplied: boolean;
   intent: 'order' | 'damage-loss' | 'other' | undefined;
+  /** `shape.orderReference !== undefined` (post-zod: trimmed and non-empty). */
+  referenceTyped: boolean;
+  /** What the reference-resolution round did — the same shape as deduct-simple's. */
+  resolver: DeductSimpleLocals['resolver'];
 };
 
 /** D2's deduct-simple table: 8 rows, evaluated in this order. */
@@ -97,13 +110,20 @@ export function classifyDeductSimple(l: DeductSimpleLocals): AttemptClass {
 }
 
 /**
- * D2's adjust table: 5 rows, total. The ROUTE decides whether to call at all —
- * one attempt row iff `body.delta < 0 && !autoAddForTransfer`, because a
- * positive adjust and a transfer auto-add move nothing out and have nothing to
- * attribute.
+ * D2's adjust table: rows 1, 2, 3a-3c, 3, 4, 5 — total. The ROUTE decides
+ * whether to call at all — one attempt row iff `shape.delta < 0 &&
+ * !autoAddForTransfer`, because a positive adjust and a transfer auto-add move
+ * nothing out and have nothing to attribute.
+ *
+ * Rows 3a-3c (reconciliation Part 2, pack CB3a-i.3) are the reference
+ * resolver's, with the spellings deduct-simple uses. They are a FALL-THROUGH
+ * guard: a skipped resolver passes them by. The route runs the resolver only
+ * under an `order` chip, with no picked id and a typed reference, so they are
+ * reached only there.
  */
 export function classifyAdjust(l: AdjustLocals): AttemptClass {
-  // 1. The ledger was stamped (id validated AND `intent='order'`).
+  // 1. The ledger was stamped from the SELECTION (id validated AND
+  //    `intent='order'`).
   if (l.stamped) return { outcome: 'attributed', evidence: 'selected' };
 
   // 2. An id supplied but not stamped, with a stated non-order intent. (An id
@@ -113,8 +133,21 @@ export function classifyAdjust(l: AdjustLocals): AttemptClass {
     return { outcome: 'none', reason: 'explicit-non-order-intent' };
   }
 
-  // 3. "This went out against an order" with no order named.
-  if (l.intent === 'order' && !l.idSupplied) {
+  // 3a. The lookup's infrastructure failed. The route swallows that so the
+  //     deduction still commits; this row is where the swallow becomes visible.
+  if (l.resolver.kind === 'threw') return { outcome: 'declined', reason: 'resolver-error' };
+
+  // 3b. The typed number named exactly one order the operator may see.
+  if (l.resolver.kind === 'resolved') {
+    return { outcome: 'attributed', evidence: 'reference-resolved' };
+  }
+
+  // 3c. A named decline, carried through verbatim.
+  if (l.resolver.kind === 'declined') return { outcome: 'declined', reason: l.resolver.outcome };
+
+  // 3. "This went out against an order" with no order named — nothing picked
+  //    and nothing typed.
+  if (l.intent === 'order' && !l.idSupplied && !l.referenceTyped) {
     return { outcome: 'none', reason: 'order-intent-no-id' };
   }
 
@@ -124,9 +157,11 @@ export function classifyAdjust(l: AdjustLocals): AttemptClass {
   }
 
   // 5. The chip was never tapped, whatever the id state. This is also where the
-  //    one unreachable shape would land (`order` + an id + no stamp, refused
-  //    with a 400 before the transaction opens) — recording "no order context"
-  //    for it is the truthful reading, so unlike deduct-simple there is nothing
-  //    here worth throwing over.
+  //    two unreachable shapes would land (`order` + an id + no stamp, refused
+  //    with a 400 before the transaction opens; `order` + a typed reference + a
+  //    skipped resolver, which the route never produces because it always
+  //    resolves that reference) — recording "no order context" for them is
+  //    the truthful reading, so unlike deduct-simple there is nothing here
+  //    worth throwing over.
   return { outcome: 'none', reason: 'no-order-context' };
 }

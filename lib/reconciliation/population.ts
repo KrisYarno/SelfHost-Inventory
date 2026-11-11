@@ -72,7 +72,7 @@ export const ATTRIBUTABLE_PREDICATE = Object.freeze({
  * (truthful-data north star: a rate without its definition is a rumour).
  */
 export const ATTRIBUTABLE_DEFINITION =
-  'a SUBSET of physical outbound (isPhysicalOutboundRow in metrics-contract includes COUNT/CORRECTION; this population is SALE/ADJUSTMENT deducts with a batch id), grouped by batchId, minus pre-0b-1 mass-update sessions (R0)';
+  'a SUBSET of physical outbound (isPhysicalOutboundRow in metrics-contract includes COUNT/CORRECTION; this population is SALE/ADJUSTMENT deducts with a batch id), grouped by batchId, minus older mass-update sessions (R0)';
 
 /** A bare SQL identifier — the alias is interpolated RAW, so it is checked. */
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;

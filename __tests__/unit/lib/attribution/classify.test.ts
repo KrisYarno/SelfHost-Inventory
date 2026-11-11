@@ -38,7 +38,14 @@ function deduct(over: Partial<DeductSimpleLocals> = {}): DeductSimpleLocals {
 }
 
 function adjust(over: Partial<AdjustLocals> = {}): AdjustLocals {
-  return { stamped: false, idSupplied: false, intent: undefined, ...over };
+  return {
+    stamped: false,
+    idSupplied: false,
+    intent: undefined,
+    referenceTyped: false,
+    resolver: { kind: 'skipped' },
+    ...over,
+  };
 }
 
 describe('classifyDeductSimple — D2 rows 1-8, in order', () => {
@@ -121,7 +128,7 @@ describe('classifyDeductSimple — D2 rows 1-8, in order', () => {
   });
 });
 
-describe('classifyAdjust — D2 rows 1-5, in order', () => {
+describe('classifyAdjust — D2 rows 1-5 and the resolver rows 3a-3c, in order', () => {
   it('row 1: the ledger was STAMPED -> attributed/selected', () => {
     expect(classifyAdjust(adjust({ stamped: true, idSupplied: true, intent: 'order' }))).toEqual({
       outcome: 'attributed',
@@ -135,6 +142,34 @@ describe('classifyAdjust — D2 rows 1-5, in order', () => {
         outcome: 'none',
         reason: 'explicit-non-order-intent',
       });
+    }
+  });
+
+  // Reconciliation Part 2 (pack CB3a-i.3): the adjust route resolves a TYPED
+  // order number under the `order` chip (no picked id), so the resolver's rows
+  // sit BEFORE row 3 — otherwise every typed reference would land on
+  // `order-intent-no-id`, a class that says nothing was named.
+  it('row 3a: the resolver THREW -> declined/resolver-error (before row 3)', () => {
+    expect(
+      classifyAdjust(adjust({ intent: 'order', referenceTyped: true, resolver: { kind: 'threw' } })),
+    ).toEqual({ outcome: 'declined', reason: 'resolver-error' });
+  });
+
+  it('row 3b: the resolver RESOLVED -> attributed/reference-resolved (before row 3)', () => {
+    // NOT `selected`: `stamped` is the SELECTED stamp only, so a resolved
+    // reference never reaches row 1.
+    expect(
+      classifyAdjust(adjust({ intent: 'order', referenceTyped: true, resolver: { kind: 'resolved' } })),
+    ).toEqual({ outcome: 'attributed', evidence: 'reference-resolved' });
+  });
+
+  it('row 3c: the resolver DECLINED -> declined/<its own class> (before row 3)', () => {
+    for (const outcome of ['unusable', 'unmatched', 'ambiguous', 'not-a-member'] as const) {
+      expect(
+        classifyAdjust(
+          adjust({ intent: 'order', referenceTyped: true, resolver: { kind: 'declined', outcome } }),
+        ),
+      ).toEqual({ outcome: 'declined', reason: outcome });
     }
   });
 

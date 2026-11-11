@@ -2082,18 +2082,16 @@ describe("C2 envelope pins (contract pack T0 — requestSchema)", () => {
 // every serialized GATE-FIXTURE payload: a benign pass over the whole matrix, plus a
 // seeded pass that makes the data-dependent notes (the unclassified-outbound note rides
 // only when a reason-less outbound row exists) and the location-resolved branches appear.
-// The only exemptions are the two reconciliation sentences B3 owns (shared with the
-// reconciliation pages), by exact string.
+// There are NO exemptions: the two reconciliation sentences B3 owned (shared with the
+// reconciliation pages) were reworded in P2-B3-1, and the list stays as the seam a
+// future registered string would use, by exact string.
 // ---------------------------------------------------------------------------
 
 describe("A2 C10 — no internal lane or design-reference names in model-facing text", () => {
   const LANE = /\b(pre-|post-)?lane\b/i;
   const DESIGN_REF = /\(D\d+\)/;
-  /** B3-registered (lib/reconciliation/derive.ts:85 and attribution.ts:396-398). */
-  const B3_EXEMPT = [
-    "unknown — before the lane",
-    "computed at read time because no attempt row exists — before the lane, or a path that did not record",
-  ];
+  /** Emptied by P2-B3-1: derive.ts's R7 and attribution.ts's `derived` were reworded. */
+  const B3_EXEMPT: readonly string[] = [];
   const violationsIn = (label: string, text: string): string[] => {
     let scanned = text;
     for (const exempt of B3_EXEMPT) scanned = scanned.split(exempt).join("");
@@ -2108,16 +2106,12 @@ describe("A2 C10 — no internal lane or design-reference names in model-facing 
     return found;
   };
 
-  it("the patterns have teeth (the strings review #4 found) and the exemptions are live B3 strings", () => {
+  it("the patterns have teeth (the strings review #4 found)", () => {
     expect(LANE.test("how this shop ships pre-Lane-4")).toBe(true);
     expect(LANE.test("pre-lane mass-update batches")).toBe(true);
     expect(LANE.test("the post-lane rows")).toBe(true);
     expect(DESIGN_REF.test("five events (D12)")).toBe(true);
     expect(LANE.test("unclassified outbound, landing page")).toBe(false);
-    const recon = ["lib/reconciliation/derive.ts", "lib/reconciliation/attribution.ts"]
-      .map((f) => fs.readFileSync(path.join(process.cwd(), f), "utf8"))
-      .join("\n");
-    for (const exempt of B3_EXEMPT) expect(recon).toContain(exempt);
   });
 
   it("every tool description is clean", () => {

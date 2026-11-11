@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { RESOLUTIONS } from '@/lib/exceptions/kinds';
 import { ProductCreateUIShape } from '@/lib/validation/product';
+import { refuse } from '@/lib/validation/refuse';
 
 /**
  * Zod schemas for the supply-order flow (contract pack C2a.4; spec §5).
@@ -288,12 +289,8 @@ export type LabelingQueueQuery = z.infer<typeof LabelingQueueQuerySchema>;
 export type SupplyOrdersAnalyticsQuery = z.infer<typeof SupplyOrdersAnalyticsQuerySchema>;
 
 // ---------------------------------------------------------------------------
-// Post-parse assertions (house rule 1)
+// Post-parse assertions (house rule 1) — `refuse` lives in ./refuse
 // ---------------------------------------------------------------------------
-
-function refuse(path: (string | number)[], message: string): never {
-  throw new z.ZodError([{ code: z.ZodIssueCode.custom, path, message }]);
-}
 
 /**
  * REFUSE a new-product payload that carries `costPrice` AT ALL (PK-8).

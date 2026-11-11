@@ -850,7 +850,7 @@ describe('coverage', () => {
   it('always discloses the R0 batch this report cannot see', async () => {
     const report = await getAttributionReport(INPUT, ADMIN);
     expect(report.coverage.notes).toContain(
-      'a pre-0b-1 mass update whose summary event was never written is invisible to R0 and appears here as an unknown-class batch with a large row count',
+      'an older mass update whose summary event was never written is invisible to R0 and appears here as an unknown-class batch with a large row count',
     );
   });
 

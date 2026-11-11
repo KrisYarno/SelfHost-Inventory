@@ -358,13 +358,14 @@ describe('post-lane gap (spec §2.2 — never "before the lane" after recording 
   });
 
   it('a post-lane R7 does not claim the batch predates the lane', () => {
-    // The static R7 sentence says "before the lane". For a batch recorded after
-    // the boundary that would be a false statement on the chip, so the sentence
-    // is swapped for the honest one (spec §2.2 wins over the pack's example).
+    // The static R7 sentence says "before recording began". For a batch
+    // recorded after the boundary that would be a false statement on the chip,
+    // so the sentence is swapped for the honest one (spec §2.2 wins over the
+    // pack's example).
     const result = deriveHistoricalAttempt(batch({ at: since }), [], { recordingSince: since });
     expect(result.ruleId).toBe('R7');
-    expect(result.sentence).not.toContain('before the lane');
-    expect(DERIVED_SENTENCES.R7).toContain('before the lane');
+    expect(result.sentence).not.toContain('before recording began');
+    expect(DERIVED_SENTENCES.R7).toContain('before recording began');
   });
 
   it('the annotation rides on top of the class, it does not change it', () => {
@@ -403,7 +404,7 @@ describe('DERIVED_SENTENCES', () => {
   it('pins the three sentences the pack spells out', () => {
     expect(DERIVED_SENTENCES.R2b).toBe('fulfillment (inferred — the ledger was never stamped)');
     expect(DERIVED_SENTENCES.R3).toBe('stamped by an unrecorded path');
-    expect(DERIVED_SENTENCES.R7).toBe('unknown — before the lane');
+    expect(DERIVED_SENTENCES.R7).toBe('unknown — before recording began');
   });
 
   it('speaks English, not rule ids (OCr2-14 — the chip carries the sentence)', () => {
