@@ -375,7 +375,7 @@ const REDACTED_REASON = 'order belongs to a company you are not a member of';
 const R0_INVISIBLE_NOTE =
   'an older mass update whose summary event was never written is invisible to R0 and appears here as an unknown-class batch with a large row count';
 
-const NO_MEMBER_ORDER_NOTE = 'no order matching that number in your companies';
+export const NO_MEMBER_ORDER_NOTE = 'no order matching that number in your companies';
 
 const NO_DENOMINATOR_NOTE =
   'no attributable batch in this window, so the derived share has no denominator';

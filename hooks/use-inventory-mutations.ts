@@ -69,6 +69,8 @@ export interface AdjustInput {
   // W2-1: an order id for the `order` intent. Resolved and membership-checked
   // server-side — sending it is a claim, never a fact.
   selectedExternalOrderId?: string;
+  // P2-B3-1: the order number typed on a Remove under `order` — never with an id; the server resolves it.
+  orderReference?: string;
   // CR-3: the transfer auto-add flag. PARSED server-side now (it was read off
   // the raw body, outside zod), and the route refuses it on a negative delta
   // with a 400 — an auto-add ADDS the shortfall a transfer needs.

@@ -10,14 +10,27 @@
  * The REAL producer runs against a mocked Prisma, so these pins cover the HTTP
  * surface AND the seam between it and `lib/reconciliation/attribution.ts`: the
  * envelope keys, the four 400s the pack names, the 404 body, and the fact that
- * every one of them is admin-guarded and dynamic.
+ * every one of them is dynamic. The report and the drill-down are admin-guarded;
+ * the search is NOT since Part 2 B3-1 (pack CB3b-ii.1) — an approved user
+ * searches their own companies' orders, an admin searches every order — so its
+ * pins drive `requireApproved` with an admin arm and a member arm.
  */
 
 jest.mock('@/lib/api-utils', () => ({
   __esModule: true,
   ...jest.requireActual('@/lib/api-utils'),
   requireAdmin: jest.fn(() => Promise.resolve({ user: { id: 1, isAdmin: true } })),
+  requireApproved: jest.fn(() =>
+    Promise.resolve({ user: { id: 1, isAdmin: true, isApproved: true } }),
+  ),
 }));
+
+// The REAL limiter, observed: the search's per-user limit is pinned by its call
+// AND by driving it past the limit (the 429), so the spy passes straight through.
+jest.mock('@/lib/rateLimit', () => {
+  const actual = jest.requireActual('@/lib/rateLimit');
+  return { __esModule: true, ...actual, enforceRateLimit: jest.fn(actual.enforceRateLimit) };
+});
 
 jest.mock('@/lib/prisma', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -29,8 +42,9 @@ import { NextRequest } from 'next/server';
 import { mockReset, type DeepMockProxy } from 'jest-mock-extended';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import prisma from '@/lib/prisma';
-import { requireAdmin } from '@/lib/api-utils';
-import { __resetForTests } from '@/lib/reconciliation/attribution';
+import { requireAdmin, requireApproved } from '@/lib/api-utils';
+import { enforceRateLimit } from '@/lib/rateLimit';
+import { NO_MEMBER_ORDER_NOTE, __resetForTests } from '@/lib/reconciliation/attribution';
 import { MAX_MATCH_ORDERS } from '@/lib/reconciliation/match-producer';
 import { GET as reportGET, dynamic as reportDynamic } from '@/app/api/reconciliation/attribution/route';
 import {
@@ -44,6 +58,8 @@ import {
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 const mockRequireAdmin = requireAdmin as jest.Mock;
+const mockRequireApproved = requireApproved as jest.Mock;
+const mockEnforceRateLimit = enforceRateLimit as jest.Mock;
 
 function summaryRow(over: Record<string, unknown> = {}) {
   return {
@@ -110,6 +126,9 @@ beforeEach(() => {
   __resetForTests();
   mockRequireAdmin.mockClear();
   mockRequireAdmin.mockResolvedValue({ user: { id: 1, isAdmin: true } });
+  mockRequireApproved.mockClear();
+  mockRequireApproved.mockResolvedValue({ user: { id: 1, isAdmin: true, isApproved: true } });
+  mockEnforceRateLimit.mockClear();
   mockSummary([summaryRow()]);
   db.orderAttributionAttempt.findFirst.mockResolvedValue(null as never);
   db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
@@ -408,13 +427,171 @@ describe('GET /api/reconciliation/attribution/[batchId]', () => {
   });
 });
 
+/** The search URL for a raw query string (already encoded). */
+function searchRequest(query = 'q=100'): NextRequest {
+  return new NextRequest(`http://localhost/api/reconciliation/orders/search?${query}`);
+}
+
+/** An approved user who is NOT an admin; the membership read decides their scope. */
+function asMember(companyIds: string[], id = 7): void {
+  mockRequireApproved.mockResolvedValue({ user: { id, isAdmin: false, isApproved: true } });
+  db.userCompany.findMany.mockResolvedValue(
+    companyIds.map((companyId) => ({ companyId })) as never,
+  );
+}
+
+/** The `where` each of the search's two reads was handed. */
+function searchWheres(): { count: unknown; rows: unknown } {
+  return {
+    count: (db.externalOrder.count.mock.calls[0]?.[0] as { where?: unknown } | undefined)?.where,
+    rows: (db.externalOrder.findMany.mock.calls[0]?.[0] as { where?: unknown } | undefined)?.where,
+  };
+}
+
 describe('GET /api/reconciliation/orders/search', () => {
-  it('is dynamic and admin-guarded', async () => {
+  it('is dynamic and guarded by APPROVAL, not admin (Part 2 B3-1)', async () => {
     expect(searchDynamic).toBe('force-dynamic');
     db.externalOrder.count.mockResolvedValue(0 as never);
     db.externalOrder.findMany.mockResolvedValue([] as never);
-    await searchGET(new NextRequest('http://localhost/api/reconciliation/orders/search?q=100'));
-    expect(mockRequireAdmin).toHaveBeenCalledTimes(1);
+    await searchGET(searchRequest());
+    expect(mockRequireApproved).toHaveBeenCalledTimes(1);
+    expect(mockRequireAdmin).not.toHaveBeenCalled();
+  });
+
+  it('an admin searches EVERY order: no company scope, and no membership read', async () => {
+    db.externalOrder.count.mockResolvedValue(1 as never);
+    db.externalOrder.findMany.mockResolvedValue([{ ...ORDER, _count: { items: 3 } }] as never);
+
+    const res = await searchGET(searchRequest());
+    expect(res.status).toBe(200);
+
+    const { count, rows } = searchWheres();
+    expect(count).toEqual({ orderNumber: { startsWith: '100' } });
+    expect(rows).toEqual({ orderNumber: { startsWith: '100' } });
+    expect(db.userCompany.findMany).not.toHaveBeenCalled();
+  });
+
+  it("a member searches their OWN companies' orders — the scope rides BOTH the count and the rows", async () => {
+    asMember(['co-1', 'co-2']);
+    db.externalOrder.count.mockResolvedValue(1 as never);
+    db.externalOrder.findMany.mockResolvedValue([{ ...ORDER, _count: { items: 3 } }] as never);
+
+    const res = await searchGET(searchRequest());
+    expect(res.status).toBe(200);
+
+    expect(db.userCompany.findMany).toHaveBeenCalledTimes(1);
+    expect(db.userCompany.findMany).toHaveBeenCalledWith({
+      where: { userId: 7 },
+      select: { companyId: true },
+    });
+    const { count, rows } = searchWheres();
+    expect(count).toEqual({ orderNumber: { startsWith: '100' }, companyId: { in: ['co-1', 'co-2'] } });
+    expect(rows).toEqual({ orderNumber: { startsWith: '100' }, companyId: { in: ['co-1', 'co-2'] } });
+
+    // A member's NON-empty answer is the plain envelope — no note.
+    const body = await res.json();
+    expect(Object.keys(body).sort()).toEqual(['moreCount', 'orders']);
+    expect(body.orders).toHaveLength(1);
+  });
+
+  it('an approved user with NO memberships gets an empty answer, never a 403', async () => {
+    asMember([]);
+    db.externalOrder.count.mockResolvedValue(0 as never);
+    db.externalOrder.findMany.mockResolvedValue([] as never);
+
+    const res = await searchGET(searchRequest());
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ orders: [], moreCount: 0, note: NO_MEMBER_ORDER_NOTE });
+    // Scoped to nothing — not unscoped.
+    const { count, rows } = searchWheres();
+    expect(count).toEqual({ orderNumber: { startsWith: '100' }, companyId: { in: [] } });
+    expect(rows).toEqual({ orderNumber: { startsWith: '100' }, companyId: { in: [] } });
+  });
+
+  it("a member's EMPTY answer carries the house sentence (pack row 94); an admin's carries none", async () => {
+    expect(NO_MEMBER_ORDER_NOTE).toBe('no order matching that number in your companies');
+    db.externalOrder.count.mockResolvedValue(0 as never);
+    db.externalOrder.findMany.mockResolvedValue([] as never);
+
+    const admin = await searchGET(searchRequest());
+    expect(await admin.json()).toEqual({ orders: [], moreCount: 0 });
+
+    asMember(['co-1']);
+    const member = await searchGET(searchRequest());
+    expect(await member.json()).toEqual({
+      orders: [],
+      moreCount: 0,
+      note: 'no order matching that number in your companies',
+    });
+  });
+
+  it('the projection carries no customer field — for a member as for an admin', async () => {
+    asMember(['co-1']);
+    db.externalOrder.count.mockResolvedValue(1 as never);
+    db.externalOrder.findMany.mockResolvedValue([
+      {
+        ...ORDER,
+        _count: { items: 3 },
+        // What a widened select WOULD hand back; the projection must drop it.
+        customerEmail: 'buyer@example.com',
+        customerName: 'A Buyer',
+        shippingAddress: { line1: '1 Test Street' },
+        rawPayload: { id: 4242 },
+      },
+    ] as never);
+
+    const body = await (await searchGET(searchRequest())).json();
+
+    expect(body.orders).toEqual([
+      {
+        id: 'ord-1',
+        orderNumber: '#1001',
+        platform: 'WOOCOMMERCE',
+        internalStatus: 'pending',
+        externalCreatedAt: '2026-08-09T00:00:00.000Z',
+        itemCount: 3,
+      },
+    ]);
+  });
+
+  it('is rate-limited PER USER at 60 (no ttl key), after the guard, with the headers on the 200', async () => {
+    db.externalOrder.count.mockResolvedValue(0 as never);
+    db.externalOrder.findMany.mockResolvedValue([] as never);
+    asMember(['co-1'], 9101);
+
+    const res = await searchGET(searchRequest());
+
+    expect(mockEnforceRateLimit).toHaveBeenCalledTimes(1);
+    expect(mockEnforceRateLimit.mock.calls[0][1]).toBe('reconciliation:orders-search');
+    expect(mockEnforceRateLimit.mock.calls[0][2]).toEqual({ identifier: 9101, limit: 60 });
+    expect(mockRequireApproved.mock.invocationCallOrder[0]).toBeLessThan(
+      mockEnforceRateLimit.mock.invocationCallOrder[0],
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-RateLimit-Limit')).toBe('60');
+    expect(res.headers.get('X-RateLimit-Remaining')).toBe('59');
+  });
+
+  it('the 61st search inside the window is a 429 with the limiter headers', async () => {
+    db.externalOrder.count.mockResolvedValue(0 as never);
+    db.externalOrder.findMany.mockResolvedValue([] as never);
+    // A user id no other pin spends, so the in-process window is this pin's own.
+    mockRequireApproved.mockResolvedValue({ user: { id: 9202, isAdmin: true, isApproved: true } });
+
+    for (let i = 0; i < 60; i += 1) {
+      const ok = await searchGET(searchRequest());
+      expect(ok.status).toBe(200);
+    }
+    const limited = await searchGET(searchRequest());
+
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: 'Too many requests', code: 'RATE_LIMITED' });
+    expect(limited.headers.get('Retry-After')).not.toBeNull();
+    expect(limited.headers.get('X-RateLimit-Limit')).toBe('60');
+    expect(limited.headers.get('X-RateLimit-Remaining')).toBe('0');
+    // Refused before the database is asked.
+    expect(db.externalOrder.findMany).toHaveBeenCalledTimes(60);
   });
 
   it('serves { orders, moreCount } and says how many it left off', async () => {
@@ -449,6 +626,21 @@ describe('GET /api/reconciliation/orders/search', () => {
       new NextRequest('http://localhost/api/reconciliation/orders/search'),
     );
     expect(await bare.json()).toEqual({ orders: [], moreCount: 0 });
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("a member's blank q answers BEFORE the membership read — and carries no note", async () => {
+    asMember(['co-1']);
+
+    const blank = await searchGET(searchRequest('q=%20%20'));
+    const bare = await searchGET(searchRequest(''));
+
+    expect(blank.status).toBe(200);
+    expect(await blank.json()).toEqual({ orders: [], moreCount: 0 });
+    expect(await bare.json()).toEqual({ orders: [], moreCount: 0 });
+    // Still rate-limited, still carrying the headers.
+    expect(blank.headers.get('X-RateLimit-Limit')).toBe('60');
+    expect(db.userCompany.findMany).not.toHaveBeenCalled();
     expect(db.$transaction).not.toHaveBeenCalled();
   });
 });

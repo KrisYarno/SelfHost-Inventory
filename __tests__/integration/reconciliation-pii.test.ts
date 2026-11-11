@@ -29,6 +29,12 @@ jest.mock('@/lib/api-utils', () => ({
   __esModule: true,
   ...jest.requireActual('@/lib/api-utils'),
   requireAdmin: jest.fn(() => Promise.resolve({ user: { id: 1, isAdmin: true } })),
+  // Part 2 B3-1 (pack CB3b-ii.1): the order search is guarded by APPROVAL, not
+  // admin. The default is an admin, so the ROUTES row below keeps its admin
+  // answer; the member arm is its own `it` further down.
+  requireApproved: jest.fn(() =>
+    Promise.resolve({ user: { id: 1, isAdmin: true, isApproved: true } }),
+  ),
   // M2b: the table gained a WRITER, whose guards are pinned in its own suite.
   requireCSRF: jest.fn(() => Promise.resolve()),
 }));
@@ -48,6 +54,7 @@ import { NextRequest } from 'next/server';
 import { mockDeep, mockReset, type DeepMockProxy } from 'jest-mock-extended';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import prisma from '@/lib/prisma';
+import { requireApproved } from '@/lib/api-utils';
 import {
   RECONCILIATION_PII_FIELD_NAMES,
   assertNoPiiKeys,
@@ -63,6 +70,7 @@ import { GET as exceptionsGET } from '@/app/api/reconciliation/exceptions/route'
 import { GET as unmappedGET } from '@/app/api/reconciliation/unmapped/route';
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
+const mockRequireApproved = requireApproved as jest.Mock;
 
 /**
  * An order row as a LEAKY producer would receive it: the frozen select's fields
@@ -251,6 +259,8 @@ const AUDIT_ROW = {
 beforeEach(() => {
   mockReset(db);
   __resetForTests();
+  mockRequireApproved.mockClear();
+  mockRequireApproved.mockResolvedValue({ user: { id: 1, isAdmin: true, isApproved: true } });
   // ONE dispatcher, because FOUR producers now share the raw channel — the
   // match's deducted-side aggregate joined them at Part 2 A2, and it is
   // selected on its own alias (`AS outUnits`).
@@ -387,6 +397,35 @@ describe('reconciliation routes never answer with order PII', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     // A response that carried nothing at all would pass vacuously.
+    expect(JSON.stringify(body).length).toBeGreaterThan(50);
+    expect(() => assertNoPiiKeys(body)).not.toThrow();
+  });
+
+  it("the order search's MEMBER arm: scoped to the seeded companies on BOTH reads, and PII-free", async () => {
+    // The first member-scoped reconciliation route (Part 2 B3-1, pack
+    // CB3b-ii.1). Not a ROUTES row: the table has no per-row setup slot, and a
+    // zero-membership member would trip its non-vacuity floor rather than prove
+    // anything — so the member here HAS companies and gets the leaky row back.
+    const companyIds = ['co-1', 'co-2'];
+    mockRequireApproved.mockResolvedValue({ user: { id: 7, isAdmin: false, isApproved: true } });
+    db.userCompany.findMany.mockResolvedValue(companyIds.map((companyId) => ({ companyId })) as never);
+
+    const res = await searchGET(
+      new NextRequest('http://localhost/api/reconciliation/orders/search?q=100'),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockRequireApproved).toHaveBeenCalledTimes(1);
+    const rowsWhere = (db.externalOrder.findMany.mock.calls[0][0] as { where: { companyId: { in: string[] } } })
+      .where;
+    const countWhere = (db.externalOrder.count.mock.calls[0][0] as { where: { companyId: { in: string[] } } })
+      .where;
+    expect(rowsWhere.companyId.in).toEqual(companyIds);
+    expect(countWhere.companyId.in).toEqual(companyIds);
+
+    const body = await res.json();
+    // The leaky row came back through the projection — the walk is not vacuous.
+    expect(body.orders).toHaveLength(1);
     expect(JSON.stringify(body).length).toBeGreaterThan(50);
     expect(() => assertNoPiiKeys(body)).not.toThrow();
   });

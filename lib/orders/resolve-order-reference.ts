@@ -2,6 +2,7 @@ import prisma from "@/lib/prisma";
 import { requireCompanyMembership } from "@/lib/api-utils";
 import { AppError } from "@/lib/error-handling";
 import type { DeductionIntent } from "@/lib/inventory/intent";
+import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
 
 /**
  * The reference-resolution round: attribute a manual deduction from the order
@@ -65,8 +66,13 @@ import type { DeductionIntent } from "@/lib/inventory/intent";
  * lib/ or next/). The companion backfill must apply the same bar to the same
  * strings; the two copies are pinned equal in
  * __tests__/unit/lib/orders/resolve-order-reference.test.ts.
+ *
+ * The literal itself lives in the import-free leaf
+ * `lib/orders/order-reference-shape.ts` (pack § P2-B3-1, B3-1b), so the client
+ * surfaces apply the same bar without importing this module; it is re-exported
+ * here for the readers that have always taken it from the resolver.
  */
-export const ORDER_REFERENCE_SHAPE = /^[0-9]{1,20}$/;
+export { ORDER_REFERENCE_SHAPE };
 
 /**
  * How many candidate orders are read before uniqueness is declared unprovable.

@@ -36,6 +36,11 @@ import {
   useAttributeBatch,
   useMoveBatch,
 } from "@/hooks/use-admin";
+// Part 2 B3-1b: the transport and the search MOVED to leaf modules; these type
+// imports from `use-admin` are themselves a pin — they stop compiling if the
+// re-exports go.
+import type { ApiError, OrderSearchResponse, OrderSearchResult } from "@/hooks/use-admin";
+import { useOrderSearch as leafUseOrderSearch } from "@/hooks/use-order-search";
 
 const mockFetch = jest.fn();
 
@@ -360,5 +365,72 @@ describe("useMoveBatch — no answer means no outcome", () => {
       error: "This batch was already reversed",
       code: "ALREADY_REVERSED",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Part 2 B3-1b (pack § P2-B3-1) — the order search MOVED to
+// `hooks/use-order-search.ts` and the transport to `hooks/get-json.ts`, so the
+// adjust dialog's lookup can read through them without the admin module.
+// `use-admin` re-exports the names; nothing about the hook may change: ONE key,
+// ONE `enabled` rule, the AbortSignal forwarded, the same error shape.
+// ---------------------------------------------------------------------------
+
+describe("the moved order search — re-exported, unchanged", () => {
+  it("use-admin re-exports the SAME hook the leaf module defines", () => {
+    expect(useOrderSearch).toBe(leafUseOrderSearch);
+  });
+
+  it("keeps the key [admin, reconciliation, orders, q], forwards the signal, and carries `note`", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ orders: [], moreCount: 0, note: "no order matching that number in your companies" }),
+    });
+    const { client, Wrapper } = harness();
+
+    const { result } = renderHook(() => useOrderSearch("10 9"), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(
+      client.getQueryCache().find({ queryKey: ["admin", "reconciliation", "orders", "10 9"], exact: true }),
+    ).toBeDefined();
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/reconciliation/orders/search?q=10%209");
+    expect((mockFetch.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+    const data: OrderSearchResponse | undefined = result.current.data;
+    expect(data?.note).toBe("no order matching that number in your companies");
+  });
+
+  it("a refusal keeps the status, the generic message and the server's sentence", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({ error: "Too many requests", code: "RATE_LIMITED" }),
+    });
+    const { Wrapper } = harness();
+
+    const { result } = renderHook(() => useOrderSearch("1"), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    const error: ApiError | null = result.current.error;
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({
+      message: "Request failed (429)",
+      status: 429,
+      serverMessage: "Too many requests",
+    });
+  });
+
+  it("the row type is the six-field projection", () => {
+    const row: OrderSearchResult = {
+      id: "ord-1",
+      orderNumber: "1001",
+      platform: "WOOCOMMERCE",
+      internalStatus: "pending",
+      externalCreatedAt: null,
+      itemCount: 3,
+    };
+    expect(Object.keys(row).sort()).toEqual(
+      ["externalCreatedAt", "id", "internalStatus", "itemCount", "orderNumber", "platform"],
+    );
   });
 });

@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { getJSON, type ApiError } from "@/hooks/get-json";
 import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
 import type { User } from "@/components/admin/user-table";
 // Reconciliation Part 2 (seam S-B18): the move dialog OWNS the 200 body's shape,
@@ -38,40 +39,13 @@ import {
 // calling component owns UI feedback, matching use-inventory-mutations.ts.
 // ---------------------------------------------------------------------------
 
-export interface ApiError extends Error {
-  status?: number;
-  /**
-   * The server's OWN `error` sentence, when the response carried one. A 4xx is
-   * the server telling the operator what is wrong with the request they made —
-   * a window over the span cap, a cursor from another filter — and that sentence
-   * is the whole repair, so the surfaces that can act on it render it verbatim
-   * (QA-5). `message` stays the generic status line, so nothing that toasts an
-   * ApiError today starts leaking server prose it never asked for.
-   */
-  serverMessage?: string;
-}
-
-/** The `{ error }` envelope, when there is one. A body-less failure is not an error here. */
-async function readErrorBody(res: Response): Promise<{ error?: unknown }> {
-  try {
-    return (await res.json()) as { error?: unknown };
-  } catch {
-    return {};
-  }
-}
-
-/** GET helper for queries: throws Error & { status } so callers can branch on 401. */
-async function getJSON<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
-  if (!res.ok) {
-    const body = await readErrorBody(res);
-    const err = new Error(`Request failed (${res.status})`) as ApiError;
-    err.status = res.status;
-    if (typeof body.error === "string" && body.error.length > 0) err.serverMessage = body.error;
-    throw err;
-  }
-  return res.json() as Promise<T>;
-}
+// The read transport (`ApiError`, `getJSON`) and the order search live in their
+// own leaf modules since reconciliation Part 2 B3-1b — the adjust dialog's
+// order lookup reads through them without importing this module. Re-exported
+// here so every existing importer compiles unchanged.
+export type { ApiError };
+export { useOrderSearch } from "@/hooks/use-order-search";
+export type { OrderSearchResult, OrderSearchResponse } from "@/hooks/use-order-search";
 
 /**
  * Mutation helper: sends JSON (only sets Content-Type when a body is present,
@@ -822,37 +796,8 @@ export function useBatchDetail(batchId: string | null) {
   });
 }
 
-export interface OrderSearchResult {
-  id: string;
-  orderNumber: string;
-  platform: string;
-  internalStatus: string;
-  externalCreatedAt: string | null;
-  itemCount: number;
-}
-
-export interface OrderSearchResponse {
-  orders: OrderSearchResult[];
-  /** What the twenty-row ceiling left off — said out loud by the picker. */
-  moreCount: number;
-}
-
-/**
- * The Attribute… picker's search. DISABLED on an empty query: an empty search
- * is not a request for every order (the route answers the same way). The 250ms
- * debounce lives in the component, which owns the keystrokes.
- */
-export function useOrderSearch(q: string) {
-  return useQuery<OrderSearchResponse, ApiError>({
-    queryKey: ["admin", "reconciliation", "orders", q],
-    queryFn: ({ signal }) =>
-      getJSON<OrderSearchResponse>(
-        `/api/reconciliation/orders/search?q=${encodeURIComponent(q)}`,
-        { signal },
-      ),
-    enabled: q.length >= 1,
-  });
-}
+// `useOrderSearch` + `OrderSearchResult` / `OrderSearchResponse`: MOVED to
+// `hooks/use-order-search.ts` (B3-1b) and re-exported at the top of this file.
 
 export interface AttributeBatchInput {
   orderRecordId: string;

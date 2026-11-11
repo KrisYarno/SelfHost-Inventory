@@ -24,7 +24,9 @@ import { ContextTag } from "@/components/ui/context-tag";
 import { InlineHighlight } from "@/components/ui/inline-highlight";
 import { ReceivingRedirectPrompt } from "@/components/inventory/receiving-redirect-prompt";
 import { IntentChip } from "@/components/inventory/intent-chip";
+import { OrderLookup, type PickedOrder } from "@/components/inventory/order-lookup";
 import type { DeductionIntent } from "@/lib/inventory/intent";
+import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
 import type { DialogProduct } from "@/types/inventory";
 
 interface QuickAdjustDialogProps {
@@ -39,6 +41,20 @@ interface QuickAdjustDialogProps {
 // server-side — and the adjust route now REFUSES the old vocabulary outright,
 // so leaving the select in place would have offered operators a field the API
 // rejects. One question, one answer, one place it is interpreted.
+
+// Reconciliation Part 2, B3-1 (pack CB3b-ii.1b + § P2-B3-1): THE CAPTURE. A
+// Remove under the `order` chip can name its order — picked from the search
+// (`selectedExternalOrderId`) or typed (`orderReference`), never both — and the
+// server stamps the ledger row when it can stand behind the identity. The
+// sentences below are frozen by the pack, byte for byte.
+const CAPTURE_BOTH_SENTENCE = "Pick the order or type the reference, not both";
+const REFERENCE_SHAPE_HINT = "digits only, without #";
+
+/** The stored order id the server stamped the ledger row with (`log.orderRecordId` on the 200). */
+function stampedOrderId(result: unknown): string | null {
+  const log = (result as { log?: { orderRecordId?: unknown } } | null | undefined)?.log;
+  return typeof log?.orderRecordId === "string" ? log.orderRecordId : null;
+}
 
 export function QuickAdjustDialog({
   open,
@@ -55,6 +71,11 @@ export function QuickAdjustDialog({
   // default selection would make every untouched adjustment look answered.
   const [intent, setIntent] = useState<DeductionIntent | null>(null);
   const [notes, setNotes] = useState("");
+  // The capture's two inputs. They exist ONLY while the capture shows (a Remove
+  // under `order`): leaving that state clears both, so an identity typed for a
+  // removal can never ride along on an add or on another intent.
+  const [pickedOrder, setPickedOrder] = useState<PickedOrder | null>(null);
+  const [orderReference, setOrderReference] = useState("");
 
   const quantityQuery = useProductLocationQuantity(product.id, selectedLocationId, {
     enabled: open,
@@ -70,7 +91,39 @@ export function QuickAdjustDialog({
   const selectedLocationName =
     locations.find((loc) => loc.id === selectedLocationId)?.name ?? "Selected location";
 
-  const isValid = quantityNum > 0 && reason.trim() && adjustedQuantity >= 0;
+  const captureActive = adjustmentType === "remove" && intent === "order";
+  const trimmedReference = orderReference.trim();
+  const sentPick = captureActive ? pickedOrder : null;
+  // Blank or whitespace-only is NOT a reference: it stays out of the body (the
+  // schema's `.min(1)` would refuse it) and out of every check below.
+  const sentReference = captureActive && trimmedReference !== "" ? trimmedReference : null;
+  const captureConflict = sentPick !== null && sentReference !== null;
+  // The server's bar, applied before the round trip: a reference it could never
+  // resolve is fixed here, not discovered in the toast.
+  const referenceShapeInvalid =
+    sentReference !== null && !ORDER_REFERENCE_SHAPE.test(sentReference);
+
+  const isValid =
+    quantityNum > 0 &&
+    reason.trim() &&
+    adjustedQuantity >= 0 &&
+    !captureConflict &&
+    !referenceShapeInvalid;
+
+  const clearCapture = () => {
+    setPickedOrder(null);
+    setOrderReference("");
+  };
+
+  const handleAdjustmentTypeChange = (value: "add" | "remove") => {
+    setAdjustmentType(value);
+    if (value !== "remove") clearCapture();
+  };
+
+  const handleIntentChange = (next: DeductionIntent) => {
+    setIntent(next);
+    if (next !== "order") clearCapture();
+  };
 
   const handleIncrement = () => {
     setQuantity((prev) => {
@@ -94,13 +147,20 @@ export function QuickAdjustDialog({
       return;
     }
 
+    // Refused HERE, before the server's own 400 could: the operator named the
+    // order twice, and only they know which one they meant.
+    if (captureConflict) {
+      toast.error(CAPTURE_BOTH_SENTENCE);
+      return;
+    }
+
     if (!isValid) {
       toast.error("Please fill in all required fields");
       return;
     }
 
     try {
-      await adjustMutation.mutateAsync({
+      const result = await adjustMutation.mutateAsync({
         productId: product.id,
         locationId: selectedLocationId,
         delta: adjustmentType === "add" ? quantityNum : -quantityNum,
@@ -109,13 +169,30 @@ export function QuickAdjustDialog({
         // Absent, not null, when the chip was never tapped — the route reads
         // key PRESENCE to tell "unstated" from "stated as other".
         intent: intent ?? undefined,
+        // The capture: identity only on a Remove under `order`, and at most one
+        // of the two (refused above). Absent keys, never empty values.
+        selectedExternalOrderId: sentPick?.id,
+        orderReference: sentReference ?? undefined,
       });
 
-      toast.success(
-        adjustmentType === "add"
-          ? `Added ${quantityNum} units to ${product.name}`
-          : `Removed ${quantityNum} units from ${product.name}`
-      );
+      if (sentPick === null && sentReference === null) {
+        toast.success(
+          adjustmentType === "add"
+            ? `Added ${quantityNum} units to ${product.name}`
+            : `Removed ${quantityNum} units from ${product.name}`
+        );
+      } else if (stampedOrderId(result) !== null) {
+        toast.success(
+          `Removed ${quantityNum} units — attributed to order ${sentPick?.orderNumber ?? sentReference}`
+        );
+      } else {
+        // ONE sentence for every way the identity did not land — unmatched,
+        // ambiguous, not yours, unusable, or the lookup failing. The removal
+        // itself succeeded; only the stamp was withheld.
+        toast.warning(
+          `Removed ${quantityNum} units — the reference was not matched to an order you can see; the deduction is recorded unattributed`
+        );
+      }
 
       onOpenChange(false);
       onSuccess?.();
@@ -126,6 +203,7 @@ export function QuickAdjustDialog({
       setIntent(null);
       setNotes("");
       setAdjustmentType("add");
+      clearCapture();
     } catch (error) {
       console.error("Error adjusting inventory:", error);
       toast.error(error instanceof Error ? error.message : "Failed to adjust inventory");
@@ -171,7 +249,7 @@ export function QuickAdjustDialog({
             <Label>Adjustment Type</Label>
             <RadioGroup
               value={adjustmentType}
-              onValueChange={(value: "add" | "remove") => setAdjustmentType(value)}
+              onValueChange={(value: "add" | "remove") => handleAdjustmentTypeChange(value)}
             >
               <div className="flex items-center space-x-2">
                 <RadioGroupItem value="add" id="add" />
@@ -277,9 +355,48 @@ export function QuickAdjustDialog({
           <IntentChip
             surface="adjust"
             value={intent}
-            onChange={setIntent}
+            onChange={handleIntentChange}
             disabled={isSubmitting}
           />
+
+          {/* P2-B3-1: the capture — ONLY on a Remove under `order`. Pick the
+              order from the search, or type its number; never both. */}
+          {captureActive && (
+            <div className="space-y-4" data-testid="order-capture">
+              <OrderLookup
+                value={pickedOrder}
+                onChange={setPickedOrder}
+                disabled={isSubmitting}
+              />
+
+              <div className="space-y-2">
+                <Label htmlFor="order-reference">Or type the order number</Label>
+                <Input
+                  id="order-reference"
+                  value={orderReference}
+                  onChange={(e) => setOrderReference(e.target.value)}
+                  placeholder="e.g. 12345"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  maxLength={40}
+                  aria-invalid={referenceShapeInvalid}
+                  aria-describedby={referenceShapeInvalid ? "order-reference-hint" : undefined}
+                  disabled={isSubmitting}
+                />
+                {referenceShapeInvalid && (
+                  <p id="order-reference-hint" className="text-[11px] text-destructive">
+                    {REFERENCE_SHAPE_HINT}
+                  </p>
+                )}
+              </div>
+
+              {captureConflict && (
+                <p role="alert" data-testid="order-capture-conflict" className="text-sm text-destructive">
+                  {CAPTURE_BOTH_SENTENCE}
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Notes */}
           <div className="space-y-2">

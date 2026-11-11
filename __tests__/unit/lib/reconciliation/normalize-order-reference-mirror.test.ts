@@ -11,14 +11,21 @@
  * component cannot import it; the picker carries a copy, and a copy nobody
  * checks is a copy that drifts.
  *
- * SO THIS IS A SOURCE-TEXT PIN, deliberately: it reads both files off disk and
- * compares the normalisation itself — the shape literal, the signature and the
- * body. It imports NEITHER module (one of them pulls Prisma), runs nothing, and
- * therefore cannot be talked out of its answer by a mock. The positive controls
- * at the bottom prove the comparison still bites.
+ * SO THIS IS A SOURCE-TEXT PIN, deliberately: it reads the files off disk and
+ * compares the normalisation itself — the signature and the body. It imports
+ * NONE of them (one pulls Prisma), runs nothing, and therefore cannot be talked
+ * out of its answer by a mock. The positive controls at the bottom prove the
+ * comparison still bites.
  *
- * When the bar legitimately changes, both copies change in the same commit —
- * which is the whole point of failing here rather than in production.
+ * THE SHAPE IS NO LONGER A COPY (Part 2, pack § P2-B3-1, B3-1b). The regex
+ * lives in ONE import-free leaf, `lib/orders/order-reference-shape.ts`, and the
+ * resolver, the picker and the adjust dialog each IMPORT it from there. What
+ * used to be an equal-copies pin on the literal is now an IMPORT pin: every
+ * reader imports the leaf, and none of them declares its own.
+ *
+ * When the bar legitimately changes, it changes in the leaf; when the
+ * normalisation changes, both copies of the function change in the same commit
+ * — which is the whole point of failing here rather than in production.
  */
 
 import fs from 'node:fs';
@@ -28,6 +35,8 @@ const REPO_ROOT = path.resolve(__dirname, '../../../..');
 
 const SOURCE = 'lib/orders/resolve-order-reference.ts';
 const MIRROR = 'components/admin/reconciliation/attribute-picker.tsx';
+const LEAF = 'lib/orders/order-reference-shape.ts';
+const DIALOG = 'components/inventory/quick-adjust-dialog.tsx';
 
 function read(rel: string): string {
   return fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
@@ -37,6 +46,23 @@ function read(rel: string): string {
 function shapeLiteral(source: string): string | null {
   const match = source.match(/ORDER_REFERENCE_SHAPE\s*=\s*(\/.*\/[a-z]*)\s*;/);
   return match === null ? null : match[1];
+}
+
+/** A binding of its own: `const|let|var ORDER_REFERENCE_SHAPE =`, whatever the value. */
+function declaresShape(source: string): boolean {
+  return /\b(const|let|var)\s+ORDER_REFERENCE_SHAPE\s*=/.test(source);
+}
+
+/** `import { …ORDER_REFERENCE_SHAPE… } from "@/lib/orders/order-reference-shape"`. */
+function importsShapeFromLeaf(source: string): boolean {
+  return /import\s*\{[^}]*\bORDER_REFERENCE_SHAPE\b[^}]*\}\s*from\s*["']@\/lib\/orders\/order-reference-shape["']/.test(
+    source,
+  );
+}
+
+/** Any import or require at all — the leaf is import-free by contract. */
+function importsAnything(source: string): boolean {
+  return /^\s*import\b/m.test(source) || /\brequire\s*\(/.test(source);
 }
 
 /**
@@ -59,17 +85,33 @@ function normalizerText(source: string): string | null {
 
 const sourceText = read(SOURCE);
 const mirrorText = read(MIRROR);
+const leafText = read(LEAF);
+const dialogText = read(DIALOG);
+
+/** Every reader of the bar, by path. */
+const IMPORTERS: Array<[string, string]> = [
+  [SOURCE, sourceText],
+  [MIRROR, mirrorText],
+  [DIALOG, dialogText],
+];
 
 describe('the picker mirrors the server normalisation', () => {
-  it('both files still carry the two pieces this pin compares', () => {
-    expect(shapeLiteral(sourceText)).not.toBeNull();
-    expect(shapeLiteral(mirrorText)).not.toBeNull();
+  it('the files still carry the pieces this pin compares', () => {
+    expect(shapeLiteral(leafText)).not.toBeNull();
     expect(normalizerText(sourceText)).not.toBeNull();
     expect(normalizerText(mirrorText)).not.toBeNull();
   });
 
-  it('the shape literal is IDENTICAL text', () => {
-    expect(shapeLiteral(mirrorText)).toBe(shapeLiteral(sourceText));
+  it('the shape has ONE home: the leaf declares it and imports nothing', () => {
+    expect(declaresShape(leafText)).toBe(true);
+    expect(shapeLiteral(leafText)).toBe('/^[0-9]{1,20}$/');
+    expect(importsAnything(leafText)).toBe(false);
+  });
+
+  it.each(IMPORTERS)('%s IMPORTS the shape from the leaf and declares no copy', (_path, text) => {
+    expect(importsShapeFromLeaf(text)).toBe(true);
+    expect(declaresShape(text)).toBe(false);
+    expect(shapeLiteral(text)).toBeNull();
   });
 
   it('the normalisation lines are IDENTICAL text — signature and body', () => {
@@ -86,10 +128,37 @@ describe('the picker mirrors the server normalisation', () => {
 // ---------------------------------------------------------------------------
 
 describe('the comparison bites', () => {
-  it('a widened shape in ONE copy is caught', () => {
-    const drifted = mirrorText.replace('/^[0-9]{1,20}$/', '/^[0-9]{1,32}$/');
+  const LEAF_IMPORT = 'import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";';
+
+  it('the import line this control rewrites is really there', () => {
+    expect(mirrorText).toContain(LEAF_IMPORT);
+  });
+
+  it('the import swapped back for a local (widened) copy is caught', () => {
+    const drifted = mirrorText.replace(LEAF_IMPORT, 'const ORDER_REFERENCE_SHAPE = /^[0-9]{1,32}$/;');
     expect(drifted).not.toBe(mirrorText);
-    expect(shapeLiteral(drifted)).not.toBe(shapeLiteral(sourceText));
+    expect(importsShapeFromLeaf(drifted)).toBe(false);
+    expect(declaresShape(drifted)).toBe(true);
+    expect(shapeLiteral(drifted)).toBe('/^[0-9]{1,32}$/');
+  });
+
+  it('a local copy declared BESIDE the import is caught', () => {
+    const drifted = `${mirrorText}\nconst ORDER_REFERENCE_SHAPE = /^[0-9]{1,20}$/;\n`;
+    expect(importsShapeFromLeaf(drifted)).toBe(true);
+    expect(declaresShape(drifted)).toBe(true);
+  });
+
+  it('an import from anywhere but the leaf is caught', () => {
+    const drifted = mirrorText.replace(
+      LEAF_IMPORT,
+      'import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/resolve-order-reference";',
+    );
+    expect(drifted).not.toBe(mirrorText);
+    expect(importsShapeFromLeaf(drifted)).toBe(false);
+  });
+
+  it('a leaf that gains an import is caught', () => {
+    expect(importsAnything(`import prisma from "@/lib/prisma";\n${leafText}`)).toBe(true);
   });
 
   it('a body that stops trimming is caught', () => {

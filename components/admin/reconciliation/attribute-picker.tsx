@@ -27,6 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useDebounce } from "@/hooks/use-debounce";
 import { useBatchDetail, useOrderSearch } from "@/hooks/use-admin";
+import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
 import type { AttributionRow, BatchDetail } from "@/lib/reconciliation/attribution";
 import { AttributeConfirm, type AttributeTarget } from "./attribute-confirm";
 
@@ -39,8 +40,6 @@ const SEARCH_DEBOUNCE_MS = 250;
  * bundle). Same bar, same 20-digit ceiling: a free-text reference is only
  * pre-seeded when it actually looks like an order number.
  */
-const ORDER_REFERENCE_SHAPE = /^[0-9]{1,20}$/;
-
 function normalizeOrderReference(raw: string | null | undefined): string | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
