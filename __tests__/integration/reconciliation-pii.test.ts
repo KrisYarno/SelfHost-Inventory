@@ -245,14 +245,21 @@ const SUMMARY_ROW = {
 /**
  * The audit row the drill-down reads. It carries the operator's free text, which
  * IS allowed there (labelled, admin-only) — the harness cares about the eight
- * forbidden NAMES, and this row proves the two rules do not collide.
+ * forbidden NAMES, and this row proves the two rules do not collide. It also
+ * carries HOW the writer stamped (`orderAttributionSource`), which the
+ * drill-down projects since B3-1 FR3.
  */
 const AUDIT_ROW = {
   id: 3,
   actionType: 'INVENTORY_DEDUCT',
   entityId: '9',
   createdAt: new Date('2026-08-10T12:00:00.000Z'),
-  details: { orderReference: '1001', intent: 'order', selectedExternalOrderId: 'ord-1' },
+  details: {
+    orderReference: '1001',
+    intent: 'order',
+    selectedExternalOrderId: 'ord-1',
+    orderAttributionSource: 'selected',
+  },
   userId: 7,
 };
 
@@ -398,6 +405,17 @@ describe('reconciliation routes never answer with order PII', () => {
     const body = await res.json();
     // A response that carried nothing at all would pass vacuously.
     expect(JSON.stringify(body).length).toBeGreaterThan(50);
+    expect(() => assertNoPiiKeys(body)).not.toThrow();
+  });
+
+  it("the drill-down's audit event carries HOW the batch was stamped, and stays PII-free (B3-1 FR3)", async () => {
+    const res = await detailGET(new NextRequest('http://localhost/api/reconciliation/attribution/batch-1'), {
+      params: { batchId: 'batch-1' },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // The key really rides the walked body — the walk below is not vacuous for it.
+    expect(body.auditEvent.orderAttributionSource).toBe('selected');
     expect(() => assertNoPiiKeys(body)).not.toThrow();
   });
 

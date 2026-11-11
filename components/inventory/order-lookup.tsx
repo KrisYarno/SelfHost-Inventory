@@ -81,9 +81,12 @@ export function OrderLookup({ value, onChange, disabled }: OrderLookupProps) {
   // The hint follows the keystrokes; the search never asks with a malformed
   // query — neither the one on screen nor a debounced one not yet caught up.
   const shapeInvalid = failsShape(query);
-  // A chosen order is not searched for: "" is the hook's disabled state.
+  // A chosen order is not searched for: "" is the hook's disabled state. The
+  // search asks with the TRIMMED text (B3-1 FR3) — "243 " is the order number
+  // "243", and whitespace alone asks nothing — the same text the shape check
+  // judged.
   const search = useOrderSearch(
-    value === null && !shapeInvalid && !failsShape(debounced) ? debounced : "",
+    value === null && !shapeInvalid && !failsShape(debounced) ? debounced.trim() : "",
   );
 
   if (value !== null) {

@@ -1716,6 +1716,74 @@ describe('getBatchDetail', () => {
     });
   });
 
+  // B3-1 FR3 (Q/A B3-1-QA-2): HOW the writer stamped rides to the drill-down.
+  // The adjust event records `orderAttributionSource` and never a picked id
+  // (B3-1 FR1, F2), so without it a picked adjust batch read "order picked:
+  // none". Projected under the siblings' string guard.
+  describe('the audit event carries orderAttributionSource', () => {
+    function adjustAudit(details: Record<string, unknown>) {
+      return {
+        id: 4,
+        actionType: 'INVENTORY_ADJUSTMENT',
+        entityId: '9',
+        createdAt: new Date('2026-08-10T12:00:00.000Z'),
+        details,
+      };
+    }
+
+    it('projects it when present', async () => {
+      wireDetail({ audits: [adjustAudit({ intent: 'order', orderAttributionSource: 'selected' })] });
+
+      const detail = await getBatchDetail('batch-1', ADMIN);
+
+      expect(detail!.auditEvent).toEqual({
+        id: 4,
+        actionType: 'INVENTORY_ADJUSTMENT',
+        createdAt: '2026-08-10T12:00:00.000Z',
+        intent: 'order',
+        orderAttributionSource: 'selected',
+        label: 'from the audit event (free text, admin-visible on /admin/logs)',
+      });
+      expect('selectedExternalOrderId' in detail!.auditEvent!).toBe(false);
+    });
+
+    it('carries reference-resolved as stored', async () => {
+      wireDetail({
+        audits: [
+          adjustAudit({ intent: 'order', orderReference: '1001', orderAttributionSource: 'reference-resolved' }),
+        ],
+      });
+
+      const detail = await getBatchDetail('batch-1', ADMIN);
+
+      expect(detail!.auditEvent!.orderAttributionSource).toBe('reference-resolved');
+      expect(detail!.auditEvent!.orderReference).toBe('1001');
+    });
+
+    it('omits it when the event has none', async () => {
+      wireDetail({ audits: [adjustAudit({ intent: 'order' })] });
+
+      const detail = await getBatchDetail('batch-1', ADMIN);
+
+      expect(detail!.auditEvent).not.toBeNull();
+      expect('orderAttributionSource' in detail!.auditEvent!).toBe(false);
+    });
+
+    it.each([
+      ['a number', 7],
+      ['null', null],
+      ['an object', { value: 'selected' }],
+      ['a boolean', true],
+    ])('omits it when it is not a string (%s)', async (_label, value) => {
+      wireDetail({ audits: [adjustAudit({ intent: 'order', orderAttributionSource: value })] });
+
+      const detail = await getBatchDetail('batch-1', ADMIN);
+
+      expect('orderAttributionSource' in detail!.auditEvent!).toBe(false);
+      expect(detail!.auditEvent!.intent).toBe('order');
+    });
+  });
+
   // CR-4: the attempt array is READ NEWEST-FIRST and BOUNDED, so what the cap
   // keeps is the recent history and the latest row is structurally attempts[0].
   // Reading the latest as `attempts[attempts.length - 1]` off a capped

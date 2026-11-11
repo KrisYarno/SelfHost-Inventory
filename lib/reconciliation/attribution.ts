@@ -272,6 +272,13 @@ export type BatchDetail = {
     orderReference?: string;
     intent?: string;
     selectedExternalOrderId?: string;
+    /**
+     * HOW the writer stamped the ledger, when it did (`selected` |
+     * `reference-resolved`; B3-1 FR3, Q/A B3-1-QA-2). The adjust route records
+     * this and NEVER `selectedExternalOrderId` (B3-1 FR1, F2), so without it a
+     * picked adjust batch read as "order picked: none".
+     */
+    orderAttributionSource?: string;
     label: 'from the audit event (free text, admin-visible on /admin/logs)';
   } | null;
   /**
@@ -1716,6 +1723,7 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
   const orderReference = earliestDetails[AUDIT_REFERENCE_KEY];
   const intent = earliestDetails[AUDIT_INTENT_KEY];
   const selectedExternalOrderId = earliestDetails[AUDIT_SELECTED_KEY];
+  const orderAttributionSource = earliestDetails[AUDIT_SOURCE_KEY];
 
   return {
     batch: batchRow,
@@ -1741,6 +1749,7 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
             ...(typeof orderReference === 'string' ? { orderReference } : {}),
             ...(typeof intent === 'string' ? { intent } : {}),
             ...(typeof selectedExternalOrderId === 'string' ? { selectedExternalOrderId } : {}),
+            ...(typeof orderAttributionSource === 'string' ? { orderAttributionSource } : {}),
             label: AUDIT_EVENT_LABEL,
           },
     attempts: shownAttempts.map((attempt) => ({

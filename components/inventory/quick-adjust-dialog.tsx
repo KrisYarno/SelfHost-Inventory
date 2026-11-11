@@ -49,6 +49,16 @@ interface QuickAdjustDialogProps {
 // sentences below are frozen by the pack, byte for byte.
 const CAPTURE_BOTH_SENTENCE = "Pick the order or type the reference, not both";
 
+/** The capture's two inputs, stored WITH the id of the product they were entered under. */
+interface Capture {
+  productId: number;
+  picked: PickedOrder | null;
+  reference: string;
+}
+
+/** What any OTHER product's capture reads as: nothing. */
+const NO_CAPTURE: Pick<Capture, "picked" | "reference"> = { picked: null, reference: "" };
+
 /** The stored order id the server stamped the ledger row with (`log.orderRecordId` on the 200). */
 function stampedOrderId(result: unknown): string | null {
   const log = (result as { log?: { orderRecordId?: unknown } } | null | undefined)?.log;
@@ -73,27 +83,27 @@ export function QuickAdjustDialog({
   // The capture's two inputs. They exist ONLY while the capture shows (a Remove
   // under `order`): leaving that state clears both, so an identity typed for a
   // removal can never ride along on an add or on another intent.
-  const [pickedOrder, setPickedOrder] = useState<PickedOrder | null>(null);
-  const [orderReference, setOrderReference] = useState("");
-
-  // ...and an identity belongs to ONE product's removal. The inventory page
-  // keeps this dialog mounted and swaps `product` under it, so an order picked
-  // or typed for one product, then Cancelled, must not ride along on the next
-  // product's removal (B3-1 FR1, CR-1). Keyed on the id, never the object: the
-  // page builds a fresh object on every open, and reopening the SAME product
-  // keeps the capture. The other remembered fields are out of scope here.
   //
-  // Reset DURING RENDER (React's "adjusting state when a prop changes"), never
-  // in an effect: an effect lets one render of the new product COMMIT with the
-  // old capture — Confirm enabled, its handler pairing the new product with the
-  // old order — before the clearing render lands (B3-1 FD1-1). Setting state
-  // here makes React discard this render and re-run it before anything commits.
-  const [captureProductId, setCaptureProductId] = useState(product.id);
-  if (captureProductId !== product.id) {
-    setCaptureProductId(product.id);
-    setPickedOrder(null);
-    setOrderReference("");
-  }
+  // ...and an identity belongs to ONE product's removal, BY CONSTRUCTION (B3-1
+  // FR3, Q/A B3-1-QA-1). The inventory page keeps this dialog mounted and swaps
+  // `product` under it (B3-1 FR1, CR-1), so the capture is stored WITH the id
+  // of the product it was entered under, and everything the dialog shows or
+  // sends reads `ownCapture`: another product's capture reads as empty. Every
+  // write tags the product of the render it came from, so even a stale update
+  // React replays later — FR2's render-phase reset lost exactly that race —
+  // carries its own product's id and cannot surface under another.
+  //
+  // Keyed on the id, never the object: the page builds a fresh object on every
+  // open, and reopening the SAME product keeps the capture. A capture entered
+  // under A and still in state also reappears if the dialog goes back to A,
+  // which is right: it belongs to A. The other remembered fields are out of
+  // scope here.
+  const [capture, setCapture] = useState<Capture>({
+    productId: product.id,
+    picked: null,
+    reference: "",
+  });
+  const ownCapture = capture.productId === product.id ? capture : NO_CAPTURE;
 
   const quantityQuery = useProductLocationQuantity(product.id, selectedLocationId, {
     enabled: open,
@@ -110,8 +120,8 @@ export function QuickAdjustDialog({
     locations.find((loc) => loc.id === selectedLocationId)?.name ?? "Selected location";
 
   const captureActive = adjustmentType === "remove" && intent === "order";
-  const trimmedReference = orderReference.trim();
-  const sentPick = captureActive ? pickedOrder : null;
+  const trimmedReference = ownCapture.reference.trim();
+  const sentPick = captureActive ? ownCapture.picked : null;
   // Blank or whitespace-only is NOT a reference: it stays out of the body (the
   // schema's `.min(1)` would refuse it) and out of every check below.
   const sentReference = captureActive && trimmedReference !== "" ? trimmedReference : null;
@@ -128,9 +138,36 @@ export function QuickAdjustDialog({
     !captureConflict &&
     !referenceShapeInvalid;
 
+  // A submit in flight cannot be dismissed (B3-1 FR3, FD2-3): Escape, a click
+  // outside and the close button all reach Radix's `onOpenChange(false)`, so
+  // this one guard covers the three; Cancel is disabled meanwhile. The
+  // request's own answer still closes the dialog — `handleSubmit` calls the
+  // host's `onOpenChange` directly — and a failed one leaves it open, as ever.
+  const handleOpenChange = (next: boolean) => {
+    if (!next && isSubmitting) return;
+    onOpenChange(next);
+  };
+
   const clearCapture = () => {
-    setPickedOrder(null);
-    setOrderReference("");
+    setCapture({ productId: product.id, picked: null, reference: "" });
+  };
+
+  // Each half survives the other's write only if it was entered under THIS
+  // product — the functional update reads what is in state, not this render.
+  const handlePick = (next: PickedOrder | null) => {
+    setCapture((prev) => ({
+      productId: product.id,
+      picked: next,
+      reference: prev.productId === product.id ? prev.reference : "",
+    }));
+  };
+
+  const handleReferenceChange = (next: string) => {
+    setCapture((prev) => ({
+      productId: product.id,
+      picked: prev.productId === product.id ? prev.picked : null,
+      reference: next,
+    }));
   };
 
   const handleAdjustmentTypeChange = (value: "add" | "remove") => {
@@ -232,7 +269,7 @@ export function QuickAdjustDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
           <DialogTitle>Quick Inventory Adjustment</DialogTitle>
@@ -385,8 +422,8 @@ export function QuickAdjustDialog({
           {captureActive && (
             <div className="space-y-4" data-testid="order-capture">
               <OrderLookup
-                value={pickedOrder}
-                onChange={setPickedOrder}
+                value={ownCapture.picked}
+                onChange={handlePick}
                 disabled={isSubmitting}
               />
 
@@ -394,8 +431,8 @@ export function QuickAdjustDialog({
                 <Label htmlFor="order-reference">Or type the order number</Label>
                 <Input
                   id="order-reference"
-                  value={orderReference}
-                  onChange={(e) => setOrderReference(e.target.value)}
+                  value={ownCapture.reference}
+                  onChange={(e) => handleReferenceChange(e.target.value)}
                   placeholder="e.g. 12345"
                   inputMode="numeric"
                   autoComplete="off"

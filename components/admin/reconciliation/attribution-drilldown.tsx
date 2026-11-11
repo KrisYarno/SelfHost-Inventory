@@ -58,7 +58,7 @@ import {
   type MatchUnavailableReason,
 } from "@/lib/reconciliation/match-keys";
 import type { PerProduct, ToleranceReport } from "@/lib/reconciliation/match";
-import type { AttributionRow, WireOrderMatch } from "@/lib/reconciliation/attribution";
+import type { AttributionRow, BatchDetail, WireOrderMatch } from "@/lib/reconciliation/attribution";
 import {
   FULFILLMENT_TARGET_MISSING_COPY,
   MATCH_NOT_COMPUTED_COPY,
@@ -107,6 +107,27 @@ const EXCLUDED_REASON_COPY: Readonly<
   undecomposable: "cannot be decomposed",
   "unit-refused": "unit not comparable",
 };
+
+/**
+ * The adjust page's audit event (B3-1 FR3, Q/A B3-1-QA-2). Its writer NEVER
+ * records a picked id on the event (B3-1 FR1, F2: it records
+ * `orderAttributionSource` instead), so "none" there would say the operator
+ * picked nothing when the attempt below reads `attributed / selected`.
+ */
+const ADJUSTMENT_ACTION_TYPE = "INVENTORY_ADJUSTMENT";
+
+function orderPickedText(auditEvent: NonNullable<BatchDetail["auditEvent"]>): string {
+  if (auditEvent.selectedExternalOrderId !== undefined) return auditEvent.selectedExternalOrderId;
+  if (auditEvent.actionType === ADJUSTMENT_ACTION_TYPE) return "not recorded on this event";
+  return "none";
+}
+
+/** HOW the writer stamped the ledger, in words; an unknown value shows as stored. */
+function stampedFromText(source: string): string {
+  if (source === "selected") return "a picked order";
+  if (source === "reference-resolved") return "a typed order number";
+  return source;
+}
 
 /** Integer hundredths in the unit's own scale: 1000 -> "10", 29 -> "0.29". */
 function massText(hundredths: number): string {
@@ -623,9 +644,12 @@ export function AttributionDrilldown({
                     <p className="text-muted-foreground">{data.auditEvent.label}</p>
                     <p>reference typed: {data.auditEvent.orderReference ?? "none"}</p>
                     <p>intent: {data.auditEvent.intent ?? "none"}</p>
-                    <p>
-                      order picked: {data.auditEvent.selectedExternalOrderId ?? "none"}
-                    </p>
+                    <p>order picked: {orderPickedText(data.auditEvent)}</p>
+                    {data.auditEvent.orderAttributionSource !== undefined && (
+                      <p>
+                        stamped from: {stampedFromText(data.auditEvent.orderAttributionSource)}
+                      </p>
+                    )}
                   </div>
                 )}
               </Section>

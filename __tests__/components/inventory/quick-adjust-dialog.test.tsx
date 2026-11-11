@@ -3,6 +3,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import * as React from "react";
+import { flushSync } from "react-dom";
 
 jest.mock("@/hooks/use-csrf", () => ({
   useCSRF: () => ({ token: "t", isLoading: false, error: null, refreshToken: async () => {} }),
@@ -150,6 +151,33 @@ describe("the capture", () => {
     await waitFor(() => expect(adjustCalls().length).toBe(before + 1));
     const call = adjustCalls()[before];
     return JSON.parse((call[1] as RequestInit).body as string);
+  }
+
+  /**
+   * Holds the NEXT adjust POST until the returned release is called; it then
+   * answers with `adjustAnswer`. Every other request answers as usual.
+   */
+  function holdNextAdjust(): () => void {
+    const answer = fetchMock.getMockImplementation() as (url: RequestInfo | URL, init?: RequestInit) => unknown;
+    let release: () => void = () => {
+      throw new Error("no adjust request was held");
+    };
+    let holding = true;
+    fetchMock.mockImplementation((url: RequestInfo | URL, init?: RequestInit) => {
+      if (holding && String(url) === "/api/inventory/adjust") {
+        holding = false;
+        return new Promise((resolve) => {
+          release = () =>
+            resolve({
+              ok: adjustAnswer.status < 400,
+              status: adjustAnswer.status,
+              json: async () => adjustAnswer.body,
+            } as unknown as Response);
+        });
+      }
+      return answer(url, init);
+    });
+    return () => release();
   }
 
   describe("when the fields exist", () => {
@@ -448,6 +476,183 @@ describe("the capture", () => {
       // And the capture B shows is empty.
       expect(screen.queryByTestId("order-lookup-picked")).toBeNull();
       expect(referenceField()).toHaveValue("");
+    });
+
+    // B3-1 FR3 (Q/A B3-1-QA-1): FR2's render-phase reset was right only if
+    // React's scheduling cooperated. A submit on A that settles AFTER the
+    // product changed queues the form's resets at DEFAULT priority. A SYNC
+    // render of B skips them, and React 18 then rebuilds each skipped hook from
+    // a base state the render-phase clear never advanced — so the NEXT sync
+    // render showed A's order under B, and Confirm sent it with B's id.
+    //
+    // Q/A reached that window by dismissing the dialog mid-submit, a path now
+    // closed (below). The product is swapped from the HOST here instead, so this
+    // pin proves the capture's own construction — stored WITH the id of the
+    // product it was entered under — closes it whatever dismissal allows. Steps
+    // 4 to 6 run in `flushSync` OUTSIDE `act`: `act` would flush the queued
+    // default-priority resets on exit, which is exactly the window under test.
+    it.each([
+      ["a pick", async (user: User) => pickOrder(user)],
+      ["a typed reference", async (user: User) => user.type(referenceField(), "1009")],
+    ])("A's submit settling under B never pairs B with A's capture, whatever React's scheduling (%s)", async (_label, enter) => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      let swapToB: () => void = () => {};
+      function SwapHost() {
+        const [open, setOpen] = React.useState(true);
+        const [product, setProduct] = React.useState({ ...PRODUCT_A });
+        swapToB = () => setProduct({ ...PRODUCT_B });
+        return <QuickAdjustDialog open={open} onOpenChange={setOpen} product={product} onSuccess={() => {}} />;
+      }
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+      });
+      // B's stock is already known, so B's first synchronous render can enable
+      // Confirm — the window this needs.
+      client.setQueryData(["product-location-quantity", PRODUCT_B.id, 2], 40);
+      render(
+        <QueryClientProvider client={client}>
+          <SwapHost />
+        </QueryClientProvider>,
+      );
+      await waitFor(() => expect(screen.getByText(/40 units/)).toBeInTheDocument());
+      await user.type(screen.getByLabelText("Quantity"), "3");
+      await user.type(screen.getByLabelText("Reason (required)"), "packed");
+      await intoCapture(user);
+      await enter(user);
+
+      // 1. Submit on A, with the request held.
+      const releaseA = holdNextAdjust();
+      await user.click(confirmButton());
+      await waitFor(() => expect(adjustCalls()).toHaveLength(1));
+      expect(screen.getByRole("button", { name: "Adjusting..." })).toBeDisabled();
+
+      // From here to Confirm, React runs OUTSIDE `act` on purpose; the flag
+      // only silences the warning that says so.
+      const actEnv = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+      const wasActEnv = actEnv.IS_REACT_ACT_ENVIRONMENT;
+      actEnv.IS_REACT_ACT_ENVIRONMENT = false;
+      let shownUnderB: { product: boolean; picked: string | null; reference: string | null };
+      try {
+        // 2-3. A's request resolves, and its continuation queues the resets at
+        // default priority. Only MICROTASKS are drained, so React's scheduler
+        // (a macrotask) has not rendered them yet.
+        releaseA();
+        for (let i = 0; i < 500 && toastWarning.mock.calls.length === 0; i++) await Promise.resolve();
+        expect(toastWarning).toHaveBeenCalledTimes(1);
+        expect(screen.getByLabelText("Quantity")).toHaveValue(3);
+
+        // 4. B, in a sync render.
+        flushSync(() => swapToB());
+        // 5. A second sync render of B.
+        flushSync(() => screen.getByRole("button", { name: "Increase quantity" }).click());
+        shownUnderB = {
+          product: screen.queryByText(PRODUCT_B.name) !== null,
+          picked: document.querySelector('[data-testid="order-lookup-picked"]')?.textContent ?? null,
+          reference: (document.getElementById("order-reference") as HTMLInputElement | null)?.value ?? null,
+        };
+        // 6. Confirm, in a sync render.
+        flushSync(() => confirmButton().click());
+      } finally {
+        actEnv.IS_REACT_ACT_ENVIRONMENT = wasActEnv;
+      }
+
+      await waitFor(() => expect(adjustCalls()).toHaveLength(2));
+      const body = JSON.parse((adjustCalls()[1][1] as RequestInit).body as string);
+      expect({
+        shownUnderB,
+        productId: body.productId,
+        delta: body.delta,
+        selectedExternalOrderId: body.selectedExternalOrderId ?? null,
+        orderReference: body.orderReference ?? null,
+      }).toEqual({
+        shownUnderB: { product: true, picked: null, reference: "" },
+        productId: PRODUCT_B.id,
+        delta: -4,
+        selectedExternalOrderId: null,
+        orderReference: null,
+      });
+      expect("selectedExternalOrderId" in body).toBe(false);
+      expect("orderReference" in body).toBe(false);
+
+      // Let B's own answer and A's queued resets land before the next test.
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    });
+  });
+
+  // B3-1 FR3 (FD2-3): a submit in flight cannot be dismissed — not by Escape,
+  // a click outside, or the close button. Q/A's reproduction above began with
+  // exactly that dismissal. The request's own answer still closes the dialog,
+  // as it always has; an idle dialog dismisses as it always has.
+  describe("a submit in flight cannot be dismissed", () => {
+    function GuardHost({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
+      const [open, setOpen] = React.useState(true);
+      return (
+        <>
+          <button type="button">Beside the dialog</button>
+          <QuickAdjustDialog
+            open={open}
+            onOpenChange={(next) => {
+              onOpenChange(next);
+              setOpen(next);
+            }}
+            product={{ id: 42, name: "AOD 2mg" }}
+            onSuccess={() => {}}
+          />
+        </>
+      );
+    }
+
+    async function readyInGuardHost(user: User, onOpenChange: (open: boolean) => void) {
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+      });
+      render(
+        <QueryClientProvider client={client}>
+          <GuardHost onOpenChange={onOpenChange} />
+        </QueryClientProvider>,
+      );
+      await waitFor(() => expect(screen.getByText(/40 units/)).toBeInTheDocument());
+      await user.type(screen.getByLabelText("Quantity"), "3");
+      await user.type(screen.getByLabelText("Reason (required)"), "packed");
+    }
+
+    const DISMISSALS: Array<[string, (user: User) => Promise<void>]> = [
+      ["Escape", (user) => user.keyboard("{Escape}")],
+      // Outside the modal, so the accessibility tree hides it.
+      ["a click outside", (user) => user.click(screen.getByRole("button", { name: "Beside the dialog", hidden: true }))],
+      ["the close button", (user) => user.click(screen.getByRole("button", { name: "Close" }))],
+    ];
+
+    it.each(DISMISSALS)("%s does not close it while the request is in flight; the answer does", async (_how, dismiss) => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      const onOpenChange = jest.fn();
+      await readyInGuardHost(user, onOpenChange);
+
+      const release = holdNextAdjust();
+      await user.click(confirmButton());
+      await waitFor(() => expect(screen.getByRole("button", { name: "Adjusting..." })).toBeInTheDocument());
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+
+      await dismiss(user);
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Adjusting..." })).toBeInTheDocument();
+
+      release();
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(onOpenChange.mock.calls).toEqual([[false]]);
+      expect(toastSuccess).toHaveBeenCalledWith("Added 3 units to AOD 2mg");
+    });
+
+    it.each(DISMISSALS)("%s still closes an idle dialog", async (_how, dismiss) => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      const onOpenChange = jest.fn();
+      await readyInGuardHost(user, onOpenChange);
+
+      await dismiss(user);
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+      expect(adjustCalls()).toHaveLength(0);
     });
   });
 

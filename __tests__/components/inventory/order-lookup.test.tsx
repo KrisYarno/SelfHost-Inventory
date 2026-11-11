@@ -302,6 +302,31 @@ describe("the shape check comes first", () => {
     expect(lookupInput()).toHaveAttribute("aria-invalid", "false");
   });
 
+  // B3-1 FR3 (Q/A info item): the search asks with the text the shape check
+  // judged — TRIMMED. "243 " is the order number 243, not a second cache key.
+  it('`243 ` -> the hook is asked for "243", never "243 "', () => {
+    jest.useFakeTimers();
+    render(<Host />);
+
+    fireEvent.change(lookupInput(), { target: { value: "243 " } });
+    act(() => jest.advanceTimersByTime(250));
+
+    expect(useOrderSearchMock).toHaveBeenLastCalledWith("243");
+    expect(useOrderSearchMock.mock.calls.map((call) => call[0])).not.toContain("243 ");
+    expect(screen.queryByText(ORDER_REFERENCE_HINT)).toBeNull();
+  });
+
+  it("whitespace alone asks nothing (the hook's disabled state)", () => {
+    jest.useFakeTimers();
+    render(<Host />);
+
+    fireEvent.change(lookupInput(), { target: { value: "   " } });
+    act(() => jest.advanceTimersByTime(250));
+
+    for (const call of useOrderSearchMock.mock.calls) expect(call[0]).toBe("");
+    expect(screen.queryByText(ORDER_REFERENCE_HINT)).toBeNull();
+  });
+
   it("a fixed query is searched only once the debounce catches up — the malformed one never is", () => {
     jest.useFakeTimers();
     render(<Host />);

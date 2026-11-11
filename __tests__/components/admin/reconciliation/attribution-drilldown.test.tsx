@@ -212,6 +212,86 @@ it("labels the operator's free text as the audit event's, and shows all three fi
   expect(block).toHaveTextContent("order picked: ord-1");
 });
 
+// B3-1 FR3 (Q/A B3-1-QA-2): the adjust route records HOW it stamped
+// (`orderAttributionSource`) and never a picked id on its event (B3-1 FR1, F2),
+// so a picked adjust batch must not read "order picked: none" above an attempt
+// that says `attributed / selected`.
+describe("the audit event's order lines", () => {
+  type AuditEvent = NonNullable<BatchDetail["auditEvent"]>;
+  const LABEL = "from the audit event (free text, admin-visible on /admin/logs)" as const;
+
+  function renderAuditEvent(over: Partial<AuditEvent>) {
+    setDetail(
+      makeDetail({
+        auditEvent: {
+          id: 5,
+          actionType: "INVENTORY_ADJUSTMENT",
+          createdAt: "2026-08-20T10:00:00.000Z",
+          intent: "order",
+          label: LABEL,
+          ...over,
+        },
+      }),
+    );
+    render(
+      <AttributionDrilldown row={makeRow()} open onOpenChange={jest.fn()} onAttribute={jest.fn()} />,
+    );
+    return screen.getByTestId("drilldown-audit-event");
+  }
+
+  const lines = (block: HTMLElement) =>
+    Array.from(block.querySelectorAll("p")).map((p) => p.textContent);
+
+  it("an adjust event stamped from a PICK: the id is not recorded there, and it says how it stamped", () => {
+    const block = renderAuditEvent({ orderAttributionSource: "selected" });
+
+    expect(lines(block)).toContain("order picked: not recorded on this event");
+    expect(lines(block)).toContain("stamped from: a picked order");
+    expect(block).not.toHaveTextContent("order picked: none");
+  });
+
+  it("an adjust event stamped from a TYPED number says so", () => {
+    const block = renderAuditEvent({ orderAttributionSource: "reference-resolved", orderReference: "1009" });
+
+    expect(lines(block)).toContain("stamped from: a typed order number");
+    expect(lines(block)).toContain("order picked: not recorded on this event");
+  });
+
+  it("a source this page has no words for shows as stored", () => {
+    const block = renderAuditEvent({ orderAttributionSource: "some-future-source" });
+
+    expect(lines(block)).toContain("stamped from: some-future-source");
+  });
+
+  it("an unstamped adjust event: no stamped-from line, and still no claim that nothing was picked", () => {
+    const block = renderAuditEvent({});
+
+    expect(lines(block)).toContain("order picked: not recorded on this event");
+    expect(block).not.toHaveTextContent("stamped from:");
+  });
+
+  // Deduct-simple's event (`INVENTORY_BULK_UPDATE`) DOES record the picked id.
+  it("any other event keeps today's line: the picked id, or none", () => {
+    const withId = renderAuditEvent({ actionType: "INVENTORY_BULK_UPDATE", selectedExternalOrderId: "ord-1" });
+    expect(lines(withId)).toContain("order picked: ord-1");
+    expect(withId).not.toHaveTextContent("stamped from:");
+  });
+
+  it("any other event with no picked id reads none", () => {
+    const block = renderAuditEvent({ actionType: "INVENTORY_BULK_UPDATE" });
+
+    expect(lines(block)).toContain("order picked: none");
+    expect(block).not.toHaveTextContent("stamped from:");
+  });
+
+  it("a picked id on the event wins, whatever the action type", () => {
+    const block = renderAuditEvent({ selectedExternalOrderId: "ord-7", orderAttributionSource: "selected" });
+
+    expect(lines(block)).toContain("order picked: ord-7");
+    expect(lines(block)).toContain("stamped from: a picked order");
+  });
+});
+
 it("says nothing was recorded rather than leaving the attempt list blank", () => {
   render(
     <AttributionDrilldown row={makeRow()} open onOpenChange={jest.fn()} onAttribute={jest.fn()} />,
