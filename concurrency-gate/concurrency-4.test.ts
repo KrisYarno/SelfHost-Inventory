@@ -229,6 +229,9 @@ let orderLock: typeof import("@/lib/inventory/order-lock");
 let inventory: typeof import("@/lib/inventory");
 let deductSimpleRoute: SingleArgRoute;
 let batchAdjustRoute: SingleArgRoute;
+/** P2-B3-1 (pack § P2-B3-1, scenario 18): the adjust route, whose typed order
+ *  number now stamps the ledger row — the first real-engine run it has had. */
+let adjustRoute: SingleArgRoute;
 let fulfillRoute: ParamRoute<OrderParams>;
 let unfulfillRoute: ParamRoute<OrderParams>;
 /** B2b (pack CB2b.6): the reverse, driven with `{ batchId }` and NO JSON body. */
@@ -873,8 +876,27 @@ async function callParamRoute<P>(
 type DeductItem = { productId: number; quantity: number };
 type Adjustment = { productId: number; locationId: number; delta: number };
 
-function deductSimple(locationId: number, items: DeductItem[]): Promise<RouteAnswer> {
-  return callRoute(deductSimpleRoute, "/api/inventory/deduct-simple", { locationId, items });
+/**
+ * The order identity a deduction may carry (P2-B3-1, scenario 18) — merged into
+ * the body as given. OPTIONAL on purpose: absent, the spread adds no key and the
+ * request is byte for byte the one every pre-B3-1 caller sent.
+ */
+type DeductIdentity = {
+  intent?: "order" | "other";
+  orderReference?: string;
+  selectedExternalOrderId?: string;
+};
+
+function deductSimple(
+  locationId: number,
+  items: DeductItem[],
+  identity?: DeductIdentity,
+): Promise<RouteAnswer> {
+  return callRoute(deductSimpleRoute, "/api/inventory/deduct-simple", {
+    locationId,
+    items,
+    ...identity,
+  });
 }
 
 function batchAdjust(adjustments: Adjustment[]): Promise<RouteAnswer> {
@@ -1036,6 +1058,11 @@ beforeAll(async () => {
   batchAdjustRoute = (await import(
     "@/app/api/inventory/batch-adjust/route"
   )) as unknown as SingleArgRoute;
+  // P2-B3-1 (pack § P2-B3-1, scenario 18): until this import no gate scenario
+  // drove the adjust handler. The file's mocks hold for it as for the others —
+  // the gate's ADMIN session (so the reference resolver's membership check
+  // passes), a no-op CSRF guard and rate limit.
+  adjustRoute = (await import("@/app/api/inventory/adjust/route")) as unknown as SingleArgRoute;
   // B1.5 (pack CB1.5a-ii): the first time either of these runs against a real
   // engine. Same registry, same singleton, same fail-closed schema proof below.
   fulfillRoute = (await import(
@@ -3497,4 +3524,730 @@ describe("scenario 15 — the B1c deadlock pair is GREEN (pack CB2.5c.3)", () =>
       await probe.$disconnect();
     }
   });
+});
+
+// ==========================================================================
+// SCENARIO 18 — THE ADJUST CAPTURE'S STAMP TAKES THE ORDER LOCK (pack
+// § P2-B3-1, "The capture gate scenario"; B3-CX6-4 ACCEPTED, B3-G6-9's
+// no-new-scenario argument REJECTED — pack row 92)
+//
+// P2-B3-1 gives the adjust route a NEW stamp source: an order number the
+// operator TYPED, resolved OUTSIDE the transaction to the order's STORED id.
+// When it names one order, `lockFirst` takes that order's row as the
+// transaction's first statement — the hook deduct-simple, fulfil and unfulfill
+// already run. The mocked statement-order pin proves the CALL order; it cannot
+// prove what InnoDB does with the order row, and until this scenario no gate
+// run had ever driven the adjust handler at all.
+//
+//   18-i   a stamped adjust deduction vs a stamped deduct-simple on the SAME
+//          order;
+//   18-ii  the same adjust vs an UNFULFIL of that order (its line fulfilled
+//          first, through the real route, not raced).
+//
+// Each leg runs for BOTH identities the adjust can carry (the typed number, or
+// the picked id) and in BOTH launch orders — parameters, never copies. The
+// first writer is held at its own ledger INSERT, inside the transaction that
+// already holds the order's X lock, and proven ASLEEP before the second is
+// launched (the 11c FULFIL-FIRST idiom). The claim is then read off the ENGINE:
+// every lock the loser waited for, sampled for the whole of its life, is the
+// ORDER ROW — never the stock row it is about to write. ADJUST-FIRST is the run
+// that proves the adjust TOOK the order lock with the resolved id; OTHER-FIRST
+// proves it ASKED for that row.
+//
+// THE PROBE IS PROVEN BY INVERSION (the control). Every racer here writes the
+// SAME stock row, so a stock-row wait is always there to be observed: an adjust
+// whose number resolves to NO order stamps nothing and locks no order, and the
+// same stamped deduct-simple launched at it waits on `product_locations`
+// instead. A probe that could only ever answer `external_orders` fails there.
+//
+// THE FIXTURE IS THIS SCENARIO'S OWN (the 11c precedent). Nothing in `seed.ts`
+// owns its order: the bracket creates it, every run resets its fulfilment state
+// through the seed's own scoped clauses before and after, and the `afterAll`
+// takes it away — ASSERTING that it did, because `concurrency.test.ts` scenario
+// 2 pins ABSOLUTE table-wide counts from another file.
+// ==========================================================================
+
+const S18_ORDER_ID = "concurrencygatecapture18";
+/** Digits only (the resolver's bar is `^[0-9]{1,20}$`) and unique in the gate
+ *  DB — the seed's orders are 1001/1002, 11c's is 77001. */
+const S18_ORDER_NUMBER = "77018";
+/** The control's number: well-formed, and no order carries it. */
+const S18_UNMATCHED_NUMBER = "77019";
+const S18_EXTERNAL_ID = "770018";
+const S18_LINK = "gate-link-capture";
+const S18_ITEM = "gate-item-capture";
+
+/** The one stock row every racer here writes. */
+const S18_KEY: PrelockKeyInput = { productId: P_APPROVED, locationId: LOCATION_MAIN };
+
+const S18_OPENING = 10;
+const S18_ADJUST_UNITS = 1;
+const S18_DEDUCT_UNITS = 2;
+/** The order line's quantity — what 18-ii's fulfil takes and its unfulfil puts back. */
+const S18_LINE_UNITS = 2;
+/** 11a-ii's, 11c's and 15's value (F28): the loser has to be OBSERVED queueing. */
+const S18_HOLD_SECONDS = 3;
+
+/** The file's reset, widened by this scenario's line and order: the seed's own
+ *  B1.5 clauses put `fulfilledQty` and the stocked-out stamps back. */
+async function resetScenario18(): Promise<void> {
+  await resetGateFixtures({
+    lineIds: SEED_LINE_IDS,
+    productIds: SEED_PRODUCT_IDS,
+    externalOrderItemIds: [GATE_ITEM_SINGLE, GATE_ITEM_BUNDLE, S18_ITEM],
+    externalOrderIds: [GATE_EXT_ORDER_ID, S18_ORDER_ID],
+  });
+}
+
+type S18Variant = "reference" | "selected";
+type S18LaunchOrder = "adjust-first" | "other-first";
+
+/** The capture: an `order` REMOVE carrying the typed number and NO id, or the
+ *  picked id — the selected-id variant is this one parameter. */
+function captureAdjust(
+  variant: S18Variant,
+  orderReference: string = S18_ORDER_NUMBER,
+): Promise<RouteAnswer> {
+  return callRoute(adjustRoute, "/api/inventory/adjust", {
+    productId: S18_KEY.productId,
+    locationId: S18_KEY.locationId,
+    delta: -S18_ADJUST_UNITS,
+    intent: "order",
+    ...(variant === "reference" ? { orderReference } : { selectedExternalOrderId: S18_ORDER_ID }),
+  });
+}
+
+/** A STAMPED deduct-simple on the scenario's order (the picked-id path). */
+function stampedDeductSimple(): Promise<RouteAnswer> {
+  return deductSimple(LOCATION_MAIN, [{ productId: S18_KEY.productId, quantity: S18_DEDUCT_UNITS }], {
+    intent: "order",
+    selectedExternalOrderId: S18_ORDER_ID,
+  });
+}
+
+/** 14D's call shape, addressed at this scenario's order. */
+function unfulfilCaptureOrder(): Promise<RouteAnswer> {
+  return callParamRoute(
+    unfulfillRoute,
+    `/api/orders/${S18_ORDER_ID}/unfulfill`,
+    { orderId: S18_ORDER_ID },
+    {
+      items: [
+        {
+          itemId: S18_ITEM,
+          productId: S18_KEY.productId,
+          quantity: S18_LINE_UNITS,
+          locationId: S18_KEY.locationId,
+        },
+      ],
+    },
+  );
+}
+
+/** One lock a gate session was WAITING for, as `performance_schema` names it. */
+type LockWaitSeen = {
+  objectName: string;
+  indexName: string | null;
+  lockMode: string;
+  lockData: string | null;
+};
+
+function describeWait(wait: LockWaitSeen): string {
+  return `${wait.objectName}.${wait.indexName ?? "(table)"} ${wait.lockMode} ${wait.lockData ?? "(no data)"}`;
+}
+
+/**
+ * EVERY lock a gate session waited for, sampled every 10 ms until `settled`
+ * resolves — WHICH object, not merely "some wait" (`waitForLockWait` answers
+ * only the latter). The REQUESTING side of `data_lock_waits`, joined to
+ * `data_locks` on its own lock id and scoped to the gate schema (B25-CX-5: the
+ * view is server-wide). De-duplicated by content, so one wait held for three
+ * seconds is one entry and a second, different wait is a second entry.
+ */
+async function recordLockWaits(
+  probe: PrismaClient,
+  settled: Promise<unknown>,
+): Promise<LockWaitSeen[]> {
+  const state = { done: false };
+  void settled.then(() => {
+    state.done = true;
+  });
+  const seen = new Map<string, LockWaitSeen>();
+  while (!state.done) {
+    const rows = await probe.$queryRawUnsafe<LockWaitSeen[]>(
+      `SELECT r.OBJECT_NAME AS objectName, r.INDEX_NAME AS indexName,
+              r.LOCK_MODE AS lockMode, r.LOCK_DATA AS lockData
+         FROM performance_schema.data_lock_waits w
+         JOIN performance_schema.data_locks r ON r.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID
+        WHERE r.OBJECT_SCHEMA = ? AND r.LOCK_STATUS = 'WAITING'`,
+      GATE_DB_NAME,
+    );
+    for (const row of rows) {
+      const wait: LockWaitSeen = {
+        objectName: String(row.objectName),
+        indexName: row.indexName === null ? null : String(row.indexName),
+        lockMode: String(row.lockMode),
+        lockData: row.lockData === null ? null : String(row.lockData),
+      };
+      seen.set(describeWait(wait), wait);
+    }
+    await sleep(10);
+  }
+  return Array.from(seen.values());
+}
+
+type S18Race = {
+  /** The first writer was inside its ledger hold before the second existed. */
+  firstAsleep: boolean;
+  /** Every lock any gate session waited for, from the second's launch to the end. */
+  waits: LockWaitSeen[];
+  /** In LAUNCH order: [the held first writer, the second]. */
+  answers: [RouteAnswer, RouteAnswer];
+  deadlock: { after: string | null; fresh: boolean };
+};
+
+/**
+ * The house hold idiom (11c FULFIL-FIRST, `:3343`): hold the FIRST writer at its
+ * own `inventory_logs` INSERT, prove it asleep, launch the SECOND at it, and
+ * record what the second waits on until both have answered. The engine's
+ * deadlock section is sampled around the whole race (`reportDeadlocks`).
+ */
+async function raceHeldFirst(
+  label: string,
+  first: () => Promise<RouteAnswer>,
+  second: () => Promise<RouteAnswer>,
+): Promise<S18Race> {
+  const probe = openClient();
+  try {
+    await warmUp(probe);
+    await installLedgerHold([S18_KEY.productId], S18_HOLD_SECONDS);
+    const { value, after, fresh } = await reportDeadlocks(label, async () => {
+      const held = first();
+      // The first writer holds the order's X lock (when it stamps) and the stock
+      // row from here until its hold expires.
+      const firstAsleep = await waitForSleepingSessions(probe, 1);
+      const queued = second();
+      const waits = await recordLockWaits(probe, Promise.allSettled([held, queued]));
+      const answers = await Promise.all([held, queued]);
+      return { firstAsleep, waits, answers };
+    });
+    return { ...value, deadlock: { after, fresh } };
+  } finally {
+    await dropHoldTrigger();
+    await probe.$disconnect();
+  }
+}
+
+/** The ledger row id a batch's FIRST row got — commit order, because the loser
+ *  cannot reach its own INSERT until the winner has committed. */
+async function firstLedgerIdOf(batchId: string): Promise<number> {
+  const rows = await rawRows<{ id: number | null }>(
+    "SELECT MIN(id) AS id FROM inventory_logs WHERE batchId = ?",
+    [batchId],
+  );
+  return Number(rows[0]?.id);
+}
+
+type AttemptRow = {
+  outcome: string;
+  evidence: string | null;
+  reason: string | null;
+  source: string;
+  orderRecordId: string | null;
+  ledgerRowId: number | null;
+};
+
+/** The attempt rows `recordAttributionAttempt` filed under one batch. */
+async function attemptsForBatch(batchId: string): Promise<AttemptRow[]> {
+  const rows = await rawRows<AttemptRow>(
+    `SELECT outcome, evidence, reason, source, orderRecordId, ledgerRowId
+       FROM order_attribution_attempts
+      WHERE batchId = ?
+      ORDER BY id`,
+    [batchId],
+  );
+  return rows.map((row) => ({
+    ...row,
+    ledgerRowId: row.ledgerRowId === null ? null : Number(row.ledgerRowId),
+  }));
+}
+
+/** The `details` of the ONE audit event filed under a batch (mysql2 hands a
+ *  JSON column back parsed; a string is parsed here so the answer cannot
+ *  depend on the driver). */
+async function eventDetailsForBatch(batchId: string): Promise<Record<string, unknown>> {
+  const rows = await rawRows<{ details: unknown }>(
+    "SELECT details FROM audit_logs WHERE batchId = ? ORDER BY id",
+    [batchId],
+  );
+  expect(rows).toHaveLength(1);
+  const raw = rows[0].details;
+  return (typeof raw === "string" ? JSON.parse(raw) : raw ?? {}) as Record<string, unknown>;
+}
+
+type StampedTotals = Record<string, { rows: number; units: number }>;
+
+/** The order's WHOLE stamped ledger, by logType — what a reconciliation reads. */
+async function stampedTotalsFor(orderId: string): Promise<StampedTotals> {
+  const rows = await rawRows<{ logType: string; n: number; units: number | string }>(
+    `SELECT logType, COUNT(*) AS n, SUM(delta) AS units
+       FROM inventory_logs
+      WHERE orderRecordId = ?
+      GROUP BY logType`,
+    [orderId],
+  );
+  const totals: StampedTotals = {};
+  for (const row of rows) {
+    totals[String(row.logType)] = { rows: Number(row.n), units: Number(row.units) };
+  }
+  return totals;
+}
+
+/** The order line's `fulfilledQty` and the order's `stockedOut`, together. */
+async function captureOrderState(): Promise<{ fulfilledQty: number; stockedOut: boolean }> {
+  const items = await rawRows<{ fulfilledQty: number }>(
+    "SELECT fulfilledQty FROM external_order_items WHERE id = ?",
+    [S18_ITEM],
+  );
+  return {
+    fulfilledQty: Number(items[0]?.fulfilledQty),
+    stockedOut: await orderStockedOutFor(S18_ORDER_ID),
+  };
+}
+
+/** 18-ii's arrangement: the line fulfilled through the REAL route, alone. */
+async function fulfilCaptureLine(): Promise<void> {
+  const fulfilled = await callParamRoute(
+    fulfillRoute,
+    `/api/orders/${S18_ORDER_ID}/fulfill`,
+    { orderId: S18_ORDER_ID },
+    { locationId: LOCATION_MAIN, items: [{ itemId: S18_ITEM, quantity: S18_LINE_UNITS }] },
+  );
+  expect(fulfilled.status).toBe(200);
+  const results = resultsOf(fulfilled);
+  expect(results.failed).toEqual([]);
+  expect(results.skipped).toEqual([]);
+  expect(results.fulfilled).toHaveLength(1);
+  expect(await captureOrderState()).toEqual({ fulfilledQty: S18_LINE_UNITS, stockedOut: true });
+  expect(await stampedTotalsFor(S18_ORDER_ID)).toEqual({
+    SALE: { rows: 1, units: -S18_LINE_UNITS },
+  });
+}
+
+/** What distinguishes the two legs — everything else is one runner. */
+type S18Leg = {
+  leg: "18-i" | "18-ii";
+  other: "deduct-simple" | "unfulfill";
+  /** Run BEFORE the hold exists: the order as the other writer needs it. */
+  arrange: () => Promise<void>;
+  /** The stock row once `arrange` is done — the race's starting point. */
+  beforeRace: { quantity: number; version: number };
+  launchOther: () => Promise<RouteAnswer>;
+  /** The batch the other writer's rows and its event were filed under. */
+  otherBatchOf: (answer: RouteAnswer) => Promise<string>;
+  /** Its one ledger row (the scenario's key), stamped with the order. */
+  otherRow: { logType: string; delta: number };
+  otherEvent: AuditRow;
+  /** Its attempt row; null where the route records none — an unfulfil is not
+   *  an attribution, and the pack names the adjust's and deduct-simple's classes. */
+  otherAttempt: Omit<AttemptRow, "ledgerRowId"> | null;
+  /** The order's whole stamped ledger once both have committed. */
+  stampedAfter: StampedTotals;
+};
+
+const S18_LEGS: Record<S18Leg["leg"], S18Leg> = {
+  "18-i": {
+    leg: "18-i",
+    other: "deduct-simple",
+    arrange: async () => undefined,
+    beforeRace: { quantity: S18_OPENING, version: 0 },
+    launchOther: stampedDeductSimple,
+    otherBatchOf: async (answer) => String(answer.body.batchId),
+    otherRow: { logType: "SALE", delta: -S18_DEDUCT_UNITS },
+    otherEvent: { actionType: "INVENTORY_BULK_UPDATE", entityType: "INVENTORY", entityId: null },
+    otherAttempt: {
+      outcome: "attributed",
+      evidence: "selected",
+      reason: null,
+      source: "live-deduct",
+      orderRecordId: S18_ORDER_ID,
+    },
+    stampedAfter: {
+      ADJUSTMENT: { rows: 1, units: -S18_ADJUST_UNITS },
+      SALE: { rows: 1, units: -S18_DEDUCT_UNITS },
+    },
+  },
+  "18-ii": {
+    leg: "18-ii",
+    other: "unfulfill",
+    arrange: fulfilCaptureLine,
+    beforeRace: { quantity: S18_OPENING - S18_LINE_UNITS, version: 1 },
+    launchOther: unfulfilCaptureOrder,
+    // The unfulfill route answers with no batch id (14D): its change event
+    // names it, which pins that event's existence too.
+    otherBatchOf: async () => {
+      const rows = await rawRows<{ batchId: string }>(
+        `SELECT batchId FROM audit_logs
+          WHERE actionType = 'EXTERNAL_ORDER_UNFULFILLMENT' AND entityId = ?`,
+        [S18_ORDER_ID],
+      );
+      expect(rows).toHaveLength(1);
+      return String(rows[0].batchId);
+    },
+    otherRow: { logType: "CORRECTION", delta: S18_LINE_UNITS },
+    otherEvent: {
+      actionType: "EXTERNAL_ORDER_UNFULFILLMENT",
+      entityType: "ORDER",
+      entityId: S18_ORDER_ID,
+    },
+    otherAttempt: null,
+    stampedAfter: {
+      SALE: { rows: 1, units: -S18_LINE_UNITS },
+      ADJUSTMENT: { rows: 1, units: -S18_ADJUST_UNITS },
+      CORRECTION: { rows: 1, units: S18_LINE_UNITS },
+    },
+  },
+};
+
+/** One run of one leg: a known start, the race, the engine's answer, the books,
+ *  and the reset proven to take back everything the run wrote. */
+async function runCaptureLeg(
+  leg: S18Leg,
+  variant: S18Variant,
+  launch: S18LaunchOrder,
+): Promise<void> {
+  const label = `scenario ${leg.leg} ${variant} ${launch}`;
+
+  // A KNOWN START: the stock, the order's fulfilment state, an unstamped order,
+  // and the three table-wide counts the reset must bring back.
+  await resetScenario18();
+  await setStock(S18_KEY.productId, S18_OPENING);
+  expect(await captureOrderState()).toEqual({ fulfilledQty: 0, stockedOut: false });
+  expect(await stampedTotalsFor(S18_ORDER_ID)).toEqual({});
+  const opening = await countSnapshot();
+
+  await leg.arrange();
+  expect(await locationRow(S18_KEY)).toMatchObject(leg.beforeRace);
+
+  const adjust = (): Promise<RouteAnswer> => captureAdjust(variant);
+  const race =
+    launch === "adjust-first"
+      ? await raceHeldFirst(label, adjust, leg.launchOther)
+      : await raceHeldFirst(label, leg.launchOther, adjust);
+  const [adjusted, other] =
+    launch === "adjust-first" ? race.answers : [race.answers[1], race.answers[0]];
+
+  console.log(
+    `[${label}] first writer asleep in its ledger hold: ${race.firstAsleep}; ` +
+      `the loser's lock waits: ${race.waits.map(describeWait).join(" | ") || "(none observed)"}; ` +
+      `adjust -> ${adjusted.status}, ${leg.other} -> ${other.status}`,
+  );
+
+  // THE RACE REALLY HAPPENED: the first writer was inside its hold — holding the
+  // order row — before the second was launched at it.
+  expect(race.firstAsleep).toBe(true);
+
+  // BOTH COMMIT, and no fresh deadlock section of ANY shape (three covered
+  // writers; none takes an X lock on `products` — CB2.5a.2).
+  assertCoveredRaceEnvelope(label, race.answers, race.deadlock);
+  expect([adjusted.status, other.status]).toEqual([200, 200]);
+
+  // THE CLAIM, off the engine: the loser waited on the ORDER ROW and on nothing
+  // else — never on `product_locations`, where both of them write (the control
+  // above is the run in which it does).
+  expect(Array.from(new Set(race.waits.map((wait) => wait.objectName)))).toEqual([
+    "external_orders",
+  ]);
+  for (const wait of race.waits) {
+    expect(wait.indexName).toBe("PRIMARY");
+    expect(wait.lockData ?? "").toContain(S18_ORDER_ID);
+  }
+
+  // WHO WON, from the ledger: the first-launched writer committed first.
+  const adjustBatch = String(adjusted.body.batchId);
+  const otherBatch = await leg.otherBatchOf(other);
+  const adjustRowId = await firstLedgerIdOf(adjustBatch);
+  const otherRowId = await firstLedgerIdOf(otherBatch);
+  const winner = adjustRowId < otherRowId ? "adjust" : leg.other;
+  console.log(
+    `[${label}] committed first: ${winner} (adjust ledger row #${adjustRowId}, ` +
+      `${leg.other} ledger row #${otherRowId})`,
+  );
+  expect(winner).toBe(launch === "adjust-first" ? "adjust" : leg.other);
+
+  // THE STAMP — the order's STORED id, never the typed text — on the row, and on
+  // the wire the attribution toast reads (`log.orderRecordId`).
+  expect((adjusted.body.log as { orderRecordId?: unknown }).orderRecordId).toBe(S18_ORDER_ID);
+  expect(await ledgerRowsForBatch(adjustBatch)).toEqual([
+    {
+      productId: S18_KEY.productId,
+      delta: -S18_ADJUST_UNITS,
+      logType: "ADJUSTMENT",
+      locationId: S18_KEY.locationId,
+      orderRecordId: S18_ORDER_ID,
+    },
+  ]);
+  expect(await ledgerRowsForBatch(otherBatch)).toEqual([
+    {
+      productId: S18_KEY.productId,
+      delta: leg.otherRow.delta,
+      logType: leg.otherRow.logType,
+      locationId: S18_KEY.locationId,
+      orderRecordId: S18_ORDER_ID,
+    },
+  ]);
+  expect(await stampedTotalsFor(S18_ORDER_ID)).toEqual(leg.stampedAfter);
+
+  // THE STOCK ORACLE, EXACT: the adjust's units off, the other writer's on or
+  // off, one version per committed write.
+  expect(await locationRow(S18_KEY)).toMatchObject({
+    quantity: leg.beforeRace.quantity - S18_ADJUST_UNITS + leg.otherRow.delta,
+    version: leg.beforeRace.version + 2,
+  });
+
+  // THE ATTEMPT CLASSES, each naming its own ledger row.
+  expect(await attemptsForBatch(adjustBatch)).toEqual([
+    {
+      outcome: "attributed",
+      evidence: variant === "reference" ? "reference-resolved" : "selected",
+      reason: null,
+      source: "live-adjust",
+      orderRecordId: S18_ORDER_ID,
+      ledgerRowId: adjustRowId,
+    },
+  ]);
+  if (leg.otherAttempt !== null) {
+    expect(await attemptsForBatch(otherBatch)).toEqual([
+      { ...leg.otherAttempt, ledgerRowId: otherRowId },
+    ]);
+  }
+
+  // THE AUDIT BATCH IDS MATCH THE LEDGER: each request's ONE event is filed
+  // under the batch its rows carry. The typed text rides on the adjust's event
+  // only when it was typed.
+  expect(await auditRowsForBatch(adjustBatch)).toEqual([
+    {
+      actionType: "INVENTORY_ADJUSTMENT",
+      entityType: "INVENTORY",
+      entityId: String(S18_KEY.productId),
+    },
+  ]);
+  const details = await eventDetailsForBatch(adjustBatch);
+  expect(details.intent).toBe("order");
+  if (variant === "reference") {
+    expect(details.orderReference).toBe(S18_ORDER_NUMBER);
+  } else {
+    expect(details).not.toHaveProperty("orderReference");
+  }
+  expect(await auditRowsForBatch(otherBatch)).toEqual([leg.otherEvent]);
+
+  // THE CLEANUP, proven: the reset takes back every row this run wrote — the
+  // arrangement's fulfil included — and the order is unfulfilled again.
+  await resetScenario18();
+  expect(await countSnapshot()).toEqual(opening);
+  expect(await captureOrderState()).toEqual({ fulfilledQty: 0, stockedOut: false });
+  expect(await stampedTotalsFor(S18_ORDER_ID)).toEqual({});
+}
+
+/** Leg x identity x launch order — eight runs of ONE runner. */
+const S18_RUNS = (["18-i", "18-ii"] as const).flatMap((leg) =>
+  (["reference", "selected"] as const).flatMap((variant) =>
+    (["adjust-first", "other-first"] as const).map((launch) => ({
+      leg,
+      other: S18_LEGS[leg].other,
+      variant,
+      launch,
+    })),
+  ),
+);
+
+describe("scenario 18 — the adjust capture's stamp takes the ORDER LOCK on a real engine (pack § P2-B3-1)", () => {
+  jest.setTimeout(120_000);
+
+  /** The three table-wide counts before this bracket created anything. */
+  let bracketOpening: CountSnapshot;
+
+  beforeAll(async () => {
+    await resetAll();
+    bracketOpening = await countSnapshot();
+
+    await singleton.productLink.create({
+      data: {
+        id: S18_LINK,
+        integrationId: GATE_INTEGRATION_ID,
+        externalProductId: "gate-capture-single",
+        internalProductId: P_APPROVED,
+      },
+    });
+    await singleton.externalOrder.create({
+      data: {
+        id: S18_ORDER_ID,
+        companyId: GATE_COMPANY_ID,
+        integrationId: GATE_INTEGRATION_ID,
+        externalId: S18_EXTERNAL_ID,
+        orderNumber: S18_ORDER_NUMBER,
+        nativeStatus: "processing",
+        total: 0,
+        rawPayload: {},
+      },
+    });
+    await singleton.externalOrderItem.create({
+      data: {
+        id: S18_ITEM,
+        orderId: S18_ORDER_ID,
+        externalItemId: "gcap-1",
+        externalProductId: "gate-capture-single",
+        name: "Gate capture single",
+        quantity: S18_LINE_UNITS,
+        price: 0,
+        productLinkId: S18_LINK,
+        isMapped: true,
+        fulfilledQty: 0,
+      },
+    });
+
+    // The resolver's bar, asserted on the fixture rather than assumed: the
+    // number names exactly ONE order in the gate DB, the control's names none.
+    const named = await rawRows<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM external_orders WHERE orderNumber = ?",
+      [S18_ORDER_NUMBER],
+    );
+    expect(Number(named[0]?.n ?? 0)).toBe(1);
+    const unmatched = await rawRows<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM external_orders WHERE orderNumber = ?",
+      [S18_UNMATCHED_NUMBER],
+    );
+    expect(Number(unmatched[0]?.n ?? 0)).toBe(0);
+  });
+
+  afterAll(async () => {
+    await dropHoldTrigger();
+    // NOTHING in `seed.ts` owns this order, so this bracket takes it away (its
+    // line cascades) — otherwise `concurrency.test.ts` scenario 2's ABSOLUTE
+    // counts fail in another file of the same serial run.
+    await singleton.externalOrderItem.deleteMany({ where: { orderId: S18_ORDER_ID } });
+    await singleton.externalOrder.deleteMany({ where: { id: S18_ORDER_ID } });
+    await singleton.productLink.deleteMany({ where: { id: S18_LINK } });
+    await singleton.auditLog.deleteMany({
+      where: { entityType: "ORDER", entityId: S18_ORDER_ID },
+    });
+    await resetAll();
+
+    // ...and PROVEN gone. The egress row is scenario 14's belt, re-asserted for
+    // this bracket's own fulfils and unfulfils.
+    const residue = await rawRows<Record<string, number>>(
+      `SELECT
+         (SELECT COUNT(*) FROM external_orders WHERE id = ?) AS orders,
+         (SELECT COUNT(*) FROM external_order_items WHERE id = ? OR orderId = ?) AS items,
+         (SELECT COUNT(*) FROM product_links WHERE id = ?) AS links,
+         (SELECT COUNT(*) FROM audit_logs WHERE entityType = 'ORDER' AND entityId = ?) AS orderEvents,
+         (SELECT COUNT(*) FROM inventory_logs WHERE orderRecordId = ?) AS stampedRows,
+         (SELECT COUNT(*) FROM order_attribution_attempts WHERE orderRecordId = ?) AS attempts,
+         (SELECT COUNT(*) FROM platform_write_attempts WHERE integrationId = ?) AS egress`,
+      [
+        S18_ORDER_ID,
+        S18_ITEM,
+        S18_ORDER_ID,
+        S18_LINK,
+        S18_ORDER_ID,
+        S18_ORDER_ID,
+        S18_ORDER_ID,
+        GATE_INTEGRATION_ID,
+      ],
+    );
+    const counts = Object.fromEntries(
+      Object.entries(residue[0] ?? {}).map(([key, n]) => [key, Number(n)]),
+    );
+    console.log(`[scenario 18] fixture cleanup residue: ${JSON.stringify(counts)}`);
+    expect(counts).toEqual({
+      orders: 0,
+      items: 0,
+      links: 0,
+      orderEvents: 0,
+      stampedRows: 0,
+      attempts: 0,
+      egress: 0,
+    });
+    expect(await countSnapshot()).toEqual(bracketOpening);
+  });
+
+  test("18 control: a number that names NO order stamps nothing and locks no order — the stamped deduct-simple launched at it waits on the STOCK row instead", async () => {
+    // THE INVERSION THAT MAKES THE LEGS' PROBE EVIDENCE. Same route, same chip,
+    // same launch order as ADJUST-FIRST; only the number differs, so the adjust
+    // resolves nothing, stamps nothing and takes no order lock. The deduct-simple
+    // then gets the order row at once and queues in the prelock's materialize on
+    // `product_locations` behind the held adjust — which the probe must NAME.
+    // (Observed on MySQL 8.4, 2026-11-11: an X,INSERT_INTENTION wait on that
+    // table's PRIMARY index at the supremum pseudo-record — the same-location
+    // materialize serialisation 11a-i records — never a row of `external_orders`.)
+    await resetScenario18();
+    await setStock(S18_KEY.productId, S18_OPENING);
+    const opening = await countSnapshot();
+
+    const label = "scenario 18 control";
+    const race = await raceHeldFirst(
+      label,
+      () => captureAdjust("reference", S18_UNMATCHED_NUMBER),
+      stampedDeductSimple,
+    );
+    const [adjusted, deducted] = race.answers;
+    console.log(
+      `[${label}] first writer asleep in its ledger hold: ${race.firstAsleep}; ` +
+        `the loser's lock waits: ${race.waits.map(describeWait).join(" | ") || "(none observed)"}; ` +
+        `adjust -> ${adjusted.status}, deduct-simple -> ${deducted.status}`,
+    );
+
+    expect(race.firstAsleep).toBe(true);
+    assertCoveredRaceEnvelope(label, race.answers, race.deadlock);
+    expect(race.answers.map((answer) => answer.status)).toEqual([200, 200]);
+
+    // THE PROBE SAYS SOMETHING ELSE when the engine does: the stock table, and
+    // not the order row the deduct-simple took unopposed.
+    expect(Array.from(new Set(race.waits.map((wait) => wait.objectName)))).toEqual([
+      "product_locations",
+    ]);
+
+    // The adjust's own record: unstamped, declined `unmatched`, the typed text
+    // accrued on its event all the same (pack CB3a-i.3).
+    const adjustBatch = String(adjusted.body.batchId);
+    expect(await ledgerRowsForBatch(adjustBatch)).toEqual([
+      {
+        productId: S18_KEY.productId,
+        delta: -S18_ADJUST_UNITS,
+        logType: "ADJUSTMENT",
+        locationId: S18_KEY.locationId,
+        orderRecordId: null,
+      },
+    ]);
+    expect(await attemptsForBatch(adjustBatch)).toEqual([
+      {
+        outcome: "declined",
+        evidence: null,
+        reason: "unmatched",
+        source: "live-adjust",
+        orderRecordId: null,
+        ledgerRowId: await firstLedgerIdOf(adjustBatch),
+      },
+    ]);
+    expect((await eventDetailsForBatch(adjustBatch)).orderReference).toBe(S18_UNMATCHED_NUMBER);
+
+    // Only the deduct-simple's row is stamped, and the stock is exact.
+    expect(await stampedTotalsFor(S18_ORDER_ID)).toEqual({
+      SALE: { rows: 1, units: -S18_DEDUCT_UNITS },
+    });
+    expect(await locationRow(S18_KEY)).toMatchObject({
+      quantity: S18_OPENING - S18_ADJUST_UNITS - S18_DEDUCT_UNITS,
+      version: 2,
+    });
+
+    await resetScenario18();
+    expect(await countSnapshot()).toEqual(opening);
+  });
+
+  test.each(S18_RUNS)(
+    "$leg: the $variant adjust vs $other, $launch launched first and held — they serialise on the ORDER LOCK and both commit",
+    async ({ leg, variant, launch }) => {
+      await runCaptureLeg(S18_LEGS[leg], variant, launch);
+    },
+  );
 });
