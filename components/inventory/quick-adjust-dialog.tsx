@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { Plus, Minus, Package, MapPin } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
@@ -110,6 +110,12 @@ export function QuickAdjustDialog({
   });
   const adjustMutation = useAdjustInventory();
   const isSubmitting = adjustMutation.isPending;
+  // The SYNCHRONOUS half of "a submit is in flight" (B3-1 FD3-1). The rendered
+  // `isPending` lags the request — TanStack notifies its observers on a later
+  // task — so in the instant after Confirm a dismissal, or a second Confirm,
+  // would pass a guard that read only the render. Set before the request
+  // starts, cleared when it settles.
+  const submittingRef = useRef(false);
 
   const currentQuantity = quantityQuery.data ?? 0;
   const quantityNum = parseInt(quantity, 10) || 0;
@@ -140,11 +146,13 @@ export function QuickAdjustDialog({
 
   // A submit in flight cannot be dismissed (B3-1 FR3, FD2-3): Escape, a click
   // outside and the close button all reach Radix's `onOpenChange(false)`, so
-  // this one guard covers the three; Cancel is disabled meanwhile. The
+  // this one guard covers the three, and Cancel goes through it too (it is
+  // also disabled once "Adjusting..." renders). It reads the synchronous latch
+  // as well as the render (FD3-1). The
   // request's own answer still closes the dialog — `handleSubmit` calls the
   // host's `onOpenChange` directly — and a failed one leaves it open, as ever.
   const handleOpenChange = (next: boolean) => {
-    if (!next && isSubmitting) return;
+    if (!next && (submittingRef.current || isSubmitting)) return;
     onOpenChange(next);
   };
 
@@ -197,6 +205,10 @@ export function QuickAdjustDialog({
   };
 
   const handleSubmit = async () => {
+    // One removal per Confirm: a second click before "Adjusting..." renders
+    // would otherwise send a second request (B3-1 FD3-1).
+    if (submittingRef.current) return;
+
     if (!selectedLocationId) {
       toast.error("No location selected");
       return;
@@ -214,6 +226,7 @@ export function QuickAdjustDialog({
       return;
     }
 
+    submittingRef.current = true;
     try {
       const result = await adjustMutation.mutateAsync({
         productId: product.id,
@@ -265,6 +278,8 @@ export function QuickAdjustDialog({
     } catch (error) {
       console.error("Error adjusting inventory:", error);
       toast.error(error instanceof Error ? error.message : "Failed to adjust inventory");
+    } finally {
+      submittingRef.current = false;
     }
   };
 
@@ -472,7 +487,7 @@ export function QuickAdjustDialog({
         <DialogFooter>
           <Button
             variant="outline"
-            onClick={() => onOpenChange(false)}
+            onClick={() => handleOpenChange(false)}
             disabled={isSubmitting}
           >
             Cancel

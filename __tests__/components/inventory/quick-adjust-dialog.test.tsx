@@ -1,5 +1,5 @@
 /** @jest-environment jsdom */
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import * as React from "react";
@@ -653,6 +653,56 @@ describe("the capture", () => {
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
       expect(onOpenChange).toHaveBeenCalledWith(false);
       expect(adjustCalls()).toHaveLength(0);
+    });
+
+    // B3-1 FD3-1: the rendered `isPending` lags the request — TanStack notifies
+    // its observers on a later task — so a guard that reads only the render
+    // admits a dismissal (or a second Confirm) in the instant after the click.
+    // These fire SYNCHRONOUSLY after the click, before "Adjusting..." can
+    // render (asserted), which is the window the latch closes.
+    const INSTANT_DISMISSALS: Array<[string, () => void]> = [
+      ["Escape", () => fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })],
+      ["Cancel", () => fireEvent.click(screen.getByRole("button", { name: "Cancel" }))],
+    ];
+
+    it.each(INSTANT_DISMISSALS)(
+      "%s in the instant before \"Adjusting...\" renders does not close it (FD3-1)",
+      async (_how, dismiss) => {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const onOpenChange = jest.fn();
+        await readyInGuardHost(user, onOpenChange);
+
+        const release = holdNextAdjust();
+        fireEvent.click(confirmButton());
+        // The window is real: the request has started, the render has not caught up.
+        expect(screen.queryByRole("button", { name: "Adjusting..." })).toBeNull();
+        dismiss();
+        expect(onOpenChange).not.toHaveBeenCalled();
+
+        // The request reaches fetch a tick later; release it once it has.
+        await waitFor(() => expect(adjustCalls()).toHaveLength(1));
+        expect(onOpenChange).not.toHaveBeenCalled();
+        release();
+        await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+        expect(onOpenChange.mock.calls).toEqual([[false]]);
+        expect(adjustCalls()).toHaveLength(1);
+      },
+    );
+
+    it("a second Confirm in that instant sends ONE request, never two (FD3-1)", async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      const onOpenChange = jest.fn();
+      await readyInGuardHost(user, onOpenChange);
+
+      const release = holdNextAdjust();
+      fireEvent.click(confirmButton());
+      expect(screen.queryByRole("button", { name: "Adjusting..." })).toBeNull();
+      fireEvent.click(confirmButton());
+
+      await waitFor(() => expect(adjustCalls().length).toBeGreaterThanOrEqual(1));
+      release();
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(adjustCalls()).toHaveLength(1);
     });
   });
 
