@@ -543,19 +543,24 @@ export function ExternalOrderDetailsSheet({
         </SheetContent>
       </Sheet>
 
-      {/* Fulfillment Dialog */}
-      <FulfillOrderDialog
-        order={order}
-        open={showFulfillDialog}
-        onOpenChange={setShowFulfillDialog}
-        onSuccess={() => {
-          if (onRefresh) {
-            onRefresh();
-          }
-          onOpenChange(false);
-        }}
-        csrfToken={csrfToken}
-      />
+      {/* Fulfillment Dialog — mounted PER OPEN (§ P2-B3-1R, MS-1-4 / M-a.3):
+          rendered only while it is open, so every open starts from the
+          operator's location, and a location chosen for one order never
+          carries to the next. */}
+      {showFulfillDialog && (
+        <FulfillOrderDialog
+          order={order}
+          open={showFulfillDialog}
+          onOpenChange={setShowFulfillDialog}
+          onSuccess={() => {
+            if (onRefresh) {
+              onRefresh();
+            }
+            onOpenChange(false);
+          }}
+          csrfToken={csrfToken}
+        />
+      )}
 
       {/* Product Mapping Dialog */}
       {mappingItem && order.integration && (

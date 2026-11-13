@@ -1,5 +1,19 @@
 /** @jest-environment jsdom */
-import { render, screen, fireEvent } from "@testing-library/react";
+//
+// `components/inventory/transfer-dialog.tsx` — the source cannot cover the
+// transfer. § P2-B3-1R, M-b1 fix 12 (MS-1-6; the add action REMOVED, row 108).
+//
+// The "Not enough stock" alert's primary action used to MINT the shortfall at
+// the source (an unclassified positive adjustment, not atomic with the transfer)
+// and then retry. It is INVERTED here: the alert says what the source holds — or
+// that it could not be read, never `?? 0` — and offers ONE way out, `Change the
+// quantity`, which closes the alert and puts focus on the quantity. This dialog
+// never sends an adjustment.
+
+import * as fs from "fs";
+import * as path from "path";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import * as React from "react";
 
@@ -21,24 +35,28 @@ jest.mock("@/contexts/location-context", () => {
 
 import { TransferDialog } from "@/components/inventory/transfer-dialog";
 
-const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-const wrap = (ui: React.ReactElement) => render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+const wrap = (ui: React.ReactElement) => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+};
 
-test("flat insufficient-stock 400 body drives the auto-add AlertDialog with shortfall numbers", async () => {
-  global.fetch = jest.fn((url: RequestInfo | URL) => {
+/** The transfer route's flat insufficient-stock 400, with `extra` merged in. */
+function insufficientBody(extra: Record<string, unknown>) {
+  return {
+    error: "Insufficient stock",
+    code: "INVENTORY_INSUFFICIENT_STOCK",
+    requestedQuantity: 5,
+    shortfall: 3,
+    ...extra,
+  };
+}
+
+/** Answer the transfer with `transferBody` (a 400), and each location's stock read. */
+function mockFetch(transferBody: Record<string, unknown>) {
+  const fn = jest.fn((url: RequestInfo | URL) => {
     const u = String(url);
     if (u.includes("/api/inventory/transfer")) {
-      return Promise.resolve({
-        ok: false,
-        status: 400,
-        json: async () => ({
-          error: "Insufficient stock",
-          code: "INVENTORY_INSUFFICIENT_STOCK",
-          currentQuantity: 2,
-          requestedQuantity: 5,
-          shortfall: 3,
-        }),
-      });
+      return Promise.resolve({ ok: false, status: 400, json: async () => transferBody });
     }
     if (u.includes("/api/inventory/product/")) {
       const locationId = new URL(u, "http://test.local").searchParams.get("locationId");
@@ -49,27 +67,130 @@ test("flat insufficient-stock 400 body drives the auto-add AlertDialog with shor
       });
     }
     return Promise.resolve({ ok: true, json: async () => ({}) });
-  }) as unknown as typeof fetch;
+  });
+  global.fetch = fn as unknown as typeof fetch;
+  return fn;
+}
 
+/** No request this dialog makes is ever an adjustment. */
+const adjustCalls = (fn: jest.Mock) =>
+  fn.mock.calls.filter(([url]) => String(url).includes("/api/inventory/adjust"));
+
+const quantityField = () => screen.getByPlaceholderText("0");
+
+/** Render, ask for 5 from Office (which holds 2), and return the alert. */
+async function askForFive() {
   wrap(
-    <TransferDialog
-      open
-      onOpenChange={() => {}}
-      product={{ id: 42, name: "AOD 2mg" }}
-      onSuccess={() => {}}
-    />
+    <TransferDialog open onOpenChange={() => {}} product={{ id: 42, name: "AOD 2mg" }} onSuccess={() => {}} />
   );
-
   // Source quantity resolves (2 units at Office) before we submit.
   expect(await screen.findAllByText(/2 units/)).not.toHaveLength(0);
-
-  fireEvent.change(screen.getByPlaceholderText("0"), { target: { value: "5" } });
+  fireEvent.change(quantityField(), { target: { value: "5" } });
   fireEvent.click(screen.getByRole("button", { name: /transfer 5 units/i }));
+  return screen.findByRole("alertdialog");
+}
 
-  // CONTRACT: flat-shape rejection -> auto-add UI visible with shortfall-derived numbers.
-  const alert = await screen.findByRole("alertdialog");
-  expect(alert).toHaveTextContent("Not enough stock at source location");
-  expect(alert).toHaveTextContent("Available now: 2");
-  expect(alert).toHaveTextContent("Shortfall to complete transfer: 3");
-  expect(alert).toHaveTextContent("so you can move 5");
+describe("the transfer's 'Not enough stock' alert (MS-1-6)", () => {
+  it("says what the source holds — and offers no way to add stock", async () => {
+    const fetchFn = mockFetch(insufficientBody({ currentQuantity: 2 }));
+    const alert = await askForFive();
+
+    expect(alert).toHaveTextContent("Not enough stock at source location");
+    expect(alert).toHaveTextContent("Only 2 units at Office.");
+    // INVERTED (`:27-69`): the auto-add offer and its numbers are gone.
+    expect(alert).not.toHaveTextContent(/add missing stock/i);
+    expect(alert).not.toHaveTextContent(/shortfall/i);
+    expect(alert).not.toHaveTextContent(/available now/i);
+    expect(alert).not.toHaveTextContent(/so you can move/i);
+    expect(adjustCalls(fetchFn)).toHaveLength(0);
+  });
+
+  it("one unit is `1 unit`", async () => {
+    mockFetch(insufficientBody({ currentQuantity: 1 }));
+    const alert = await askForFive();
+
+    expect(alert).toHaveTextContent("Only 1 unit at Office.");
+  });
+
+  it("an answer with no count says the stock could not be read — never 0", async () => {
+    mockFetch(insufficientBody({}));
+    const alert = await askForFive();
+
+    expect(alert).toHaveTextContent("Couldn't read the stock at Office.");
+    expect(alert).not.toHaveTextContent(/Only 0/);
+  });
+
+  it("has ONE button, `Change the quantity`, and it has focus when the alert opens", async () => {
+    mockFetch(insufficientBody({ currentQuantity: 2 }));
+    const alert = await askForFive();
+
+    const buttons = Array.from(alert.querySelectorAll("button"));
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]).toHaveTextContent(/^Change the quantity$/);
+    await waitFor(() => expect(buttons[0]).toHaveFocus());
+  });
+
+  it("`Change the quantity` closes the alert and focus lands on the quantity; no adjustment is ever sent", async () => {
+    const user = userEvent.setup();
+    const fetchFn = mockFetch(insufficientBody({ currentQuantity: 2 }));
+    await askForFive();
+
+    await user.click(screen.getByRole("button", { name: "Change the quantity" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    await waitFor(() => expect(quantityField()).toHaveFocus());
+    // The transfer dialog is still there, with the quantity to change.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(quantityField()).toHaveValue(5);
+    expect(adjustCalls(fetchFn)).toHaveLength(0);
+  });
+
+  it("Escape closes the alert the same way: focus on the quantity, nothing sent", async () => {
+    const user = userEvent.setup();
+    const fetchFn = mockFetch(insufficientBody({ currentQuantity: 2 }));
+    await askForFive();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    await waitFor(() => expect(quantityField()).toHaveFocus());
+    expect(adjustCalls(fetchFn)).toHaveLength(0);
+  });
+});
+
+// The typed-state arm of MS-1-5 (the page arm is inventory-page.test.tsx): the
+// page mounts this dialog per open, so a quantity typed for product A is gone
+// when it mounts for product B.
+it("typed on A → remount for B → empty", async () => {
+  mockFetch(insufficientBody({ currentQuantity: 2 }));
+  const first = wrap(
+    <TransferDialog open onOpenChange={() => {}} product={{ id: 42, name: "AOD 2mg" }} />
+  );
+  fireEvent.change(quantityField(), { target: { value: "5" } });
+  expect(quantityField()).toHaveValue(5);
+  first.unmount();
+
+  wrap(<TransferDialog open onOpenChange={() => {}} product={{ id: 43, name: "BPC 5mg" }} />);
+  expect(screen.getByText("BPC 5mg")).toBeInTheDocument();
+  expect(quantityField()).toHaveValue(null);
+});
+
+// The grep pin (MS-1-6): no client file sends the transfer auto-add flag. The
+// server's arm stays (registered); nothing under these trees may reach it.
+it("no file under components/, hooks/ or app/(app)/ contains `autoAddForTransfer`", () => {
+  const root = path.resolve(__dirname, "../../..");
+  const hits: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (fs.readFileSync(full, "utf8").includes("autoAddForTransfer")) {
+        hits.push(path.relative(root, full));
+      }
+    }
+  };
+  const trees = ["components", "hooks", path.join("app", "(app)")];
+  for (const tree of trees) {
+    expect(fs.existsSync(path.join(root, tree))).toBe(true);
+    walk(path.join(root, tree));
+  }
+  expect(hits).toEqual([]);
 });

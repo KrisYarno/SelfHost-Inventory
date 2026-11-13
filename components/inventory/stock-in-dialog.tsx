@@ -2,11 +2,12 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
-import { Package, Calendar, FileText, AlertCircle } from "lucide-react";
+import { Package, Calendar, AlertCircle } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
 import { getUserFriendlyMessage } from "@/lib/error-handling";
 import { useProductLocationQuantity } from "@/hooks/use-product-location-quantity";
 import { useStockIn } from "@/hooks/use-inventory-mutations";
+import { useSubmitLatch } from "@/hooks/use-submit-latch";
 import {
   Dialog,
   DialogContent,
@@ -37,15 +38,20 @@ export function StockInDialog({
   onSuccess,
 }: StockInDialogProps) {
   const { selectedLocationId } = useLocation();
+  // The draft starts empty at MOUNT: the hosts render this dialog only while it
+  // is open for a product and null the product on close (§ P2-B3-1R, M-a.3 /
+  // MS-1-5), so nothing typed for one product reaches another's stock-in.
   const [quantity, setQuantity] = useState("");
-  const [orderNumber, setOrderNumber] = useState("");
   const [notes, setNotes] = useState("");
 
   const quantityQuery = useProductLocationQuantity(product.id, selectedLocationId, {
     enabled: open,
   });
   const stockInMutation = useStockIn();
-  const isSubmitting = stockInMutation.isPending;
+  // The shared submit latch (§ P2-B3-1R, M-a.1): one stock-in per tap, and no
+  // dismissal (Escape, a click outside, the X, Cancel) while it is in flight.
+  // `busy` is the same fact for rendering: the frozen form and "Adding Stock...".
+  const { busy, run, guardOpenChange } = useSubmitLatch();
 
   const currentQuantity = quantityQuery.data ?? 0;
   const quantityNum = parseInt(quantity, 10) || 0;
@@ -64,22 +70,31 @@ export function StockInDialog({
       return;
     }
 
+    // The Note (§ P2-B3-1R, MS-1-1): sent as `notes` only when it says
+    // something; the route records it on the stock-in's history event (R-a.4).
+    const sentNotes = notes.trim();
+
     try {
-      await stockInMutation.mutateAsync({
-        productId: product.id,
-        locationId: selectedLocationId,
-        quantity: quantityNum,
-        orderNumber: orderNumber || undefined,
-        notes: notes || undefined,
+      const settled = await run(async () => {
+        await stockInMutation.mutateAsync({
+          productId: product.id,
+          locationId: selectedLocationId,
+          quantity: quantityNum,
+          ...(sentNotes !== "" ? { notes: sentNotes } : {}),
+        });
+        return true as const;
       });
+      // A second tap while the first holds the latch: nothing was sent.
+      if (settled === undefined) return;
 
       toast.success(`Added ${quantityNum} units to ${product.name}`);
+      // The host's RAW callback, never the guard, which drops a close while a
+      // submit holds the latch.
       onOpenChange(false);
       onSuccess?.();
 
       // Reset form
       setQuantity("");
-      setOrderNumber("");
       setNotes("");
     } catch (error) {
       console.error("Error adding stock:", error);
@@ -107,8 +122,12 @@ export function StockInDialog({
     }
   };
 
+  // Escape, a click outside, the X and Cancel — dropped while a stock-in is in
+  // flight (the latch's synchronous ref; FD3-1). A failed one releases it.
+  const handleOpenChange = guardOpenChange(onOpenChange);
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
           <DialogTitle>Stock In - Add Inventory</DialogTitle>
@@ -144,83 +163,78 @@ export function StockInDialog({
           </div>
         </div>
 
-        <div className="space-y-4">
-          {/* Quantity */}
-          <div className="space-y-2">
-            <Label htmlFor="quantity">
-              Quantity to Add <span className="text-destructive">*</span>
-            </Label>
-            <Input
-              id="quantity"
-              type="number"
-              min="1"
-              inputMode="numeric"
-              pattern="[0-9]*"
-              value={quantity}
-              onChange={(e) => setQuantity(e.target.value)}
-              placeholder="Enter quantity"
-              className="text-lg"
-              autoFocus
-            />
-          </div>
+        {/* While a stock-in is in flight the WHOLE form is frozen (M-a.1). */}
+        <fieldset disabled={busy} className="min-w-0">
+          <div className="space-y-4">
+            {/* Quantity */}
+            <div className="space-y-2">
+              <Label htmlFor="quantity">
+                Quantity to Add <span className="text-destructive">*</span>
+              </Label>
+              <Input
+                id="quantity"
+                type="number"
+                min="1"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={quantity}
+                onChange={(e) => setQuantity(e.target.value)}
+                placeholder="Enter quantity"
+                className="text-lg"
+                autoFocus
+              />
+            </div>
 
-          {/* T5 (pack REV-3): every stock-in is a positive delta, so the prompt
-              turns on as soon as a quantity is entered. Once per session, and
-              declining leaves this stock-in exactly as it was. */}
-          <ReceivingRedirectPrompt active={quantityNum > 0} />
+            {/* T5 (pack REV-3): every stock-in is a positive delta, so the prompt
+                turns on as soon as a quantity is entered. Once per session, and
+                declining leaves this stock-in exactly as it was. */}
+            <ReceivingRedirectPrompt active={quantityNum > 0} />
 
-          {/* Order Number */}
-          <div className="space-y-2">
-            <Label htmlFor="order-number">
-              <div className="flex items-center gap-2">
-                <FileText className="h-4 w-4" />
-                Order/Reference Number
-              </div>
-            </Label>
-            <Input
-              id="order-number"
-              value={orderNumber}
-              onChange={(e) => setOrderNumber(e.target.value)}
-              placeholder="e.g., PO-2024-001"
-            />
-          </div>
+            {/* The Note (§ P2-B3-1R, MS-1-1): ONE optional field, shown in the
+                product's history to admins and its author. It replaces the
+                Order/Reference Number and Additional Notes, which the route
+                silently dropped. */}
+            <div className="space-y-2">
+              <Label htmlFor="stock-in-note">Note (optional)</Label>
+              <Textarea
+                id="stock-in-note"
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="e.g., Supplier details, batch number, expiry date..."
+                maxLength={2000}
+                rows={3}
+                aria-describedby="stock-in-note-helper"
+              />
+              <p id="stock-in-note-helper" className="text-[11px] text-muted-foreground">
+                Seen by admins and by you.
+              </p>
+            </div>
 
-          {/* Notes */}
-          <div className="space-y-2">
-            <Label htmlFor="notes">Additional Notes</Label>
-            <Textarea
-              id="notes"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="e.g., Supplier details, batch number, expiry date..."
-              rows={3}
-            />
-          </div>
-
-          {/* Info Box */}
-          <div className="rounded-lg border bg-muted/50 p-3">
-            <div className="flex items-start gap-2">
-              <Calendar className="h-4 w-4 text-muted-foreground mt-0.5" />
-              <div className="text-sm text-muted-foreground">
-                This stock-in will be recorded with today&apos;s date and time for tracking purposes.
+            {/* Info Box */}
+            <div className="rounded-lg border bg-muted/50 p-3">
+              <div className="flex items-start gap-2">
+                <Calendar className="h-4 w-4 text-muted-foreground mt-0.5" />
+                <div className="text-sm text-muted-foreground">
+                  This stock-in will be recorded with today&apos;s date and time for tracking purposes.
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        </fieldset>
 
         <DialogFooter>
           <Button
             variant="outline"
-            onClick={() => onOpenChange(false)}
-            disabled={isSubmitting}
+            onClick={() => handleOpenChange(false)}
+            disabled={busy}
           >
             Cancel
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={!isValid || isSubmitting}
+            disabled={!isValid || busy}
           >
-            {isSubmitting ? "Adding Stock..." : `Add ${quantityNum || 0} Units`}
+            {busy ? "Adding Stock..." : `Add ${quantityNum || 0} Units`}
           </Button>
         </DialogFooter>
       </DialogContent>

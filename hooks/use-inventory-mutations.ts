@@ -54,7 +54,8 @@ async function postJSON(url: string, body: unknown, csrfToken: string | null) {
 
 // Field names mirror the dialogs' live POST bodies (zod strips extras server-side):
 // quick-adjust-dialog sends { productId, locationId, delta, reason, notes, intent? };
-// the transfer auto-add path additionally sends { autoAddForTransfer: true }.
+// § P2-B3-1R (MS-1-6): the transfer dialog no longer adds stock, so no client
+// sends the server's transfer auto-add flag (its route arm stays, registered).
 export interface AdjustInput {
   productId: number;
   locationId: number;
@@ -71,17 +72,14 @@ export interface AdjustInput {
   selectedExternalOrderId?: string;
   // P2-B3-1: the order number typed on a Remove under `order` — never with an id; the server resolves it.
   orderReference?: string;
-  // CR-3: the transfer auto-add flag. PARSED server-side now (it was read off
-  // the raw body, outside zod), and the route refuses it on a negative delta
-  // with a 400 — an auto-add ADDS the shortfall a transfer needs.
-  autoAddForTransfer?: boolean;
 }
-// stock-in-dialog sends { productId, locationId, quantity, orderNumber, notes }.
+// stock-in-dialog sends { productId, locationId, quantity, notes? } — the Note
+// (§ P2-B3-1R, MS-1-1). There is no order/reference number: the route never
+// recorded one, so the field that sent it is gone.
 export interface StockInInput {
   productId: number;
   locationId: number;
   quantity: number;
-  orderNumber?: string;
   notes?: string;
 }
 // transfer-dialog sends { productId, fromLocationId, toLocationId, quantity }.

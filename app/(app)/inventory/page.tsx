@@ -361,16 +361,28 @@ export default function InventoryPage() {
         />
       )}
 
-      {/* Stock In Dialog */}
-      {selectedProduct && (
-        <StockInDialog open={showStockIn} onOpenChange={setShowStockIn} product={selectedProduct} />
+      {/* Stock In and Transfer — mounted PER OPEN too (§ P2-B3-1R, MS-1-5 /
+          M-a.3): one shared product, three flags, and ANY close nulls the
+          product, so product A's quantity or note can never ride into product
+          B's stock-in or transfer. */}
+      {selectedProduct && showStockIn && (
+        <StockInDialog
+          open={showStockIn}
+          onOpenChange={(open) => {
+            setShowStockIn(open);
+            if (!open) setSelectedProduct(null);
+          }}
+          product={selectedProduct}
+        />
       )}
 
-      {/* Transfer Dialog */}
-      {selectedProduct && (
+      {selectedProduct && showTransfer && (
         <TransferDialog
           open={showTransfer}
-          onOpenChange={setShowTransfer}
+          onOpenChange={(open) => {
+            setShowTransfer(open);
+            if (!open) setSelectedProduct(null);
+          }}
           product={selectedProduct}
         />
       )}

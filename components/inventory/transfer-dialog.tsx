@@ -5,11 +5,7 @@ import { toast } from 'sonner';
 import { ArrowLeftRight, MapPin, AlertCircle, Package } from 'lucide-react';
 import { useLocation } from '@/contexts/location-context';
 import { useProductLocationQuantity } from '@/hooks/use-product-location-quantity';
-import {
-  useAdjustInventory,
-  useTransferInventory,
-  type ApiMutationError,
-} from '@/hooks/use-inventory-mutations';
+import { useTransferInventory, type ApiMutationError } from '@/hooks/use-inventory-mutations';
 import {
   Dialog,
   DialogContent,
@@ -18,7 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -30,7 +26,6 @@ import {
 } from '@/components/ui/select';
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -42,6 +37,7 @@ import type { DialogProduct } from '@/types/inventory';
 import { ContextTag } from '@/components/ui/context-tag';
 import { ValueChip } from '@/components/ui/value-chip';
 import { InlineHighlight } from '@/components/ui/inline-highlight';
+import { cn } from '@/lib/utils';
 
 type TransferDialogProps = {
   open: boolean;
@@ -50,19 +46,25 @@ type TransferDialogProps = {
   onSuccess?: () => void;
 };
 
-type PendingTransferPayload = {
+type TransferPayload = {
   productId: number;
   fromLocationId: number;
   toLocationId: number;
   quantity: number;
 };
 
+/**
+ * The source could not cover the transfer (§ P2-B3-1R, MS-1-6). `available` is
+ * the server's own count, or `null` when its answer did not carry one — an
+ * unknown is said as unknown, never as 0.
+ */
 type InsufficientState = {
   visible: boolean;
-  message: string;
-  shortfall: number;
-  available: number;
+  available: number | null;
+  source: string;
 };
+
+const unitWord = (n: number) => (n === 1 ? 'unit' : 'units');
 
 export function TransferDialog({ open, onOpenChange, product, onSuccess }: TransferDialogProps) {
   const { locations, selectedLocationId } = useLocation();
@@ -73,7 +75,8 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
   const [insufficient, setInsufficient] = React.useState<InsufficientState | null>(null);
-  const [pendingTransfer, setPendingTransfer] = React.useState<PendingTransferPayload | null>(null);
+  // "Change the quantity" hands focus back to this field when the alert closes.
+  const qtyRef = React.useRef<HTMLInputElement>(null);
 
   const fromQuantityQuery = useProductLocationQuantity(product.id, fromLocationId, {
     enabled: open,
@@ -82,7 +85,6 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
     enabled: open,
   });
   const transferMutation = useTransferInventory();
-  const adjustMutation = useAdjustInventory();
 
   const fromQuantity = fromQuantityQuery.data ?? null;
   const loadingFromQuantity = fromQuantityQuery.isLoading;
@@ -127,42 +129,18 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
     });
   };
 
-  const submitTransfer = async (payload: PendingTransferPayload) => {
-    try {
-      await transferMutation.mutateAsync(payload);
-    } catch (err) {
-      const apiError = err as ApiMutationError;
-      if (apiError.code === 'INVENTORY_INSUFFICIENT_STOCK') {
-        const d = apiError.data ?? {};
-        setInsufficient({
-          visible: true,
-          message: apiError.message || 'Insufficient stock at source',
-          available: typeof d.currentQuantity === 'number' ? d.currentQuantity : 0,
-          shortfall: typeof d.shortfall === 'number' ? d.shortfall : 0,
-        });
-        setPendingTransfer(payload);
-        return;
-      }
-      throw err;
-    }
-
-    toast.success(`Moved ${payload.quantity} units of ${product.name}`);
-    onOpenChange(false);
-    setQuantity('');
-    setPendingTransfer(null);
-    setInsufficient(null);
-    onSuccess?.();
-  };
+  const fromLoc = locations.find((loc) => loc.id === fromLocationId);
+  const toLoc = locations.find((loc) => loc.id === toLocationId);
 
   const handleSubmit = async () => {
     if (!canSubmit) {
       toast.error('Please complete the transfer form');
       return;
     }
-    // Do not block here; allow server to return a structured
-    // insufficient-stock response so we can offer auto-add.
+    // Do not block here; the server answers a short source with a structured
+    // insufficient-stock response, and the alert below asks for a new quantity.
 
-    const payload: PendingTransferPayload = {
+    const payload: TransferPayload = {
       productId: product.id,
       fromLocationId: fromLocationId as number,
       toLocationId: toLocationId as number,
@@ -171,53 +149,33 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
 
     setIsSubmitting(true);
     try {
-      await submitTransfer(payload);
+      await transferMutation.mutateAsync(payload);
+
+      toast.success(`Moved ${payload.quantity} units of ${product.name}`);
+      onOpenChange(false);
+      setQuantity('');
+      setInsufficient(null);
+      onSuccess?.();
     } catch (error) {
+      const apiError = error as ApiMutationError;
+      if (apiError.code === 'INVENTORY_INSUFFICIENT_STOCK') {
+        // § P2-B3-1R (MS-1-6, row 108): the source is short, so the transfer is
+        // refused and the operator changes the quantity. This dialog never
+        // creates stock to cover a shortfall.
+        const d = apiError.data ?? {};
+        setInsufficient({
+          visible: true,
+          available: typeof d.currentQuantity === 'number' ? d.currentQuantity : null,
+          source: fromLoc?.name ?? 'the source location',
+        });
+        return;
+      }
       console.error('Error performing transfer:', error);
       toast.error(error instanceof Error ? error.message : 'Failed to transfer inventory');
     } finally {
       setIsSubmitting(false);
     }
   };
-
-  const handleConfirmAutoAdd = async () => {
-    if (!pendingTransfer || !insufficient) {
-      setInsufficient(null);
-      setPendingTransfer(null);
-      return;
-    }
-    const shortfall = insufficient.shortfall;
-    if (shortfall <= 0) {
-      setInsufficient(null);
-      setPendingTransfer(null);
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      await adjustMutation.mutateAsync({
-        productId: pendingTransfer.productId,
-        locationId: pendingTransfer.fromLocationId,
-        delta: shortfall,
-        autoAddForTransfer: true,
-      });
-
-      await submitTransfer(pendingTransfer);
-    } catch (error) {
-      console.error('Error auto-adding stock for transfer:', error);
-      toast.error(error instanceof Error ? error.message : 'Unable to auto-add stock for transfer');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleCancelAutoAdd = () => {
-    setInsufficient(null);
-    setPendingTransfer(null);
-  };
-
-  const fromLoc = locations.find((loc) => loc.id === fromLocationId);
-  const toLoc = locations.find((loc) => loc.id === toLocationId);
 
   return (
     <>
@@ -362,6 +320,7 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                   −
                 </Button>
                 <Input
+                  ref={qtyRef}
                   type="number"
                   inputMode="numeric"
                   pattern="[0-9]*"
@@ -429,46 +388,38 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
         </DialogContent>
       </Dialog>
 
-      {/* Auto-add confirmation dialog */}
-      <AlertDialog open={insufficient?.visible ?? false} onOpenChange={(open) => { if (!open) { handleCancelAutoAdd(); } }}>
-        <AlertDialogContent>
+      {/* The source is short (§ P2-B3-1R, MS-1-6; the add action REMOVED, row
+          108). ONE way out: change the quantity. It is the alert's Cancel —
+          styled primary — so Radix focuses it when the alert opens (an Action
+          would leave focus on the Transfer button behind the alert), and on
+          close focus goes to the quantity field. */}
+      <AlertDialog
+        open={insufficient?.visible ?? false}
+        onOpenChange={(next) => {
+          // The sentence stays put while the alert animates out.
+          if (!next) setInsufficient((prev) => (prev ? { ...prev, visible: false } : prev));
+        }}
+      >
+        <AlertDialogContent
+          onCloseAutoFocus={(e) => {
+            e.preventDefault();
+            qtyRef.current?.focus();
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>Not enough stock at source location</AlertDialogTitle>
             <AlertDialogDescription>
-              {insufficient?.message ?? 'There is not enough stock at the selected source location to complete this transfer.'}
+              {insufficient === null
+                ? null
+                : insufficient.available === null
+                  ? `Couldn't read the stock at ${insufficient.source}.`
+                  : `Only ${insufficient.available} ${unitWord(insufficient.available)} at ${insufficient.source}.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          {(() => {
-            const available = insufficient?.available ?? 0;
-            const shortfall = insufficient?.shortfall ?? 0;
-            const requested = pendingTransfer?.quantity ?? 0;
-            const afterAdd = available + shortfall;
-            const afterTransfer = afterAdd - requested;
-            return (
-              <div role="status" className="mt-2 space-y-1 text-sm">
-                <p>
-                  Available now: <span className="font-semibold">{available}</span>
-                </p>
-                <p>
-                  Shortfall to complete transfer: <span className="font-semibold">{shortfall}</span>
-                </p>
-                <p className="mt-2">
-                  This will add <span className="font-semibold">{shortfall}</span> units of
-                  {' '}<span className="font-semibold">{product.name}</span>
-                  {fromLoc ? <> at <span className="font-semibold">{fromLoc.name}</span></> : null}
-                  {' '}so you can move <span className="font-semibold">{requested}</span>.
-                </p>
-                <p className="text-muted-foreground">
-                  After add: {afterAdd}. After transfer: {afterTransfer} at the source.
-                </p>
-              </div>
-            );
-          })()}
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={isSubmitting}>Cancel</AlertDialogCancel>
-            <AlertDialogAction disabled={isSubmitting} onClick={handleConfirmAutoAdd}>
-              Add missing stock &amp; transfer
-            </AlertDialogAction>
+            <AlertDialogCancel className={cn(buttonVariants(), 'border-0 hover:text-primary-foreground')}>
+              Change the quantity
+            </AlertDialogCancel>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

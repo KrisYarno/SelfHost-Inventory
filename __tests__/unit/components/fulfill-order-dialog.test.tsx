@@ -17,7 +17,7 @@
 // running.
 
 import * as React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -36,12 +36,21 @@ jest.mock("@/hooks/use-orders", () => ({
 jest.mock("@/components/products/product-map-dialog", () => ({
   ProductMapDialog: () => null,
 }));
+// § P2-B3-1R (MS-1-4): the dialog seeds its location from the OPERATOR'S
+// (`useLocation()`), which throws without a provider. A jest.fn so each case can
+// say where the operator stands; the default (beforeEach) is location 1, the
+// one the default `/api/locations` answer lists.
+const mockUseLocation = jest.fn();
+jest.mock("@/contexts/location-context", () => ({
+  useLocation: () => mockUseLocation(),
+}));
 
 import { toast } from "sonner";
 import { useSession } from "next-auth/react";
 import { useFulfillmentValidation, useFulfillOrder } from "@/hooks/use-orders";
 import { NO_STORE_PRODUCT_LINE_HINT } from "@/lib/orders/catalog-product-id";
 import { FulfillOrderDialog, openLines } from "@/components/orders/fulfill-order-dialog";
+import { ExternalOrderDetailsSheet } from "@/components/orders/external-order-details-sheet";
 import { MAX_FULFILLMENT_ITEMS, CAP_COUNTER_FROM } from "@/lib/inventory/request-limits";
 import type { ExternalOrder } from "@/types/external-orders";
 
@@ -139,8 +148,20 @@ function validationFor(order: ExternalOrder) {
 
 let mutateAsync: jest.Mock;
 
+/** The operator's location context, as `useLocation()` hands it out. */
+function operatorAt(selectedLocationId: number | null, isLoading = false) {
+  mockUseLocation.mockReturnValue({
+    locations: [],
+    selectedLocation: null,
+    selectedLocationId,
+    setSelectedLocationId: jest.fn(),
+    isLoading,
+  });
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
+  operatorAt(1);
   global.fetch = jest.fn(
     async () =>
       ({ ok: true, json: async () => [{ id: 1, name: "Main" }] }) as unknown as Response
@@ -185,14 +206,21 @@ async function renderDialog(order: ExternalOrder) {
     </QueryClientProvider>
   );
 
-  // The location auto-selects once /api/locations resolves; the confirm stays
-  // disabled until it does.
+  // The operator's location seeds once /api/locations resolves; the confirm
+  // stays disabled until it does.
   await waitFor(() => expect(confirmButton()).toBeEnabled());
   return { onOpenChange, onSuccess, refetch };
 }
 
+/**
+ * The action, under every label it can carry (§ P2-B3-1R, MS-1-4): it names the
+ * lines and the location — `Fulfill {n} line(s) from {location}` — or says
+ * `Select a location`; "No Items to Fulfill" and "Processing..." are unchanged.
+ */
 const confirmButton = () =>
-  screen.getByRole("button", { name: /Fulfill Order|Fulfill \d+ Items|No Items to Fulfill/ });
+  screen.getByRole("button", {
+    name: /^(Fulfill \d+ lines? from .+|Select a location|No Items to Fulfill|Processing\.\.\.)$/,
+  });
 
 /** Render the JSX sonner was handed by `fn`, so its copy can be asserted. */
 function toastTitle(fn: jest.Mock): string {
@@ -556,5 +584,288 @@ describe("fulfill dialog — a line with no store product is never offered Map n
 
     expect(screen.getByRole("button", { name: /map now/i })).toBeInTheDocument();
     expect(screen.queryByText(NO_STORE_PRODUCT_LINE_HINT)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WHERE A FULFIL STARTS (§ P2-B3-1R, M-b1 fix 5 — MS-1-4).
+//
+// It used to start at the alphabetically-first location, while the sheet behind
+// it showed "In Stock" at the operator's — a wrong-location deduction in one
+// tap. Now the one-shot seed is the operator's location when it is in the list,
+// else NOTHING (no suggestion arm, no alphabetical fallback); the host mounts
+// the dialog per open; and the shared latch holds Escape / Cancel while the
+// POST is pending.
+// ---------------------------------------------------------------------------
+
+describe("fulfill dialog — it starts at the operator's location (MS-1-4)", () => {
+  // Radix Select in jsdom (the batch-row suite's idiom).
+  beforeAll(() => {
+    Element.prototype.hasPointerCapture = jest.fn(() => false) as never;
+    Element.prototype.releasePointerCapture = jest.fn() as never;
+    Element.prototype.scrollIntoView = jest.fn() as never;
+  });
+
+  // "Annex" sorts FIRST: the old seed picked it whatever the operator held.
+  const TWO_LOCATIONS = [
+    { id: 1, name: "Annex" },
+    { id: 2, name: "Main" },
+  ];
+
+  /** Answer `/api/locations` with `list`, and the sheet's stock read with nothing. */
+  function locationsAre(list: Array<{ id: number; name: string }>) {
+    global.fetch = jest.fn(async (url: RequestInfo | URL) => {
+      const href = String(url);
+      if (href.includes("/api/inventory/current-fast")) {
+        return { ok: true, json: async () => ({ inventory: [] }) } as unknown as Response;
+      }
+      return { ok: true, json: async () => list } as unknown as Response;
+    }) as unknown as typeof fetch;
+  }
+
+  function validationIsReady(order: ExternalOrder) {
+    (useFulfillmentValidation as jest.Mock).mockReturnValue({
+      data: validationFor(order),
+      isFetching: false,
+      isError: false,
+      error: null,
+      refetch: jest.fn(),
+    });
+  }
+
+  function renderOpen(order: ExternalOrder, onOpenChange = jest.fn()) {
+    validationIsReady(order);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const ui = () => (
+      <QueryClientProvider client={queryClient}>
+        <FulfillOrderDialog
+          order={order}
+          open
+          onOpenChange={onOpenChange}
+          onSuccess={jest.fn()}
+          csrfToken="test-csrf"
+        />
+      </QueryClientProvider>
+    );
+    const view = render(ui());
+    return { onOpenChange, rerender: () => view.rerender(ui()) };
+  }
+
+  const picker = () => screen.getByRole("combobox");
+
+  it("the operator's location is preselected, named on the action, and sent", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(2);
+    renderOpen(openOrder(2));
+
+    await waitFor(() => expect(confirmButton()).toHaveTextContent("Fulfill 2 lines from Main"));
+    expect(picker()).toHaveTextContent("Main");
+    expect(confirmButton()).toBeEnabled();
+
+    await user.click(confirmButton());
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1));
+    expect(mutateAsync.mock.calls[0][0]).toMatchObject({ orderId: "ord-1", locationId: 2 });
+  });
+
+  it("one ready line reads `Fulfill 1 line from …`", async () => {
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(2);
+    renderOpen(openOrder(1));
+
+    await waitFor(() => expect(confirmButton()).toHaveTextContent("Fulfill 1 line from Main"));
+  });
+
+  it("none: a STALE saved location → nothing is selected and the action is disabled", async () => {
+    // The fixture the real context produces: `location-context.tsx` restores the
+    // id saved in localStorage, and only falls back to the first location when
+    // NOTHING was saved. A saved id whose location is gone is therefore what
+    // "the operator's location is not in the list" looks like in production.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(99);
+    renderOpen(openOrder(2));
+
+    // The list has resolved: the picker is disabled until it does.
+    await waitFor(() => expect(picker()).toBeEnabled());
+    expect(picker()).toHaveTextContent("Select a location");
+    expect(confirmButton()).toHaveTextContent(/^Select a location$/);
+    expect(confirmButton()).toBeDisabled();
+    // Nothing was validated against any location.
+    for (const [, locationId] of (useFulfillmentValidation as jest.Mock).mock.calls) {
+      expect(locationId).toBeNull();
+    }
+
+    // The list HAS resolved — both are offered — and neither was chosen for them.
+    await user.click(picker());
+    expect(await screen.findByRole("option", { name: "Annex" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("option", { name: "Main" })).toHaveAttribute("aria-selected", "false");
+    expect(mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("none: no operator location at all → nothing is selected", async () => {
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(null);
+    renderOpen(openOrder(2));
+
+    await waitFor(() => expect(picker()).toBeEnabled());
+    expect(confirmButton()).toHaveTextContent(/^Select a location$/);
+    expect(confirmButton()).toBeDisabled();
+  });
+
+  it("it waits for the operator's location to resolve before seeding", async () => {
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(null, true);
+    const { rerender } = renderOpen(openOrder(2));
+
+    // The LIST has resolved (the picker is disabled until it does) while the
+    // operator's location is still loading: nothing may be decided yet.
+    await waitFor(() => expect(picker()).toBeEnabled());
+    expect(confirmButton()).toHaveTextContent(/^Select a location$/);
+
+    operatorAt(2);
+    rerender();
+    await waitFor(() => expect(confirmButton()).toHaveTextContent("Fulfill 2 lines from Main"));
+  });
+
+  it("the seed never overwrites a manual choice", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(null, true);
+    const { rerender } = renderOpen(openOrder(2));
+
+    // The operator picks before their own location has resolved…
+    await user.click(picker());
+    await user.click(await screen.findByRole("option", { name: "Annex" }));
+    await waitFor(() => expect(confirmButton()).toHaveTextContent("Fulfill 2 lines from Annex"));
+
+    // …and the late answer does not take the choice away.
+    operatorAt(2);
+    rerender();
+    await act(async () => {});
+    expect(confirmButton()).toHaveTextContent("Fulfill 2 lines from Annex");
+  });
+
+  it("order A changed to X → order B opens on the operator's location (the sheet mounts it per open)", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(2);
+    const orderA = { ...openOrder(2), id: "ord-A", orderNumber: "9001" } as ExternalOrder;
+    const orderB = { ...openOrder(2), id: "ord-B", orderNumber: "9002" } as ExternalOrder;
+    validationIsReady(orderA);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const sheet = (order: ExternalOrder) => (
+      <QueryClientProvider client={queryClient}>
+        <ExternalOrderDetailsSheet order={order} open onOpenChange={jest.fn()} csrfToken="test-csrf" />
+      </QueryClientProvider>
+    );
+    const view = render(sheet(orderA));
+
+    // Order A: the dialog opens on Main; the operator changes it to Annex…
+    await user.click(screen.getByRole("button", { name: "Fulfill Order" }));
+    await waitFor(() => expect(confirmButton()).toHaveTextContent("Fulfill 2 lines from Main"));
+    await user.click(picker());
+    await user.click(await screen.findByRole("option", { name: "Annex" }));
+    await waitFor(() => expect(confirmButton()).toHaveTextContent("Fulfill 2 lines from Annex"));
+
+    // …and backs out.
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+
+    // Order B: a fresh dialog, at the operator's location — not A's Annex.
+    validationIsReady(orderB);
+    view.rerender(sheet(orderB));
+    await user.click(screen.getByRole("button", { name: "Fulfill Order" }));
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Fulfill Order #9002");
+    await waitFor(() => expect(confirmButton()).toHaveTextContent("Fulfill 2 lines from Main"));
+    expect(picker()).toHaveTextContent("Main");
+  });
+
+  it("the sheet does not render the dialog while it is closed", async () => {
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(2);
+    validationIsReady(openOrder(2));
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ExternalOrderDetailsSheet order={openOrder(2)} open onOpenChange={jest.fn()} csrfToken="test-csrf" />
+      </QueryClientProvider>
+    );
+    await act(async () => {});
+
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    // Closed means not mounted: nothing asked for this order's validation.
+    expect(useFulfillmentValidation as jest.Mock).not.toHaveBeenCalled();
+  });
+});
+
+describe("fulfill dialog — a fulfil in flight cannot be dismissed (R108-OC-9)", () => {
+  /** A fulfil answer the test releases by hand: the POST "pending". */
+  function holdFulfil() {
+    let release!: () => void;
+    mutateAsync.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              summary: { total: 2, fulfilled: 2, skipped: 0, failed: 0 },
+              results: { fulfilled: [{ itemId: "it-0" }, { itemId: "it-1" }], skipped: [], failed: [] },
+            });
+        })
+    );
+    return () => release();
+  }
+
+  it("Escape while the POST is pending does not call onOpenChange(false); the answer closes it", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const release = holdFulfil();
+    const { onOpenChange, onSuccess } = await renderDialog(openOrder(2));
+
+    await user.click(confirmButton());
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1));
+    expect(confirmButton()).toHaveTextContent("Processing...");
+
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+
+    await act(async () => release());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+  });
+
+  it("Escape or Cancel in the instant after the tap (before any render) is dropped too", async () => {
+    const release = holdFulfil();
+    const { onOpenChange, onSuccess } = await renderDialog(openOrder(2));
+
+    act(() => {
+      fireEvent.click(confirmButton());
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    });
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    await act(async () => release());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+  });
+
+  it("a double tap sends ONE fulfil", async () => {
+    const release = holdFulfil();
+    const { onSuccess } = await renderDialog(openOrder(2));
+
+    act(() => {
+      fireEvent.click(confirmButton());
+      fireEvent.click(confirmButton());
+    });
+    await act(async () => release());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1));
+    expect(mutateAsync).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { CheckCircle, AlertCircle, AlertTriangle, Package, MapPin, Loader2, Link2 } from "lucide-react";
@@ -22,7 +22,9 @@ import { Button } from "@/components/ui/button";
 import { ProductMapDialog } from "@/components/products/product-map-dialog";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { useLocation } from "@/contexts/location-context";
 import { useFulfillmentValidation, useFulfillOrder } from "@/hooks/use-orders";
+import { useSubmitLatch } from "@/hooks/use-submit-latch";
 import { CAP_COUNTER_FROM, MAX_FULFILLMENT_ITEMS } from "@/lib/inventory/request-limits";
 import { primaryRefusal } from "@/lib/orders/refusal";
 import { isCatalogProductId, NO_STORE_PRODUCT_LINE_HINT } from "@/lib/orders/catalog-product-id";
@@ -90,13 +92,27 @@ export function FulfillOrderDialog({
   const locations = locationsQuery.data ?? [];
   const isLoadingLocations = locationsQuery.isLoading;
 
-  // Auto-select first location once loaded (preserves prior behavior).
+  // THE LOCATION SEED (§ P2-B3-1R, MS-1-4). The sheet behind this dialog shows
+  // "In Stock" at the operator's selected location, so that is where a fulfil
+  // starts — never the alphabetically-first location, which deducted from a
+  // place the operator never looked at. It waits until BOTH the list and the
+  // operator's location have resolved, then decides ONCE (a ref, so a later
+  // change of either never re-seeds) and never over a manual choice. When the
+  // operator's location is not in the list (e.g. a stale saved id), NOTHING is
+  // preselected: the picker shows "Select a location" and the action stays
+  // disabled. The host mounts this dialog per open (M-a.3), so every open
+  // seeds afresh — order A's choice never carries to order B.
+  const { selectedLocationId: operatorLocationId, isLoading: isLoadingOperatorLocation } =
+    useLocation();
+  const seededRef = useRef(false);
   useEffect(() => {
     const locs = locationsQuery.data;
-    if (locs && locs.length > 0 && selectedLocationId === null) {
-      setSelectedLocationId(locs[0].id);
+    if (seededRef.current || !locs || isLoadingOperatorLocation) return;
+    seededRef.current = true;
+    if (operatorLocationId !== null && locs.some((loc) => loc.id === operatorLocationId)) {
+      setSelectedLocationId((current) => current ?? operatorLocationId);
     }
-  }, [locationsQuery.data, selectedLocationId]);
+  }, [locationsQuery.data, isLoadingOperatorLocation, operatorLocationId]);
 
   useEffect(() => {
     if (locationsQuery.isError) {
@@ -124,7 +140,12 @@ export function FulfillOrderDialog({
 
   // Fulfill mutation — invalidates orders + inventory caches on success.
   const fulfillMutation = useFulfillOrder();
-  const isProcessing = fulfillMutation.isPending;
+  // The shared submit latch (§ P2-B3-1R, M-a.1 / R108-OC-9): one fulfil per
+  // tap, and Escape / Cancel are dropped while it is in flight. The success
+  // close in `handleFulfill` uses the host's RAW `onOpenChange`; through the
+  // guard it would be dropped.
+  const { busy, run, guardOpenChange } = useSubmitLatch();
+  const isProcessing = busy || fulfillMutation.isPending;
 
   const handleFulfill = async () => {
     if (!order || !selectedLocationId || !csrfToken) {
@@ -246,7 +267,7 @@ export function FulfillOrderDialog({
         });
       }
 
-      // Close dialog and refresh
+      // Close dialog and refresh — the host's RAW callback (M-a.1).
       onOpenChange(false);
       if (onSuccess) {
         onSuccess();
@@ -289,6 +310,10 @@ export function FulfillOrderDialog({
 
   const canFulfill = validation?.canFulfill && selectedLocationId !== null;
 
+  // The location the action names (§ P2-B3-1R, MS-1-4) — from the picker's own
+  // list, so the label and the request can only name a location that exists.
+  const selectedLocation = locations.find((location) => location.id === selectedLocationId) ?? null;
+
   // The request cap, client-side (pack CB1.5c / seam S-B10, the journal's
   // threshold-gated idiom): the counter appears while the order is still under
   // the cap — a bound an operator meets for the first time as a 400 is a bound
@@ -298,218 +323,225 @@ export function FulfillOrderDialog({
   const overCap = openCount > MAX_FULFILLMENT_ITEMS;
 
   return (
-    <AlertDialog open={open} onOpenChange={onOpenChange}>
+    <AlertDialog open={open} onOpenChange={guardOpenChange(onOpenChange)}>
       <AlertDialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
         <AlertDialogHeader>
           <AlertDialogTitle>Fulfill Order #{order.orderNumber}</AlertDialogTitle>
-          <AlertDialogDescription className="space-y-4">
+          <AlertDialogDescription asChild>
             <div>
-              Review the order details and select a location to fulfill from.
-            </div>
+              {/* While a fulfil is in flight the WHOLE form is frozen (M-a.1). */}
+              <fieldset disabled={busy} className="min-w-0">
+                <div className="space-y-4">
+                  <div>
+                    Review the order details and select a location to fulfill from.
+                  </div>
 
-            {/* Location Selector */}
-            <div className="rounded-lg border bg-muted/50 p-4 space-y-3">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <MapPin className="h-4 w-4" />
-                <span>Fulfillment Location</span>
-              </div>
-              <Select
-                value={selectedLocationId?.toString()}
-                onValueChange={(value) => setSelectedLocationId(parseInt(value, 10))}
-                disabled={isLoadingLocations}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Select a location" />
-                </SelectTrigger>
-                <SelectContent>
-                  {locations.map((location) => (
-                    <SelectItem key={location.id} value={location.id.toString()}>
-                      {location.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+                  {/* Location Selector */}
+                  <div className="rounded-lg border bg-muted/50 p-4 space-y-3">
+                    <div className="flex items-center gap-2 text-sm font-medium">
+                      <MapPin className="h-4 w-4" />
+                      <span>Fulfillment Location</span>
+                    </div>
+                    <Select
+                      value={selectedLocationId?.toString()}
+                      onValueChange={(value) => setSelectedLocationId(parseInt(value, 10))}
+                      disabled={isLoadingLocations}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue placeholder="Select a location" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {locations.map((location) => (
+                          <SelectItem key={location.id} value={location.id.toString()}>
+                            {location.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
 
-            {/* Warnings */}
-            {hasUnmappedItems && (
-              <div className="rounded-lg border border-warning bg-warning/10 p-4 flex items-start gap-3">
-                <AlertTriangle className="h-5 w-5 text-warning flex-shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <p className="text-sm font-medium text-warning-foreground">
-                    {unmappedItems} unmapped {unmappedItems === 1 ? "item" : "items"}
-                  </p>
-                  {/* "Map them …" only when at least one unmapped line CAN be
-                      mapped: a line with no store product ("" / "0", e.g. typed
-                      by hand in the store) says so itself, and the advice would
-                      contradict it (HTL-QA-4). */}
-                  <p className="text-sm text-muted-foreground">
-                    These items will be skipped during fulfillment.
-                    {order.items?.some(
-                      (item) => !item.isMapped && isCatalogProductId(item.externalProductId),
-                    ) && " Map them to internal products to include them."}
-                  </p>
-                  <div className="mt-2 space-y-1">
-                    {order.items
-                      ?.filter((item) => !item.isMapped)
-                      .map((item) => (
-                        <div key={item.id} className="flex flex-wrap items-center gap-x-2">
-                          <span className="text-xs text-muted-foreground truncate max-w-[200px]">
-                            {item.name}{item.variantName ? ` — ${item.variantName}` : ''}
-                          </span>
-                          {/* A line with no store product ("" / "0", e.g. typed by
-                              hand in the store) has nothing to map: the hint, for
-                              everyone, in place of the admin's Map button. It takes
-                              its own line (basis-full in a wrapping row) so it never
-                              squeezes the name on a narrow screen (HTL-FD1-1). */}
-                          {!isCatalogProductId(item.externalProductId) && (
-                            <span
-                              className="basis-full text-xs text-muted-foreground"
-                              data-testid="no-store-product-hint"
-                            >
-                              {NO_STORE_PRODUCT_LINE_HINT}
-                            </span>
-                          )}
-                          {isAdmin && isCatalogProductId(item.externalProductId) && (
-                            <Button
-                              size="sm"
-                              variant="link"
-                              className="h-auto p-0 text-xs"
-                              onClick={() => {
-                                setMappingItem({
-                                  externalId: item.externalProductId,
-                                  externalVariantId: item.externalVariantId || undefined,
-                                  title: item.productLink?.externalTitle || item.name,
-                                  sku: item.productLink?.externalSku || item.sku || undefined,
-                                });
-                                setMapDialogOpen(true);
-                              }}
-                            >
-                              <Link2 className="h-3 w-3 mr-1" />
-                              Map now
-                            </Button>
-                          )}
+                  {/* Warnings */}
+                  {hasUnmappedItems && (
+                    <div className="rounded-lg border border-warning bg-warning/10 p-4 flex items-start gap-3">
+                      <AlertTriangle className="h-5 w-5 text-warning flex-shrink-0 mt-0.5" />
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium text-warning-foreground">
+                          {unmappedItems} unmapped {unmappedItems === 1 ? "item" : "items"}
+                        </p>
+                        {/* "Map them …" only when at least one unmapped line CAN be
+                            mapped: a line with no store product ("" / "0", e.g. typed
+                            by hand in the store) says so itself, and the advice would
+                            contradict it (HTL-QA-4). */}
+                        <p className="text-sm text-muted-foreground">
+                          These items will be skipped during fulfillment.
+                          {order.items?.some(
+                            (item) => !item.isMapped && isCatalogProductId(item.externalProductId),
+                          ) && " Map them to internal products to include them."}
+                        </p>
+                        <div className="mt-2 space-y-1">
+                          {order.items
+                            ?.filter((item) => !item.isMapped)
+                            .map((item) => (
+                              <div key={item.id} className="flex flex-wrap items-center gap-x-2">
+                                <span className="text-xs text-muted-foreground truncate max-w-[200px]">
+                                  {item.name}{item.variantName ? ` — ${item.variantName}` : ''}
+                                </span>
+                                {/* A line with no store product ("" / "0", e.g. typed by
+                                    hand in the store) has nothing to map: the hint, for
+                                    everyone, in place of the admin's Map button. It takes
+                                    its own line (basis-full in a wrapping row) so it never
+                                    squeezes the name on a narrow screen (HTL-FD1-1). */}
+                                {!isCatalogProductId(item.externalProductId) && (
+                                  <span
+                                    className="basis-full text-xs text-muted-foreground"
+                                    data-testid="no-store-product-hint"
+                                  >
+                                    {NO_STORE_PRODUCT_LINE_HINT}
+                                  </span>
+                                )}
+                                {isAdmin && isCatalogProductId(item.externalProductId) && (
+                                  <Button
+                                    size="sm"
+                                    variant="link"
+                                    className="h-auto p-0 text-xs"
+                                    onClick={() => {
+                                      setMappingItem({
+                                        externalId: item.externalProductId,
+                                        externalVariantId: item.externalVariantId || undefined,
+                                        title: item.productLink?.externalTitle || item.name,
+                                        sku: item.productLink?.externalSku || item.sku || undefined,
+                                      });
+                                      setMapDialogOpen(true);
+                                    }}
+                                  >
+                                    <Link2 className="h-3 w-3 mr-1" />
+                                    Map now
+                                  </Button>
+                                )}
+                              </div>
+                            ))}
                         </div>
-                      ))}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Validation Loading */}
-            {isLoadingValidation && (
-              <div className="flex items-center justify-center py-4">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-              </div>
-            )}
-
-            {/* Validation Summary */}
-            {validation && !isLoadingValidation && (
-              <div className="space-y-3">
-                <div className="flex items-center gap-4 text-sm">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle className="h-4 w-4 text-green-600" />
-                    <span className="font-medium">{itemsWithStock} ready</span>
-                  </div>
-                  {itemsWithIssues > 0 && (
-                    <div className="flex items-center gap-2">
-                      <AlertCircle className="h-4 w-4 text-orange-600" />
-                      <span className="font-medium">{itemsWithIssues} with issues</span>
+                      </div>
                     </div>
                   )}
-                </div>
 
-                {showCounter && (
-                  <p
-                    className={cn(
-                      "text-xs",
-                      overCap
-                        ? "text-destructive font-semibold"
-                        : "font-mono tabular-nums text-muted-foreground"
-                    )}
-                  >
-                    {overCap
-                      ? `This order has ${openCount} open lines; fulfilment handles at most ${MAX_FULFILLMENT_ITEMS} per request.`
-                      : `${openCount} of ${MAX_FULFILLMENT_ITEMS} lines`}
-                  </p>
-                )}
+                  {/* Validation Loading */}
+                  {isLoadingValidation && (
+                    <div className="flex items-center justify-center py-4">
+                      <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                    </div>
+                  )}
 
-                <Separator />
+                  {/* Validation Summary */}
+                  {validation && !isLoadingValidation && (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-4 text-sm">
+                        <div className="flex items-center gap-2">
+                          <CheckCircle className="h-4 w-4 text-green-600" />
+                          <span className="font-medium">{itemsWithStock} ready</span>
+                        </div>
+                        {itemsWithIssues > 0 && (
+                          <div className="flex items-center gap-2">
+                            <AlertCircle className="h-4 w-4 text-orange-600" />
+                            <span className="font-medium">{itemsWithIssues} with issues</span>
+                          </div>
+                        )}
+                      </div>
 
-                {/* Item Details */}
-                <ScrollArea className="max-h-60">
-                  <div className="space-y-2">
-                    {validation.items.map((item) => {
-                      const hasIssues = item.issues.length > 0;
-                      const locationStock = item.mapping?.availableByLocation.find(
-                        (loc) => loc.locationId === selectedLocationId
-                      );
-                      const available = locationStock?.available || 0;
-
-                      return (
-                        <div
-                          key={item.itemId}
+                      {showCounter && (
+                        <p
                           className={cn(
-                            "flex items-start gap-3 p-3 rounded-lg border",
-                            hasIssues
-                              ? "border-orange-200 bg-orange-50/50"
-                              : "border-green-200 bg-green-50/50"
+                            "text-xs",
+                            overCap
+                              ? "text-destructive font-semibold"
+                              : "font-mono tabular-nums text-muted-foreground"
                           )}
                         >
-                          <Package className="h-4 w-4 mt-1 flex-shrink-0 text-muted-foreground" />
-                          <div className="flex-1 min-w-0 space-y-1">
-                            <div className="flex items-start justify-between gap-2">
-                              <p className="font-medium text-sm truncate">{item.name}</p>
-                              <Badge
-                                variant={hasIssues ? "destructive" : "default"}
-                                className="text-xs flex-shrink-0"
-                              >
-                                {item.remainingQty} needed
-                              </Badge>
-                            </div>
-                            {item.sku && (
-                              <p className="text-xs text-muted-foreground">SKU: {item.sku}</p>
-                            )}
-                            {item.mapping && (
-                              <p className="text-xs text-muted-foreground">
-                                Mapped to: {item.mapping.productName} ({available} available)
-                              </p>
-                            )}
-                            {item.issues.length > 0 && (
-                              <div className="space-y-0.5">
-                                {item.issues.map((issue, idx) => (
-                                  <p key={idx} className="text-xs text-orange-700">
-                                    • {issue}
-                                  </p>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </ScrollArea>
-              </div>
-            )}
+                          {overCap
+                            ? `This order has ${openCount} open lines; fulfilment handles at most ${MAX_FULFILLMENT_ITEMS} per request.`
+                            : `${openCount} of ${MAX_FULFILLMENT_ITEMS} lines`}
+                        </p>
+                      )}
 
-            {/* Warning about partial fulfillment */}
-            {validation && !validation.canFulfill && itemsWithStock > 0 && (
-              <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 flex items-start gap-3">
-                <AlertCircle className="h-5 w-5 text-blue-600 flex-shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <p className="text-sm font-medium text-blue-900">Partial Fulfillment</p>
-                  <p className="text-sm text-blue-700">
-                    Only {itemsWithStock} of {totalItems} items can be fulfilled. Items with
-                    issues will be skipped.
+                      <Separator />
+
+                      {/* Item Details */}
+                      <ScrollArea className="max-h-60">
+                        <div className="space-y-2">
+                          {validation.items.map((item) => {
+                            const hasIssues = item.issues.length > 0;
+                            const locationStock = item.mapping?.availableByLocation.find(
+                              (loc) => loc.locationId === selectedLocationId
+                            );
+                            const available = locationStock?.available || 0;
+
+                            return (
+                              <div
+                                key={item.itemId}
+                                className={cn(
+                                  "flex items-start gap-3 p-3 rounded-lg border",
+                                  hasIssues
+                                    ? "border-orange-200 bg-orange-50/50"
+                                    : "border-green-200 bg-green-50/50"
+                                )}
+                              >
+                                <Package className="h-4 w-4 mt-1 flex-shrink-0 text-muted-foreground" />
+                                <div className="flex-1 min-w-0 space-y-1">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <p className="font-medium text-sm truncate">{item.name}</p>
+                                    <Badge
+                                      variant={hasIssues ? "destructive" : "default"}
+                                      className="text-xs flex-shrink-0"
+                                    >
+                                      {item.remainingQty} needed
+                                    </Badge>
+                                  </div>
+                                  {item.sku && (
+                                    <p className="text-xs text-muted-foreground">SKU: {item.sku}</p>
+                                  )}
+                                  {item.mapping && (
+                                    <p className="text-xs text-muted-foreground">
+                                      Mapped to: {item.mapping.productName} ({available} available)
+                                    </p>
+                                  )}
+                                  {item.issues.length > 0 && (
+                                    <div className="space-y-0.5">
+                                      {item.issues.map((issue, idx) => (
+                                        <p key={idx} className="text-xs text-orange-700">
+                                          • {issue}
+                                        </p>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </ScrollArea>
+                    </div>
+                  )}
+
+                  {/* Warning about partial fulfillment */}
+                  {validation && !validation.canFulfill && itemsWithStock > 0 && (
+                    <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 flex items-start gap-3">
+                      <AlertCircle className="h-5 w-5 text-blue-600 flex-shrink-0 mt-0.5" />
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium text-blue-900">Partial Fulfillment</p>
+                        <p className="text-sm text-blue-700">
+                          Only {itemsWithStock} of {totalItems} items can be fulfilled. Items with
+                          issues will be skipped.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  <p className="text-sm text-destructive font-medium">
+                    This action will deduct inventory and cannot be undone.
                   </p>
                 </div>
-              </div>
-            )}
-
-            <p className="text-sm text-destructive font-medium">
-              This action will deduct inventory and cannot be undone.
-            </p>
+              </fieldset>
+            </div>
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -517,7 +549,7 @@ export function FulfillOrderDialog({
           <AlertDialogAction
             onClick={(e) => {
               e.preventDefault();
-              handleFulfill();
+              void run(handleFulfill);
             }}
             disabled={
               isProcessing ||
@@ -538,10 +570,13 @@ export function FulfillOrderDialog({
               </>
             ) : (
               <>
-                {canFulfill
-                  ? "Fulfill Order"
+                {/* § P2-B3-1R (MS-1-4): the action names the lines and the
+                    location it will deduct from. With no location chosen it
+                    says so — "No Items to Fulfill" there would be untrue. */}
+                {selectedLocation === null
+                  ? "Select a location"
                   : itemsWithStock > 0
-                  ? `Fulfill ${itemsWithStock} Items`
+                  ? `Fulfill ${itemsWithStock} ${itemsWithStock === 1 ? "line" : "lines"} from ${selectedLocation.name}`
                   : "No Items to Fulfill"}
               </>
             )}

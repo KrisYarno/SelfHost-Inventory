@@ -6,6 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useWorkbench } from "@/hooks/use-workbench";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
+import { useSubmitLatch } from "@/hooks/use-submit-latch";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -142,6 +143,18 @@ export function CompleteOrderDialog({
   const { selectedLocationId } = useLocation();
   const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
   const queryClient = useQueryClient();
+
+  // § P2-B3-1R (M-b1, MS-1-2): the shared submit latch. A completion is a stock
+  // write, and the dialog used to CLOSE on the tap (an `AlertDialogAction` is a
+  // Radix close), so "Processing..." never rendered and a second Complete sent
+  // a second deduction. Now: one completion per tap (`run` refuses a second
+  // while the first holds the latch), the dialog stays open until the answer
+  // (the keep-open idiom on the action), and Escape / Cancel are dropped while
+  // it is in flight (`guardOpenChange`). `busy` is set in the tap's own task;
+  // `isProcessing` (the store's flag, still set below) follows once the guards
+  // pass — the label and the disabled state read either.
+  const { busy, run, guardOpenChange } = useSubmitLatch();
+  const processing = busy || isProcessing;
 
   const isWCOrder = !!selectedExternalOrder;
 
@@ -779,7 +792,10 @@ export function CompleteOrderDialog({
       const completedOrderRef = orderReference;
       const externalOrderId = selectedExternalOrder?.id;
 
-      // Clear the order and close dialog
+      // Clear the order and close dialog. The HOST's raw `onOpenChange`, never
+      // the guard: this runs inside `run`, while the latch is held, and a close
+      // sent through the guard would be dropped (M-a.1). A failure never gets
+      // here, so it leaves the dialog open with the cart.
       clearOrder();
       onOpenChange(false);
 
@@ -838,281 +854,293 @@ export function CompleteOrderDialog({
   };
 
   return (
-    <AlertDialog open={open} onOpenChange={onOpenChange}>
+    <AlertDialog open={open} onOpenChange={guardOpenChange(onOpenChange)}>
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>
             {isWCOrder ? "Complete & Fulfill Order" : "Complete Order"}
           </AlertDialogTitle>
           <AlertDialogDescription asChild>
-            <div className="space-y-4">
-              <div>
-                {isWCOrder
-                  ? "This will deduct items from inventory and update the WC order status."
-                  : "Are you sure you want to complete this order and deduct the items from inventory?"}
-              </div>
-
-              {/* WC Order Info Banner */}
-              {isWCOrder && (
-                <div className="rounded-lg border border-blue-200 bg-blue-50/50 dark:border-blue-900 dark:bg-blue-950/30 p-3 space-y-1">
-                  <div className="flex items-center gap-2">
-                    <Package className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-                    <span className="font-mono font-medium text-sm">
-                      #{selectedExternalOrder.orderNumber}
-                    </span>
-                    <Badge variant="info" className="text-[10px] px-1.5 py-0">
-                      WOO
-                    </Badge>
-                  </div>
-                  {selectedExternalOrder.customerName && (
-                    <p className="text-sm text-muted-foreground">
-                      {selectedExternalOrder.customerName}
-                      {selectedExternalOrder.total != null && (
-                        <span className="ml-2 font-medium">
-                          ${selectedExternalOrder.total.toFixed(2)}
-                        </span>
-                      )}
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {/* Order Summary */}
-              <div className="rounded-lg border bg-muted/50 p-4 space-y-2">
-                <div className="flex justify-between text-sm">
-                  <span className="font-medium">Order Reference:</span>
-                  <span className="font-mono">{orderReference}</span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span className="font-medium">Total Items:</span>
-                  <span>{orderItems.length}</span>
-                </div>
-                {/* OCc-7: the over-cap sentence lives HERE — the one row both
-                    the WC and the non-WC paths render. Hung off the `Added
-                    Manually` header it would have left a 101-line manual cart
-                    with a dead Confirm and no reason on screen. */}
-                {wcOver && (
-                  <p className="text-sm font-medium text-destructive">
-                    {`This order has ${wcItems.length} WooCommerce lines; fulfilment handles at most ${MAX_FULFILLMENT_ITEMS} per request.`}
-                  </p>
-                )}
-                {manualOver && (
-                  <p className="text-sm font-medium text-destructive">
-                    {`This cart has ${manualItems.length} manual lines; deduction handles at most ${MAX_SIMPLE_DEDUCT_ITEMS} per request.`}
-                  </p>
-                )}
-                <div className="flex justify-between text-sm">
-                  <span className="font-medium">Total Quantity:</span>
-                  <span>{getTotalQuantity()} units</span>
-                </div>
-              </div>
-
-              {/* Item Details - Grouped for WC orders */}
-              {isWCOrder && wcItems.length > 0 && (
-                <div className="space-y-1">
-                  <p className="text-sm font-medium flex items-center gap-1.5">
-                    <CheckCircle2 className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />
-                    From Order ({wcItems.length})
-                    {showWcCounter && (
-                      <span
-                        className={`text-xs font-mono tabular-nums ${
-                          wcOver ? "text-destructive font-semibold" : "text-muted-foreground"
-                        }`}
-                      >
-                        {`${wcItems.length} of ${MAX_FULFILLMENT_ITEMS}`}
-                      </span>
-                    )}
-                  </p>
-                  <ul className="text-sm space-y-1 max-h-24 overflow-y-auto">
-                    {wcItems.map((item, idx) => (
-                      <li key={`wc-${item.fulfillmentItemId || idx}`} className="flex justify-between">
-                        <span className="text-muted-foreground">
-                          {item.product.name}
-                        </span>
-                        <span className="font-medium">{item.quantity}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              {isWCOrder && manualItems.length > 0 && (
-                <div className="space-y-1">
-                  <p className="text-sm font-medium flex items-center gap-1.5">
-                    Added Manually ({manualItems.length})
-                    {showManualCounter && (
-                      <span
-                        className={`text-xs font-mono tabular-nums ${
-                          manualOver ? "text-destructive font-semibold" : "text-muted-foreground"
-                        }`}
-                      >
-                        {`${manualItems.length} of ${MAX_SIMPLE_DEDUCT_ITEMS}`}
-                      </span>
-                    )}
-                  </p>
-                  <ul className="text-sm space-y-1 max-h-24 overflow-y-auto">
-                    {manualItems.map((item) => (
-                      <li key={`manual-${item.product.id}`} className="flex justify-between">
-                        <span className="text-muted-foreground">
-                          {item.product.name}
-                        </span>
-                        <span className="font-medium">{item.quantity}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              {/* W2-1 (T7): the intent chip for the manual lines above. The WC
-                  lines beside them are attributed automatically by the fulfill
-                  route; these are the ones nothing else can speak for. Two
-                  values only — damage-loss is not offered on this surface. */}
-              {showIntentChip && (
-                <IntentChip
-                  surface="workbench"
-                  value={effectiveIntent}
-                  onChange={(next) => setIntent(next as WorkbenchIntent)}
-                  disabled={isProcessing}
-                />
-              )}
-
-              {/* Non-WC: show flat list (original behavior) */}
-              {!isWCOrder && (
-                <div className="space-y-1">
-                  <p className="text-sm font-medium">Items to deduct:</p>
-                  <ul className="text-sm space-y-1 max-h-32 overflow-y-auto">
-                    {orderItems.map((item) => (
-                      <li
-                        // P2: use fulfillmentItemId as disambiguator when present,
-                        // since Amendment 5 allows same-product entries with
-                        // different sources to coexist.
-                        key={item.fulfillmentItemId ?? `manual-${item.product.id}`}
-                        className="flex justify-between"
-                      >
-                        <span className="text-muted-foreground">
-                          {item.product.name}
-                        </span>
-                        <span className="font-medium">{item.quantity}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              {/* Skipped-line checklist (T6). Grouped by class, because the
-                  three classes are three different truths: a bundle still
-                  ships (from Order Details), the other two do not ship
-                  deducted at all. Every non-bundle line has to be tapped
-                  before Complete unlocks — the checklist never blocks the
-                  completion itself, it only makes the operator see each line. */}
-              {isWCOrder && skippedLines.length > 0 && (
-                <div className="rounded-lg border border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/30 p-3 space-y-2">
-                  <div className="flex items-center gap-1.5">
-                    <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
-                    <span className="text-sm font-medium text-amber-700 dark:text-amber-300">
-                      {skippedLines.length} line{skippedLines.length !== 1 ? "s" : ""} will not be deducted
-                    </span>
+            <div>
+              {/* While a completion is in flight the WHOLE form is frozen (M-a.1). */}
+              <fieldset disabled={busy} className="min-w-0">
+                <div className="space-y-4">
+                  <div>
+                    {isWCOrder
+                      ? "This will deduct items from inventory and update the WC order status."
+                      : "Are you sure you want to complete this order and deduct the items from inventory?"}
                   </div>
 
-                  {tapRequiredKeys.length > 0 && (
-                    <p className="ml-5 text-xs text-amber-700 dark:text-amber-300">
-                      Tap each flagged line to acknowledge ({acknowledgedCount} of{" "}
-                      {tapRequiredKeys.length}).
-                    </p>
-                  )}
-
-                  {SKIPPED_LINE_CLASSES.map((lineClass) => {
-                    const lines = skippedLines.filter((line) => line.lineClass === lineClass);
-                    if (lines.length === 0) return null;
-                    return (
-                      <div key={lineClass} className="ml-5 space-y-1">
-                        <p className="text-xs font-medium text-amber-700 dark:text-amber-300">
-                          {SKIPPED_LINE_LABEL[lineClass]} ({lines.length})
-                        </p>
-                        <ul className="space-y-1">
-                          {lines.map(({ key, item }) => {
-                            const detail = (
-                              <span className="text-left">
-                                {item.name} x{item.quantity}
-                                {item.sku && <span className="ml-1 opacity-70">({item.sku})</span>}
-                                <span className="ml-1 italic opacity-80">
-                                  {SKIPPED_LINE_COPY[lineClass]}
-                                </span>
-                              </span>
-                            );
-
-                            // Bundles are informational: no tap, nothing to unlock.
-                            if (lineClass === "bundle") {
-                              return (
-                                <li
-                                  key={key}
-                                  className="text-xs text-amber-600 dark:text-amber-400"
-                                >
-                                  {detail}
-                                </li>
-                              );
-                            }
-
-                            const isAcknowledged = acknowledgedLines.includes(key);
-                            return (
-                              <li key={key}>
-                                <button
-                                  type="button"
-                                  role="checkbox"
-                                  aria-checked={isAcknowledged}
-                                  onClick={() => toggleAcknowledged(key)}
-                                  disabled={isProcessing}
-                                  // py-2 keeps the row a comfortable tap target
-                                  // on the mobile workbench.
-                                  className={`flex w-full items-start gap-2 rounded-md border px-2 py-2 text-xs transition-colors disabled:opacity-60 ${
-                                    isAcknowledged
-                                      ? "border-amber-400 bg-amber-100/70 text-amber-800 dark:border-amber-700 dark:bg-amber-900/40 dark:text-amber-200"
-                                      : "border-amber-300/70 text-amber-700 hover:bg-amber-100/50 dark:border-amber-800 dark:text-amber-300 dark:hover:bg-amber-900/30"
-                                  }`}
-                                >
-                                  <span
-                                    aria-hidden="true"
-                                    className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border border-amber-500 dark:border-amber-600"
-                                  >
-                                    {isAcknowledged && <Check className="h-3 w-3" />}
-                                  </span>
-                                  {detail}
-                                </button>
-                              </li>
-                            );
-                          })}
-                        </ul>
+                  {/* WC Order Info Banner */}
+                  {isWCOrder && (
+                    <div className="rounded-lg border border-blue-200 bg-blue-50/50 dark:border-blue-900 dark:bg-blue-950/30 p-3 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <Package className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                        <span className="font-mono font-medium text-sm">
+                          #{selectedExternalOrder.orderNumber}
+                        </span>
+                        <Badge variant="info" className="text-[10px] px-1.5 py-0">
+                          WOO
+                        </Badge>
                       </div>
-                    );
-                  })}
-                </div>
-              )}
+                      {selectedExternalOrder.customerName && (
+                        <p className="text-sm text-muted-foreground">
+                          {selectedExternalOrder.customerName}
+                          {selectedExternalOrder.total != null && (
+                            <span className="ml-2 font-medium">
+                              ${selectedExternalOrder.total.toFixed(2)}
+                            </span>
+                          )}
+                        </p>
+                      )}
+                    </div>
+                  )}
 
-              {/* Summary text */}
-              {isWCOrder ? (
-                <p className="text-sm text-muted-foreground">
-                  This will deduct {getTotalQuantity()} unit{getTotalQuantity() !== 1 ? "s" : ""} and
-                  update WC order #{selectedExternalOrder.orderNumber} status.
-                  You can undo this within 10 seconds.
-                </p>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  You can undo this within 10 seconds after completion.
-                </p>
-              )}
+                  {/* Order Summary */}
+                  <div className="rounded-lg border bg-muted/50 p-4 space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span className="font-medium">Order Reference:</span>
+                      <span className="font-mono">{orderReference}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="font-medium">Total Items:</span>
+                      <span>{orderItems.length}</span>
+                    </div>
+                    {/* OCc-7: the over-cap sentence lives HERE — the one row both
+                        the WC and the non-WC paths render. Hung off the `Added
+                        Manually` header it would have left a 101-line manual cart
+                        with a dead Confirm and no reason on screen. */}
+                    {wcOver && (
+                      <p className="text-sm font-medium text-destructive">
+                        {`This order has ${wcItems.length} WooCommerce lines; fulfilment handles at most ${MAX_FULFILLMENT_ITEMS} per request.`}
+                      </p>
+                    )}
+                    {manualOver && (
+                      <p className="text-sm font-medium text-destructive">
+                        {`This cart has ${manualItems.length} manual lines; deduction handles at most ${MAX_SIMPLE_DEDUCT_ITEMS} per request.`}
+                      </p>
+                    )}
+                    <div className="flex justify-between text-sm">
+                      <span className="font-medium">Total Quantity:</span>
+                      <span>{getTotalQuantity()} units</span>
+                    </div>
+                  </div>
+
+                  {/* Item Details - Grouped for WC orders */}
+                  {isWCOrder && wcItems.length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium flex items-center gap-1.5">
+                        <CheckCircle2 className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />
+                        From Order ({wcItems.length})
+                        {showWcCounter && (
+                          <span
+                            className={`text-xs font-mono tabular-nums ${
+                              wcOver ? "text-destructive font-semibold" : "text-muted-foreground"
+                            }`}
+                          >
+                            {`${wcItems.length} of ${MAX_FULFILLMENT_ITEMS}`}
+                          </span>
+                        )}
+                      </p>
+                      <ul className="text-sm space-y-1 max-h-24 overflow-y-auto">
+                        {wcItems.map((item, idx) => (
+                          <li key={`wc-${item.fulfillmentItemId || idx}`} className="flex justify-between">
+                            <span className="text-muted-foreground">
+                              {item.product.name}
+                            </span>
+                            <span className="font-medium">{item.quantity}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {isWCOrder && manualItems.length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium flex items-center gap-1.5">
+                        Added Manually ({manualItems.length})
+                        {showManualCounter && (
+                          <span
+                            className={`text-xs font-mono tabular-nums ${
+                              manualOver ? "text-destructive font-semibold" : "text-muted-foreground"
+                            }`}
+                          >
+                            {`${manualItems.length} of ${MAX_SIMPLE_DEDUCT_ITEMS}`}
+                          </span>
+                        )}
+                      </p>
+                      <ul className="text-sm space-y-1 max-h-24 overflow-y-auto">
+                        {manualItems.map((item) => (
+                          <li key={`manual-${item.product.id}`} className="flex justify-between">
+                            <span className="text-muted-foreground">
+                              {item.product.name}
+                            </span>
+                            <span className="font-medium">{item.quantity}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* W2-1 (T7): the intent chip for the manual lines above. The WC
+                      lines beside them are attributed automatically by the fulfill
+                      route; these are the ones nothing else can speak for. Two
+                      values only — damage-loss is not offered on this surface. */}
+                  {showIntentChip && (
+                    <IntentChip
+                      surface="workbench"
+                      value={effectiveIntent}
+                      onChange={(next) => setIntent(next as WorkbenchIntent)}
+                      disabled={isProcessing}
+                    />
+                  )}
+
+                  {/* Non-WC: show flat list (original behavior) */}
+                  {!isWCOrder && (
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium">Items to deduct:</p>
+                      <ul className="text-sm space-y-1 max-h-32 overflow-y-auto">
+                        {orderItems.map((item) => (
+                          <li
+                            // P2: use fulfillmentItemId as disambiguator when present,
+                            // since Amendment 5 allows same-product entries with
+                            // different sources to coexist.
+                            key={item.fulfillmentItemId ?? `manual-${item.product.id}`}
+                            className="flex justify-between"
+                          >
+                            <span className="text-muted-foreground">
+                              {item.product.name}
+                            </span>
+                            <span className="font-medium">{item.quantity}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Skipped-line checklist (T6). Grouped by class, because the
+                      three classes are three different truths: a bundle still
+                      ships (from Order Details), the other two do not ship
+                      deducted at all. Every non-bundle line has to be tapped
+                      before Complete unlocks — the checklist never blocks the
+                      completion itself, it only makes the operator see each line. */}
+                  {isWCOrder && skippedLines.length > 0 && (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/30 p-3 space-y-2">
+                      <div className="flex items-center gap-1.5">
+                        <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+                        <span className="text-sm font-medium text-amber-700 dark:text-amber-300">
+                          {skippedLines.length} line{skippedLines.length !== 1 ? "s" : ""} will not be deducted
+                        </span>
+                      </div>
+
+                      {tapRequiredKeys.length > 0 && (
+                        <p className="ml-5 text-xs text-amber-700 dark:text-amber-300">
+                          Tap each flagged line to acknowledge ({acknowledgedCount} of{" "}
+                          {tapRequiredKeys.length}).
+                        </p>
+                      )}
+
+                      {SKIPPED_LINE_CLASSES.map((lineClass) => {
+                        const lines = skippedLines.filter((line) => line.lineClass === lineClass);
+                        if (lines.length === 0) return null;
+                        return (
+                          <div key={lineClass} className="ml-5 space-y-1">
+                            <p className="text-xs font-medium text-amber-700 dark:text-amber-300">
+                              {SKIPPED_LINE_LABEL[lineClass]} ({lines.length})
+                            </p>
+                            <ul className="space-y-1">
+                              {lines.map(({ key, item }) => {
+                                const detail = (
+                                  <span className="text-left">
+                                    {item.name} x{item.quantity}
+                                    {item.sku && <span className="ml-1 opacity-70">({item.sku})</span>}
+                                    <span className="ml-1 italic opacity-80">
+                                      {SKIPPED_LINE_COPY[lineClass]}
+                                    </span>
+                                  </span>
+                                );
+
+                                // Bundles are informational: no tap, nothing to unlock.
+                                if (lineClass === "bundle") {
+                                  return (
+                                    <li
+                                      key={key}
+                                      className="text-xs text-amber-600 dark:text-amber-400"
+                                    >
+                                      {detail}
+                                    </li>
+                                  );
+                                }
+
+                                const isAcknowledged = acknowledgedLines.includes(key);
+                                return (
+                                  <li key={key}>
+                                    <button
+                                      type="button"
+                                      role="checkbox"
+                                      aria-checked={isAcknowledged}
+                                      onClick={() => toggleAcknowledged(key)}
+                                      disabled={isProcessing}
+                                      // py-2 keeps the row a comfortable tap target
+                                      // on the mobile workbench.
+                                      className={`flex w-full items-start gap-2 rounded-md border px-2 py-2 text-xs transition-colors disabled:opacity-60 ${
+                                        isAcknowledged
+                                          ? "border-amber-400 bg-amber-100/70 text-amber-800 dark:border-amber-700 dark:bg-amber-900/40 dark:text-amber-200"
+                                          : "border-amber-300/70 text-amber-700 hover:bg-amber-100/50 dark:border-amber-800 dark:text-amber-300 dark:hover:bg-amber-900/30"
+                                      }`}
+                                    >
+                                      <span
+                                        aria-hidden="true"
+                                        className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border border-amber-500 dark:border-amber-600"
+                                      >
+                                        {isAcknowledged && <Check className="h-3 w-3" />}
+                                      </span>
+                                      {detail}
+                                    </button>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Summary text */}
+                  {isWCOrder ? (
+                    <p className="text-sm text-muted-foreground">
+                      This will deduct {getTotalQuantity()} unit{getTotalQuantity() !== 1 ? "s" : ""} and
+                      update WC order #{selectedExternalOrder.orderNumber} status.
+                      You can undo this within 10 seconds.
+                    </p>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      You can undo this within 10 seconds after completion.
+                    </p>
+                  )}
+                </div>
+              </fieldset>
             </div>
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel disabled={isProcessing}>Cancel</AlertDialogCancel>
+          <AlertDialogCancel disabled={processing}>Cancel</AlertDialogCancel>
           <AlertDialogAction
-            onClick={handleComplete}
+            // The keep-open idiom (M-a.2): `preventDefault` stops the action's
+            // own close, so the dialog stays up — "Processing...", the frozen
+            // form — until the answer. Success closes it from `handleComplete`;
+            // a failure leaves it open.
+            onClick={(e) => {
+              e.preventDefault();
+              void run(handleComplete);
+            }}
             // T6: the only new gate is the acknowledgement one, and it lifts
             // for good once every tap-required line has been tapped.
             // CB1.5c: plus the request caps — either leg over its own cap would
             // be refused by its route with the whole cart already spent.
             disabled={
-              isProcessing ||
+              processing ||
               csrfLoading ||
               !csrfToken ||
               !allAcknowledged ||
@@ -1120,7 +1148,7 @@ export function CompleteOrderDialog({
               manualOver
             }
           >
-            {isProcessing
+            {processing
               ? "Processing..."
               : isWCOrder
               ? "Complete & Fulfill"

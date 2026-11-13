@@ -204,7 +204,10 @@ describe("QuickAdjustDialog (add mode)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Surface 2 — the stock-in dialog (every stock-in is a positive delta)
+// Surface 2 — the stock-in dialog (every stock-in is a positive delta).
+// § P2-B3-1R (MS-1-1): its only text field besides the quantity is the Note,
+// so a declined prompt's stock-in is EXACTLY the three keys — no `orderNumber`,
+// no empty `notes`.
 // ---------------------------------------------------------------------------
 
 describe("StockInDialog", () => {
@@ -230,11 +233,32 @@ describe("StockInDialog", () => {
     await user.click(screen.getByRole("button", { name: /add 12 units/i }));
 
     await waitFor(() => expect(writeCalls(fetchFn).length).toBe(1));
-    const [, init] = writeCalls(fetchFn)[0];
-    expect(JSON.parse(String((init as RequestInit).body))).toMatchObject({
+    const [url, init] = writeCalls(fetchFn)[0];
+    expect(String(url)).toContain("/api/inventory/stock-in");
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
       productId: 42,
       locationId: 2,
       quantity: 12,
+    });
+  });
+
+  it("DECLINE with a Note: the same request, plus the Note as `notes`", async () => {
+    const user = userEvent.setup();
+    const fetchFn = global.fetch as jest.Mock;
+    wrap(<StockInDialog open onOpenChange={() => {}} product={product} />);
+
+    await user.type(screen.getByLabelText(/quantity to add/i), "12");
+    await user.click(screen.getByRole("button", { name: /no|continue/i }));
+    await user.type(screen.getByLabelText("Note (optional)"), "restock");
+    await user.click(screen.getByRole("button", { name: /add 12 units/i }));
+
+    await waitFor(() => expect(writeCalls(fetchFn).length).toBe(1));
+    const [, init] = writeCalls(fetchFn)[0];
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+      productId: 42,
+      locationId: 2,
+      quantity: 12,
+      notes: "restock",
     });
   });
 

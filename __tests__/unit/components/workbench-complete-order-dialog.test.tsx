@@ -20,7 +20,7 @@
 // resets the taps; nothing is ever sent on decline.
 
 import * as React from "react";
-import { render, screen, act, waitFor } from "@testing-library/react";
+import { render, screen, act, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -1750,5 +1750,170 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
     const sentence = screen.getByText(MANUAL_OVER);
     expect(sentence.closest("div")?.textContent).toContain("Total Items:");
     expect(screen.getByRole("button", { name: "Complete Order" })).toBeDisabled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ONE COMPLETION PER TAP (§ P2-B3-1R, M-b1 fix 1 — MS-1-2).
+//
+// The action is a Radix close: with no `preventDefault` the dialog CLOSED on the
+// tap, so "Processing..." and the frozen fields never rendered, and a second
+// Complete on a manual cart sent a second deduct-simple POST — a double
+// deduction. Now the keep-open idiom + the shared latch: the dialog stays up
+// until the answer, a second tap sends nothing, and Escape / Cancel are dropped
+// while the request is in flight. The harness renders with `open` FIXED, so the
+// pins watch `onOpenChange` itself — the call a real host would close on.
+// ---------------------------------------------------------------------------
+
+describe("complete-order dialog — one completion per tap (MS-1-2)", () => {
+  /** A deduct-simple answer the test releases by hand: the write "in flight". */
+  function holdDeduct() {
+    let release!: () => void;
+    const answered = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fetchMock.mockImplementation(async (url: unknown) => {
+      if (String(url).includes("/api/inventory/deduct-simple")) await answered;
+      return {
+        ok: true,
+        json: async () => ({ success: true, batchId: "deduct-batch-held" }),
+      } as unknown as Response;
+    });
+    return release;
+  }
+
+  const deductCalls = () =>
+    fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/inventory/deduct-simple"));
+
+  /** A manual cart: the path where a second Complete was a second deduction. */
+  function seedManualCart() {
+    act(() => {
+      useWorkbench.getState().setOrderReference("manual-ref");
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+  }
+
+  const confirm = () =>
+    screen.getByRole("button", { name: /^(Complete Order|Processing\.\.\.)$/ });
+
+  it("onOpenChange is NOT called with false between the tap and the deduct-simple answer", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const release = holdDeduct();
+    seedManualCart();
+    const { onOpenChange, onSuccess } = renderDialog();
+
+    await user.click(confirm());
+    await waitFor(() => expect(deductCalls()).toHaveLength(1));
+    // In flight: still open, and it says so.
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    expect(confirm()).toHaveTextContent("Processing...");
+    expect(confirm()).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+
+    await act(async () => release());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    // The answer closes it — once, through the host's raw callback.
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+  });
+
+  it("a double tap sends ONE deduct-simple POST", async () => {
+    const release = holdDeduct();
+    seedManualCart();
+    const { onSuccess } = renderDialog();
+
+    // Both taps in the instant before "Processing..." renders (FD3-1): only the
+    // latch's synchronous ref can refuse the second.
+    act(() => {
+      fireEvent.click(confirm());
+      expect(confirm()).toHaveTextContent("Complete Order");
+      fireEvent.click(confirm());
+    });
+    await waitFor(() => expect(deductCalls()).toHaveLength(1));
+
+    await act(async () => release());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1));
+    expect(deductCalls()).toHaveLength(1);
+  });
+
+  it("Escape while busy does not close it; the answer does", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const release = holdDeduct();
+    seedManualCart();
+    const { onOpenChange, onSuccess } = renderDialog();
+
+    await user.click(confirm());
+    await waitFor(() => expect(confirm()).toHaveTextContent("Processing..."));
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    await act(async () => release());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+  });
+
+  it("Escape in the instant after the tap (before any render) does not close it either", async () => {
+    const release = holdDeduct();
+    seedManualCart();
+    const { onOpenChange, onSuccess } = renderDialog();
+
+    act(() => {
+      fireEvent.click(confirm());
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    });
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    await act(async () => release());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+  });
+
+  it("while busy the form is frozen (the fieldset)", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const release = holdDeduct();
+    seedOrder([CART_ITEM, UNMAPPED_ITEM_A]);
+    act(() => {
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    renderDialog();
+    await user.click(screen.getByRole("checkbox", { name: /Mystery Peptide/ }));
+
+    await user.click(completeButton());
+    await waitFor(() => expect(deductCalls()).toHaveLength(1));
+    const fieldset = screen.getByRole("alertdialog").querySelector("fieldset");
+    expect(fieldset).toHaveAttribute("disabled");
+    expect(fieldset).toHaveClass("min-w-0");
+    expect(screen.getByRole("checkbox", { name: /Mystery Peptide/ })).toBeDisabled();
+
+    await act(async () => release());
+    await waitFor(() => expect(fieldset).not.toHaveAttribute("disabled"));
+  });
+
+  it("a FAILED completion stays open, and the latch is released (Complete sends again)", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    fetchMock.mockImplementation(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: "Product 777: Insufficient inventory: current 0, trying to remove 1",
+        code: "INSUFFICIENT_STOCK",
+      }),
+    } as unknown as Response));
+    seedManualCart();
+    const { onOpenChange, onSuccess } = renderDialog();
+
+    await user.click(confirm());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(onSuccess).not.toHaveBeenCalled();
+
+    await waitFor(() => expect(confirm()).toBeEnabled());
+    expect(confirm()).toHaveTextContent("Complete Order");
+    await user.click(confirm());
+    await waitFor(() => expect(deductCalls()).toHaveLength(2));
+    expect(onOpenChange).not.toHaveBeenCalled();
   });
 });
