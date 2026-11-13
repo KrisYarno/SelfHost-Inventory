@@ -26,6 +26,10 @@ interface TokenSecretDialogProps {
  * "Copy this token now. It will not be shown again." Closing clears the
  * plaintext from state (the parent nulls `token`). The token NEVER enters a
  * toast — only the "Token copied" confirmation does.
+ *
+ * Escape does NOT close it either (§ P2-B3-1R, MS-3-26): one stray Escape
+ * before Copy would lose a token that can never be shown again. Only `Done`
+ * closes.
  */
 export function TokenSecretDialog({ token, tokenName, onClose }: TokenSecretDialogProps) {
   const copy = async () => {
@@ -45,7 +49,7 @@ export function TokenSecretDialog({ token, tokenName, onClose }: TokenSecretDial
         if (!open) onClose();
       }}
     >
-      <AlertDialogContent>
+      <AlertDialogContent onEscapeKeyDown={(e) => e.preventDefault()}>
         <AlertDialogHeader>
           <AlertDialogTitle>
             {tokenName ? `Token for ${tokenName}` : "New API token"}

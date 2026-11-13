@@ -108,6 +108,11 @@ export default function AdminProductMappingsPage() {
   // Bulk map chooser dialog
   const [chooserOpen, setChooserOpen] = useState(false);
 
+  // Add Mapping's store chooser (§ P2-B3-1R, MS-3-16): on "All Integrations"
+  // with more than one store, Add Mapping asks which store the product is from
+  // instead of silently mapping into the first one.
+  const [addChooserOpen, setAddChooserOpen] = useState(false);
+
   // Add mapping dialog
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [addIntegrationId, setAddIntegrationId] = useState<string | null>(null);
@@ -265,17 +270,30 @@ export default function AdminProductMappingsPage() {
     setChooserOpen(true);
   };
 
+  const openAddMapping = (integrationId: string) => {
+    setAddIntegrationId(integrationId);
+    setAddDialogOpen(true);
+  };
+
   const handleAddMapping = () => {
     if (integrations.length === 0) {
       toast.error("No integrations configured. Add an integration first.");
       return;
     }
-    // Use the first integration or the selected filter
-    const defaultIntId =
-      integrationFilter !== "all" ? integrationFilter : integrations[0]?.id;
-    setAddIntegrationId(defaultIntId || null);
-    setAddDialogOpen(true);
+    // A filtered store, or the only store, is the target; otherwise ask.
+    if (integrationFilter !== "all") {
+      openAddMapping(integrationFilter);
+      return;
+    }
+    if (integrations.length === 1) {
+      openAddMapping(integrations[0].id);
+      return;
+    }
+    setAddChooserOpen(true);
   };
+
+  // The map dialog names the store the mapping will be created in.
+  const addStoreName = integrations.find((i) => i.id === addIntegrationId)?.name;
 
   // Group mappings by integration
   const groupedMappings: Record<string, MappingEntry[]> = {};
@@ -572,6 +590,14 @@ export default function AdminProductMappingsPage() {
         integrations={integrations}
       />
 
+      <BulkMapChooserDialog
+        open={addChooserOpen}
+        onOpenChange={setAddChooserOpen}
+        integrations={integrations}
+        title="Which store is this product from?"
+        onChoose={openAddMapping}
+      />
+
       {/* Delete Confirmation Dialog */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
@@ -642,6 +668,7 @@ export default function AdminProductMappingsPage() {
           open={addDialogOpen}
           onOpenChange={setAddDialogOpen}
           integrationId={addIntegrationId}
+          storeName={addStoreName}
           onMapped={() => {
             queryClient.invalidateQueries({ queryKey: ["product-mappings"] });
           }}

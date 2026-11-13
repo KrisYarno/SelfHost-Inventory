@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/select";
 import { toast } from "sonner";
 import { useCSRF } from "@/hooks/use-csrf";
-import { useUpdateUser } from "@/hooks/use-admin";
+import { useUpdateUser, type UpdateUserInput } from "@/hooks/use-admin";
 import { Loader2, Plus, Trash2 } from "lucide-react";
 
 interface Location {
@@ -47,7 +47,7 @@ interface UserWithDetails {
   username: string;
   isAdmin: boolean;
   isApproved: boolean;
-  defaultLocationId?: number;
+  defaultLocationId?: number | null;
   emailAlerts?: boolean | null;
   minLocationEmailAlerts?: boolean;
   minCombinedEmailAlerts?: boolean;
@@ -55,12 +55,79 @@ interface UserWithDetails {
 }
 
 interface EditUserDialogProps {
-  user: UserWithDetails | null;
+  user: UserWithDetails;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSuccess: () => void;
   locations: Location[];
   companies: Company[];
+}
+
+interface FormValues {
+  username: string;
+  /** `null` = the user has no default location: the Select shows `Not set`. */
+  defaultLocationId: number | null;
+  isAdmin: boolean;
+  emailAlerts: boolean;
+  minLocationEmailAlerts: boolean;
+  minCombinedEmailAlerts: boolean;
+  companies: CompanyAssociation[];
+}
+
+/**
+ * The PATCH body: only the fields that changed. The route treats every field as
+ * optional (`app/api/admin/users/[userId]/route.ts`), and so does `UpdateUserInput`.
+ */
+type UserPatch = UpdateUserInput["data"];
+
+/**
+ * The user as the form first shows them, normalised once at mount: a stored
+ * `emailAlerts: null` reads as `false` (the checkbox has no third state); a
+ * missing default location stays `null` (never `1`).
+ */
+function initialFormValues(user: UserWithDetails): FormValues {
+  return {
+    username: user.username || "",
+    defaultLocationId: user.defaultLocationId ?? null,
+    isAdmin: user.isAdmin || false,
+    emailAlerts: user.emailAlerts ?? false,
+    minLocationEmailAlerts: user.minLocationEmailAlerts || false,
+    minCombinedEmailAlerts: user.minCombinedEmailAlerts || false,
+    companies: user.companies || [],
+  };
+}
+
+/** Memberships are a SET of companies: order and the display names don't count. */
+function sameCompanySet(a: CompanyAssociation[], b: CompanyAssociation[]): boolean {
+  const ids = new Set(a.map((c) => c.companyId));
+  return ids.size === new Set(b.map((c) => c.companyId)).size && b.every((c) => ids.has(c.companyId));
+}
+
+/**
+ * The fields whose current value differs from the snapshot taken at mount, and
+ * nothing else. When the membership set differs, the FULL new list is sent (the
+ * route replaces the set). A default location is sent only once one is picked
+ * and it differs; `Not set` is display-only and is never sent (the route takes
+ * no null).
+ */
+function changedFields(initial: FormValues, current: FormValues): UserPatch {
+  const body: UserPatch = {};
+  if (current.username !== initial.username) body.username = current.username;
+  if (current.defaultLocationId !== null && current.defaultLocationId !== initial.defaultLocationId) {
+    body.defaultLocationId = current.defaultLocationId;
+  }
+  if (current.isAdmin !== initial.isAdmin) body.isAdmin = current.isAdmin;
+  if (current.emailAlerts !== initial.emailAlerts) body.emailAlerts = current.emailAlerts;
+  if (current.minLocationEmailAlerts !== initial.minLocationEmailAlerts) {
+    body.minLocationEmailAlerts = current.minLocationEmailAlerts;
+  }
+  if (current.minCombinedEmailAlerts !== initial.minCombinedEmailAlerts) {
+    body.minCombinedEmailAlerts = current.minCombinedEmailAlerts;
+  }
+  if (!sameCompanySet(current.companies, initial.companies)) {
+    body.companies = current.companies.map((c) => ({ companyId: c.companyId }));
+  }
+  return body;
 }
 
 export function EditUserDialog({
@@ -75,31 +142,37 @@ export function EditUserDialog({
   const updateUser = useUpdateUser();
   const isSubmitting = updateUser.isPending;
 
-  // Form state
-  const [username, setUsername] = useState("");
-  const [defaultLocationId, setDefaultLocationId] = useState<number>(1);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [emailAlerts, setEmailAlerts] = useState(false);
-  const [minLocationEmailAlerts, setMinLocationEmailAlerts] = useState(false);
-  const [minCombinedEmailAlerts, setMinCombinedEmailAlerts] = useState(false);
-  const [userCompanies, setUserCompanies] = useState<CompanyAssociation[]>([]);
+  // Form state — set from props ONCE, at mount (§ P2-B3-1R, MS-3-1 / M-a.3).
+  // The users page mounts this dialog per open, so every open starts from the
+  // stored user; there is no prop-keyed effect to re-seed (or fail to re-seed)
+  // a cancelled draft. `initial` is the snapshot the body is diffed against.
+  const [initial] = useState(() => initialFormValues(user));
+  const [username, setUsername] = useState(initial.username);
+  const [defaultLocationId, setDefaultLocationId] = useState<number | null>(initial.defaultLocationId);
+  const [isAdmin, setIsAdmin] = useState(initial.isAdmin);
+  const [emailAlerts, setEmailAlerts] = useState(initial.emailAlerts);
+  const [minLocationEmailAlerts, setMinLocationEmailAlerts] = useState(initial.minLocationEmailAlerts);
+  const [minCombinedEmailAlerts, setMinCombinedEmailAlerts] = useState(initial.minCombinedEmailAlerts);
+  const [userCompanies, setUserCompanies] = useState<CompanyAssociation[]>(initial.companies);
 
-  // Reset form when user changes
-  useEffect(() => {
-    if (user) {
-      setUsername(user.username || "");
-      setDefaultLocationId(user.defaultLocationId || 1);
-      setIsAdmin(user.isAdmin || false);
-      setEmailAlerts(user.emailAlerts || false);
-      setMinLocationEmailAlerts(user.minLocationEmailAlerts || false);
-      setMinCombinedEmailAlerts(user.minCombinedEmailAlerts || false);
-      setUserCompanies(user.companies || []);
-    }
-  }, [user]);
+  // ONLY what changed is sent (MS-3-1/3-2/3-4): an untouched Admin box never
+  // rides along with a username fix, an untouched stored `null` never records a
+  // phantom update, and an unset default location is never sent as 1.
+  const changes = changedFields(initial, {
+    username,
+    defaultLocationId,
+    isAdmin,
+    emailAlerts,
+    minLocationEmailAlerts,
+    minCombinedEmailAlerts,
+    companies: userCompanies,
+  });
+  const hasChanges = Object.keys(changes).length > 0;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user) return;
+    // Nothing changed: Save is disabled, and no request is sent.
+    if (!hasChanges) return;
 
     // Basic validation
     if (username.length < 2 || username.length > 50) {
@@ -110,17 +183,7 @@ export function EditUserDialog({
     try {
       await updateUser.mutateAsync({
         id: user.id,
-        data: {
-          username,
-          defaultLocationId,
-          isAdmin,
-          emailAlerts,
-          minLocationEmailAlerts,
-          minCombinedEmailAlerts,
-          companies: userCompanies.map((c) => ({
-            companyId: c.companyId,
-          })),
-        },
+        data: changes,
       });
 
       toast.success("User updated successfully");
@@ -163,8 +226,6 @@ export function EditUserDialog({
   const availableCompanies = companies.filter(
     (c) => !userCompanies.some((uc) => uc.companyId === c.id)
   );
-
-  if (!user) return null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -215,11 +276,13 @@ export function EditUserDialog({
               <div className="space-y-2">
                 <Label htmlFor="defaultLocation">Default Location</Label>
                 <Select
-                  value={defaultLocationId.toString()}
-                  onValueChange={(value) => setDefaultLocationId(parseInt(value))}
+                  value={defaultLocationId === null ? "" : defaultLocationId.toString()}
+                  onValueChange={(value) => {
+                    if (value) setDefaultLocationId(parseInt(value));
+                  }}
                 >
                   <SelectTrigger id="defaultLocation">
-                    <SelectValue placeholder="Select location" />
+                    <SelectValue placeholder="Not set" />
                   </SelectTrigger>
                   <SelectContent>
                     {locations.map((location) => (
@@ -365,7 +428,7 @@ export function EditUserDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={isSubmitting || csrfLoading}>
+            <Button type="submit" disabled={isSubmitting || csrfLoading || !hasChanges}>
               {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Save Changes
             </Button>

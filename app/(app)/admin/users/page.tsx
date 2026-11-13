@@ -31,8 +31,10 @@ export default function AdminUsersPage() {
   const [page, setPage] = useState(1);
   const [selectedUsers, setSelectedUsers] = useState<Set<number>>(new Set());
 
-  // Edit dialog state
-  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  // Edit dialog subject. The dialog is mounted PER OPEN (§ P2-B3-1R, MS-3-1 /
+  // M-a.3): it renders only while `editingUser` is set, and any close nulls
+  // it, so a cancelled draft (a ticked Admin box, edited memberships) can never
+  // come back on the next open of the same user.
   const [editingUser, setEditingUser] = useState<User | null>(null);
 
   const pendingQuery = useAdminPendingUsers();
@@ -62,7 +64,6 @@ export default function AdminUsersPage() {
 
   const handleEdit = (user: User) => {
     setEditingUser(user);
-    setEditDialogOpen(true);
   };
 
   // Refresh is handled by useUpdateUser's cache invalidation inside the dialog.
@@ -355,15 +356,19 @@ export default function AdminUsersPage() {
         </Card>
       </div>
 
-      {/* Edit User Dialog */}
-      <EditUserDialog
-        user={editingUser}
-        open={editDialogOpen}
-        onOpenChange={setEditDialogOpen}
-        onSuccess={handleEditSuccess}
-        locations={locations}
-        companies={companies}
-      />
+      {/* Edit User Dialog — mounted per open; any close nulls the subject */}
+      {editingUser && (
+        <EditUserDialog
+          user={editingUser}
+          open
+          onOpenChange={(open) => {
+            if (!open) setEditingUser(null);
+          }}
+          onSuccess={handleEditSuccess}
+          locations={locations}
+          companies={companies}
+        />
+      )}
     </div>
   );
 }

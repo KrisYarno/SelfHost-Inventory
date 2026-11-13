@@ -409,7 +409,8 @@ export function useBulkDeleteUsers() {
 
 export interface UpdateUserInput {
   id: number;
-  data: {
+  /** Only the fields that changed (B3-1R MS-3-1/3-4): the route treats every field as optional. */
+  data: Partial<{
     username: string;
     defaultLocationId: number;
     isAdmin: boolean;
@@ -417,7 +418,7 @@ export interface UpdateUserInput {
     minLocationEmailAlerts: boolean;
     minCombinedEmailAlerts: boolean;
     companies: Array<{ companyId: string }>;
-  };
+  }>;
 }
 
 export function useUpdateUser() {

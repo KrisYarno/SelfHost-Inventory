@@ -48,6 +48,11 @@ interface ProductMapDialogProps {
   integrationId: string;
   externalProduct?: ExternalProductInfo;
   onMapped?: (productLink: ProductLink) => void;
+  /**
+   * The INTEGRATION's name. When given, the title names the store the mapping
+   * will be created in (§ P2-B3-1R, MS-3-16).
+   */
+  storeName?: string;
 }
 
 interface InternalProduct {
@@ -119,6 +124,7 @@ export function ProductMapDialog({
   integrationId,
   externalProduct,
   onMapped,
+  storeName,
 }: ProductMapDialogProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const debouncedQuery = useDebounce(searchQuery, 300);
@@ -480,7 +486,7 @@ export function ProductMapDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Link2 className="h-5 w-5 text-primary" />
-            Map External Product
+            {storeName ? `Map a product from ${storeName}` : "Map External Product"}
           </DialogTitle>
           <DialogDescription>
             Link an external product to an internal inventory product

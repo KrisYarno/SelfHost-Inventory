@@ -9,28 +9,46 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { PlatformBadge } from "@/components/orders/platform-badge";
+import type { PlatformType } from "@/types/external-orders";
 
 interface Integration {
   id: string;
   name: string;
-  platform: string;
+  platform: PlatformType;
 }
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   integrations: Integration[];
+  /** Replaces the bulk-map title (Add Mapping asks which store a product is from). */
+  title?: string;
+  /** Replaces the bulk-map description. */
+  description?: string;
+  /**
+   * When given, picking a store calls this with its integration id instead of
+   * opening that store's bulk-map page (§ P2-B3-1R, MS-3-16).
+   */
+  onChoose?: (integrationId: string) => void;
 }
 
-export function BulkMapChooserDialog({ open, onOpenChange, integrations }: Props) {
+export function BulkMapChooserDialog({
+  open,
+  onOpenChange,
+  integrations,
+  title,
+  description,
+  onChoose,
+}: Props) {
   const router = useRouter();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Pick a store to bulk map</DialogTitle>
+          <DialogTitle>{title ?? "Pick a store to bulk map"}</DialogTitle>
           <DialogDescription>
-            Choose which integration&apos;s catalog you want to map.
+            {description ?? <>Choose which integration&apos;s catalog you want to map.</>}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
@@ -41,13 +59,15 @@ export function BulkMapChooserDialog({ open, onOpenChange, integrations }: Props
               className="w-full justify-start"
               onClick={() => {
                 onOpenChange(false);
-                router.push(`/admin/product-mappings/${i.id}/map`);
+                if (onChoose) {
+                  onChoose(i.id);
+                } else {
+                  router.push(`/admin/product-mappings/${i.id}/map`);
+                }
               }}
             >
               <span className="font-medium">{i.name}</span>
-              <span className="ml-2 text-xs text-muted-foreground">
-                {i.platform}
-              </span>
+              <PlatformBadge platform={i.platform} size="sm" className="ml-2" />
             </Button>
           ))}
         </div>

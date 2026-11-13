@@ -47,6 +47,23 @@ import {
   type Integration,
   type IntegrationFormData,
 } from "@/hooks/use-integrations";
+import { useSubmitLatch } from "@/hooks/use-submit-latch";
+
+// The shared create/edit form, blank. The platform defaults to WooCommerce, the
+// platform the stores run on (§ P2-B3-1R, MS-3-11): under a Shopify default the
+// webhook secret is not required, so a create that missed the platform pick
+// could skip it.
+const EMPTY_FORM: IntegrationFormData = {
+  companyId: "",
+  platform: "WOOCOMMERCE",
+  name: "",
+  storeUrl: "",
+  writeKey: "",
+  writeSecret: "",
+  readKey: "",
+  readSecret: "",
+  webhookSecret: "",
+};
 
 export default function AdminIntegrationsPage() {
   const router = useRouter();
@@ -68,18 +85,11 @@ export default function AdminIntegrationsPage() {
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [editingIntegration, setEditingIntegration] = useState<Integration | null>(null);
-  const [formData, setFormData] = useState<IntegrationFormData>({
-    companyId: "",
-    platform: "SHOPIFY",
-    name: "",
-    storeUrl: "",
-    writeKey: "",
-    writeSecret: "",
-    readKey: "",
-    readSecret: "",
-    webhookSecret: "",
-  });
+  const [formData, setFormData] = useState<IntegrationFormData>(EMPTY_FORM);
   const [submitting, setSubmitting] = useState(false);
+  // The create dialog's latch: one create per tap, and no dismissal while it is
+  // in flight (M-a.1).
+  const { busy: creating, run: runCreate, guardOpenChange } = useSubmitLatch();
   const [webhookUrl, setWebhookUrl] = useState("");
   const [showWebhookSecret, setShowWebhookSecret] = useState(false);
   const [syncDialogOpen, setSyncDialogOpen] = useState(false);
@@ -104,23 +114,22 @@ export default function AdminIntegrationsPage() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSubmitting(true);
 
-    try {
-      const result = await createIntegration.mutateAsync(formData);
+    await runCreate(async () => {
+      try {
+        const result = await createIntegration.mutateAsync(formData);
 
-      // Show webhook URL
-      const baseUrl = window.location.origin;
-      const generatedWebhookUrl = `${baseUrl}/api/webhooks/${result.integration.id}`;
-      setWebhookUrl(generatedWebhookUrl);
+        // Show webhook URL
+        const baseUrl = window.location.origin;
+        const generatedWebhookUrl = `${baseUrl}/api/webhooks/${result.integration.id}`;
+        setWebhookUrl(generatedWebhookUrl);
 
-      toast.success("Integration created successfully");
-    } catch (error) {
-      console.error("Error creating integration:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to create integration");
-    } finally {
-      setSubmitting(false);
-    }
+        toast.success("Integration created successfully");
+      } catch (error) {
+        console.error("Error creating integration:", error);
+        toast.error(error instanceof Error ? error.message : "Failed to create integration");
+      }
+    });
   };
 
   const handleEdit = async (e: React.FormEvent) => {
@@ -133,9 +142,7 @@ export default function AdminIntegrationsPage() {
       await updateIntegration.mutateAsync({ id: editingIntegration.id, body: formData });
 
       toast.success("Integration updated successfully");
-      setIsEditDialogOpen(false);
-      setEditingIntegration(null);
-      resetForm();
+      closeEditDialog();
     } catch (error) {
       console.error("Error updating integration:", error);
       toast.error(error instanceof Error ? error.message : "Failed to update integration");
@@ -196,17 +203,16 @@ export default function AdminIntegrationsPage() {
   };
 
   const resetForm = () => {
-    setFormData({
-      companyId: "",
-      platform: "SHOPIFY",
-      name: "",
-      storeUrl: "",
-      writeKey: "",
-      writeSecret: "",
-      readKey: "",
-      readSecret: "",
-      webhookSecret: "",
-    });
+    setFormData(EMPTY_FORM);
+  };
+
+  // Every close of Edit (Cancel, the X, Escape, an outside click, a save)
+  // clears its subject and the shared form, so a key typed into Edit can never
+  // surface in the next Add (§ P2-B3-1R, MS-3-10).
+  const closeEditDialog = () => {
+    setIsEditDialogOpen(false);
+    setEditingIntegration(null);
+    resetForm();
   };
 
   const copyWebhookUrl = (integrationId: string) => {
@@ -307,11 +313,29 @@ export default function AdminIntegrationsPage() {
     }
   };
 
+  // Add Integration always opens blank, and EVERY close (Cancel, Close, the X,
+  // Escape, an outside click) clears the form, the typed credentials and the
+  // success panel's webhook URL and secret (§ P2-B3-1R, MS-3-10). Before, only
+  // the two buttons cleared them, so a dismissed success panel reopened with
+  // the previous store's secret revealable, and half-typed credentials rode
+  // into the next create.
+  const openCreateDialog = () => {
+    resetForm();
+    setWebhookUrl("");
+    setShowWebhookSecret(false);
+    setIsCreateDialogOpen(true);
+  };
+
   const closeCreateDialog = () => {
     setIsCreateDialogOpen(false);
     setWebhookUrl("");
+    setShowWebhookSecret(false);
     resetForm();
   };
+
+  // Radix's onOpenChange and the Cancel/Close buttons; a close is dropped
+  // while a create is in flight.
+  const onCreateOpenChange = guardOpenChange((o) => (o ? openCreateDialog() : closeCreateDialog()));
 
   const groupedIntegrations = integrations.reduce((acc, integration) => {
     const companyName = integration.company.name;
@@ -332,7 +356,7 @@ export default function AdminIntegrationsPage() {
               Manage e-commerce platform integrations
             </p>
           </div>
-          <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
+          <Dialog open={isCreateDialogOpen} onOpenChange={onCreateOpenChange}>
             <DialogTrigger asChild>
               <Button>
                 <Plus className="mr-2 h-4 w-4" />
@@ -431,7 +455,8 @@ export default function AdminIntegrationsPage() {
                     </div>
                   </div>
                 ) : (
-                  <div className="space-y-4 py-4">
+                  // The fields freeze while the create is in flight (M-a.1).
+                  <fieldset disabled={creating} className="min-w-0 space-y-4 py-4">
                     <div className="space-y-2">
                       <label htmlFor="company" className="text-sm font-medium">
                         Company
@@ -644,12 +669,12 @@ export default function AdminIntegrationsPage() {
                         verification.
                       </p>
                     </div>
-                  </div>
+                  </fieldset>
                 )}
 
                 <DialogFooter>
                   {webhookUrl ? (
-                    <Button type="button" onClick={closeCreateDialog}>
+                    <Button type="button" onClick={() => onCreateOpenChange(false)}>
                       Close
                     </Button>
                   ) : (
@@ -657,12 +682,13 @@ export default function AdminIntegrationsPage() {
                       <Button
                         type="button"
                         variant="outline"
-                        onClick={closeCreateDialog}
+                        onClick={() => onCreateOpenChange(false)}
+                        disabled={creating}
                       >
                         Cancel
                       </Button>
-                      <Button type="submit" disabled={submitting || !formData.companyId}>
-                        {submitting ? "Creating..." : "Create Integration"}
+                      <Button type="submit" disabled={creating || !formData.companyId}>
+                        {creating ? "Creating..." : "Create Integration"}
                       </Button>
                     </>
                   )}
@@ -989,7 +1015,12 @@ export default function AdminIntegrationsPage() {
       </div>
 
       {/* Edit Dialog */}
-      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
+      <Dialog
+        open={isEditDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) closeEditDialog();
+        }}
+      >
         <DialogContent className="max-w-2xl">
           <form onSubmit={handleEdit}>
             <DialogHeader>
@@ -1157,15 +1188,7 @@ export default function AdminIntegrationsPage() {
               </div>
             </div>
             <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => {
-                  setIsEditDialogOpen(false);
-                  setEditingIntegration(null);
-                  resetForm();
-                }}
-              >
+              <Button type="button" variant="outline" onClick={closeEditDialog}>
                 Cancel
               </Button>
               <Button type="submit" disabled={submitting}>
