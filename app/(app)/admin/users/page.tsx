@@ -76,6 +76,9 @@ export default function AdminUsersPage() {
 
   const handleEdit = (row: User) => {
     const request = ++editRequest.current;
+    // FR-R2 (14), FD-6: the moment of the tap. The answer that seeds the form
+    // must have been stored at or after it.
+    const tappedAt = Date.now();
     setEditing({ id: row.id, user: null, failed: false });
     // `refetch` issues a NEW request (an in-flight one is cancelled, never
     // reused), so the row it answers with was read after this tap. A failed
@@ -88,7 +91,10 @@ export default function AdminUsersPage() {
     usersQuery.refetch().then(
       (result) =>
         settle(
-          result.status === "success"
+          // The belt (FR-R2 (14)): the guarantee above is the library's, so the
+          // answer must also SAY it is fresh — data stored before the tap is a
+          // read that did not happen, and is treated as a failed one.
+          result.status === "success" && result.dataUpdatedAt >= tappedAt
             ? (result.data?.users.find((u) => u.id === row.id) ?? null)
             : null,
         ),

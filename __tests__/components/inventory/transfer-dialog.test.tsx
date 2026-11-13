@@ -21,17 +21,19 @@ jest.mock("@/hooks/use-csrf", () => ({
   useCSRF: () => ({ token: "t", isLoading: false, error: null, refreshToken: async () => {} }),
   withCSRFHeaders: (h: HeadersInit) => h,
 }));
-jest.mock("@/contexts/location-context", () => {
-  // Stable reference: the dialog's seed effect depends on `locations`; the real
-  // context provides stable state, so the mock must not re-create the array.
-  const locations = [
-    { id: 2, name: "Office" },
-    { id: 3, name: "Warehouse" },
-  ];
-  return {
-    useLocation: () => ({ selectedLocationId: 2, locations }),
-  };
-});
+// The locations the context hands out. NOT a stable premise (FR-R2 (4), QA-4):
+// the real context builds a NEW array when the session refetches (a tab return),
+// so a pin can swap in a new identity; the dialog seeds once at mount and must
+// not care. Each test starts from the same two locations.
+const LOCATIONS = [
+  { id: 2, name: "Office" },
+  { id: 3, name: "Warehouse" },
+];
+let mockLocations = LOCATIONS;
+let mockSelectedLocationId: number | null = 2;
+jest.mock("@/contexts/location-context", () => ({
+  useLocation: () => ({ selectedLocationId: mockSelectedLocationId, locations: mockLocations }),
+}));
 
 jest.mock("sonner", () => ({
   toast: { error: jest.fn(), success: jest.fn(), warning: jest.fn() },
@@ -39,6 +41,11 @@ jest.mock("sonner", () => ({
 
 import { toast } from "sonner";
 import { TransferDialog } from "@/components/inventory/transfer-dialog";
+
+beforeEach(() => {
+  mockLocations = LOCATIONS;
+  mockSelectedLocationId = 2;
+});
 
 const wrap = (ui: React.ReactElement) => {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -390,8 +397,146 @@ describe("the after-transfer line", () => {
     await waitFor(() => {
       if (typeof source === "number") expect(screen.getAllByText(`${source} units`)).toHaveLength(2);
       if (typeof destination === "number") expect(screen.getAllByText(`${destination} units`)).toHaveLength(1);
-      expect(screen.queryAllByText("Could not load current stock")).toHaveLength(failures);
+      expect(screen.queryAllByText("Couldn't read stock.")).toHaveLength(failures);
     });
     expect(afterLine()).toBeEmptyDOMElement();
+  });
+});
+
+// ===========================================================================
+// FR-R2 (5), QA-5 / FD-4: the stock chips say what is KNOWN — never `?? 0`
+// ===========================================================================
+
+describe("the stock chips", () => {
+  type Read = number | "error" | "hang";
+  function stockReads(source: Read, destination: Read) {
+    const fn = jest.fn((url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u.includes("/api/inventory/product/")) {
+        const locationId = new URL(u, "http://test.local").searchParams.get("locationId");
+        const read = locationId === "2" ? source : destination;
+        if (read === "hang") return new Promise(() => {});
+        if (read === "error") return Promise.resolve({ ok: false, status: 500, json: async () => ({}) });
+        return Promise.resolve({ ok: true, json: async () => ({ currentQuantity: read }) });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    global.fetch = fn as unknown as typeof fetch;
+    return fn;
+  }
+
+  const renderDialog = () =>
+    wrap(<TransferDialog open onOpenChange={() => {}} product={{ id: 42, name: "AOD 2mg" }} />);
+
+  it("still reading: `Reading stock…` on every chip, never `0 units`", () => {
+    stockReads("hang", "hang");
+    renderDialog();
+    // The source has two chips (the header and its field), the destination one.
+    expect(screen.getAllByText("Reading stock…")).toHaveLength(3);
+    expect(screen.queryByText(/\d+ units?$/)).toBeNull();
+  });
+
+  it("a failed read: `Couldn't read stock.` — never `0 units`", async () => {
+    stockReads("error", 0);
+    renderDialog();
+    await waitFor(() => expect(screen.getAllByText("Couldn't read stock.")).toHaveLength(2));
+    // The destination's KNOWN zero is a fact, and says so.
+    await waitFor(() => expect(screen.getAllByText("0 units")).toHaveLength(1));
+  });
+
+  it("read: `{n} units`, and `1 unit` for one", async () => {
+    stockReads(1, 7);
+    renderDialog();
+    await waitFor(() => expect(screen.getAllByText("1 unit")).toHaveLength(2));
+    expect(screen.getAllByText("7 units")).toHaveLength(1);
+    expect(screen.queryByText("Reading stock…")).toBeNull();
+  });
+
+  it("no location: NO chip, and no read for it", async () => {
+    // One location only: there is no destination to seed.
+    mockLocations = [{ id: 2, name: "Office" }];
+    const fn = stockReads(5, 9);
+    renderDialog();
+    await waitFor(() => expect(screen.getAllByText("5 units")).toHaveLength(2));
+    // The destination has no location: no chip at all — not `Reading stock…`,
+    // not `0 units`.
+    expect(screen.queryByText("Reading stock…")).toBeNull();
+    expect(screen.queryByText(/^0 units$/)).toBeNull();
+    expect(screen.queryByText("9 units")).toBeNull();
+    expect(
+      fn.mock.calls.filter(([url]) => String(url).includes("locationId=null")),
+    ).toHaveLength(0);
+  });
+
+  it("no source either (no locations at all): no chip anywhere", () => {
+    mockLocations = [];
+    mockSelectedLocationId = null;
+    stockReads(5, 9);
+    renderDialog();
+    expect(screen.getByText("Select a source")).toBeInTheDocument();
+    expect(screen.queryByText("Reading stock…")).toBeNull();
+    expect(screen.queryByText(/\d+ units?$/)).toBeNull();
+    expect(screen.queryByText("Couldn't read stock.")).toBeNull();
+  });
+});
+
+// ===========================================================================
+// FR-R2 (4), QA-4: seeded ONCE at mount — a new `locations` array never
+// re-seeds an open draft
+// ===========================================================================
+
+describe("the draft survives a session refetch", () => {
+  /** Render, and re-render the SAME dialog on the SAME client (the dialog stays mounted). */
+  function renderOnOneClient() {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const tree = () => (
+      <QueryClientProvider client={qc}>
+        <TransferDialog open onOpenChange={() => {}} product={{ id: 42, name: "AOD 2mg" }} />
+      </QueryClientProvider>
+    );
+    const view = render(tree());
+    return { rerender: () => view.rerender(tree()) };
+  }
+
+  it("a NEW `locations` array (same places) does not reset the typed quantity or the chosen locations", async () => {
+    mockFetch(insufficientBody({ currentQuantity: 2 }));
+    const { rerender } = renderOnOneClient();
+    expect(await screen.findAllByText(/2 units/)).not.toHaveLength(0);
+    fireEvent.change(quantityField(), { target: { value: "5" } });
+    expect(quantityField()).toHaveValue(5);
+    const [from, to] = screen.getAllByRole("combobox");
+    expect(from).toHaveTextContent("Office");
+    expect(to).toHaveTextContent("Warehouse");
+
+    // The session refetches: the context hands out a NEW array of the same
+    // locations, and the dialog renders again.
+    mockLocations = LOCATIONS.map((loc) => ({ ...loc }));
+    rerender();
+
+    expect(quantityField()).toHaveValue(5);
+    expect(screen.getByRole("button", { name: /transfer 5 units/i })).toBeEnabled();
+    const [fromAfter, toAfter] = screen.getAllByRole("combobox");
+    expect(fromAfter).toHaveTextContent("Office");
+    expect(toAfter).toHaveTextContent("Warehouse");
+  });
+
+  it("nor does the operator's page location changing while it is open", async () => {
+    mockLocations = [
+      { id: 2, name: "Office" },
+      { id: 3, name: "Warehouse" },
+      { id: 4, name: "Lab" },
+    ];
+    mockFetch(insufficientBody({ currentQuantity: 2 }));
+    const { rerender } = renderOnOneClient();
+    fireEvent.change(quantityField(), { target: { value: "5" } });
+
+    mockSelectedLocationId = 4;
+    mockLocations = mockLocations.map((loc) => ({ ...loc }));
+    rerender();
+
+    expect(quantityField()).toHaveValue(5);
+    const [from, to] = screen.getAllByRole("combobox");
+    expect(from).toHaveTextContent("Office");
+    expect(to).toHaveTextContent("Warehouse");
   });
 });

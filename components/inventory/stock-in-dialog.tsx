@@ -150,15 +150,15 @@ export function StockInDialog({
           <div>
             <h4 className="font-medium">{product.name}</h4>
             <div role="status" aria-live="polite" className="flex items-center gap-4 mt-1">
-              {/* The current-stock chip: the adjust dialog's four states. */}
+              {/* The current-stock chip: the adjust dialog's four states. Its
+                  failure says only that (FR-R2 (9), QA-10a): a stock-in is not
+                  checked against the stock when it saves. */}
               <div className="flex items-center gap-1" data-testid="stock-in-stock">
                 <Package className="h-4 w-4 text-muted-foreground" />
                 {selectedLocationId === null ? (
                   <span className="text-sm text-muted-foreground">No location selected.</span>
                 ) : quantityQuery.status === "error" ? (
-                  <span className="text-sm text-destructive">
-                    Couldn&apos;t read current stock — it will be checked when you save.
-                  </span>
+                  <span className="text-sm text-destructive">Couldn&apos;t read current stock.</span>
                 ) : knownStock !== null ? (
                   <ValueChip tone={knownStock > 0 ? "positive" : knownStock < 0 ? "negative" : "neutral"}>
                     {`${knownStock} ${unitWord(knownStock)}`}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Plus, Minus, Package, MapPin } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
@@ -18,6 +19,7 @@ import { ReceivingRedirectPrompt } from "@/components/inventory/receiving-redire
 import { IntentChip } from "@/components/inventory/intent-chip";
 import { OrderNumberField, type OrderCapture } from "@/components/inventory/order-number-field";
 import type { DeductionIntent } from "@/lib/inventory/intent";
+import { apiErrorMessage } from "@/lib/api-error";
 import { SELECTED_ORDER_REJECTED_SENTENCE } from "@/lib/orders/order-capture-sentences";
 import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
 import { cn } from "@/lib/utils";
@@ -120,6 +122,7 @@ export function QuickAdjustDialog({
     enabled: open,
   });
   const adjustMutation = useAdjustInventory();
+  const queryClient = useQueryClient();
   // The shared submit latch (§ P2-B3-1R, M-a.1): one write per tap, and no
   // dismissal while it is in flight. Its ref is set before the request starts
   // and cleared when it settles, failed or not (FD3-1, FD4-1); `busy` is the
@@ -160,7 +163,8 @@ export function QuickAdjustDialog({
       `You can't remove more than the ${knownStock} ${unitWord(knownStock)} on record at ${location}.`,
     );
   }
-  if (captureIllShaped) blockers.push("Order number: digits only — fix it or clear it.");
+  // REV 118 (QA-10): 21–40 digits are ill-shaped too, so the sentence names the bar.
+  if (captureIllShaped) blockers.push("Order number: 1–20 digits only — fix it or clear it.");
 
   const draftNonEmpty =
     quantity !== "" ||
@@ -320,13 +324,24 @@ export function QuickAdjustDialog({
         // operator's). No error toast: keep the number when it is one, drop the
         // pick, and let the next tap save the number — which the server then
         // resolves like any typed number (it links only on one match).
+        //
+        // FR-R2 (2), QA-2: every cached order search is marked stale BEFORE the
+        // number comes back, so the field asks the search again instead of
+        // re-offering the dead order from its cache (a pick → reject → pick loop).
+        void queryClient.resetQueries({ queryKey: ["admin", "reconciliation", "orders"] });
         const text = ORDER_REFERENCE_SHAPE.test(sentPick.orderNumber) ? sentPick.orderNumber : "";
         setCapture({ text, picked: null });
         setRejectedPick(text === "" ? "none" : "number");
         return;
       }
       console.error("Error adjusting inventory:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to adjust inventory");
+      // FR-R2 (7), QA-8: the house reader over the failed body — a code whose
+      // server sentence is not for the operator (`ORDER_GONE` names an internal
+      // id) gets the client's own copy; anything else keeps its sentence.
+      const body = error instanceof Error ? (error as ApiMutationError).data : undefined;
+      toast.error(
+        apiErrorMessage(body, error instanceof Error ? error.message : "Failed to adjust inventory"),
+      );
     }
   };
 

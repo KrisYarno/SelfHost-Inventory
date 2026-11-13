@@ -23,7 +23,9 @@
  * The REAL dialog renders here; the data hooks are stubbed, and the user list
  * hands back the SAME user object on every render (as react-query does). Its
  * `refetch` answers, by default, with that same list — a fresh read that finds
- * nothing changed.
+ * nothing changed — stamped, as a real result is, with the time it was stored
+ * (`dataUpdatedAt`; FR-R2 (14) checks it against the tap). The same flow under
+ * a REAL QueryClient and the real hook is `users-page-fresh-read.test.tsx`.
  * `UserTable` is reduced to one Edit button per user (its row menu is not under
  * test).
  */
@@ -119,8 +121,12 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockUsersData = { users: [mockUser], pagination: { totalPages: 1 } };
   mockCompanies = DEFAULT_COMPANIES;
-  // By default the fresh read finds the user as listed.
-  mockRefetch.mockImplementation(async () => ({ status: "success", data: mockUsersData }));
+  // By default the fresh read finds the user as listed, stored now.
+  mockRefetch.mockImplementation(async () => ({
+    status: "success",
+    data: mockUsersData,
+    dataUpdatedAt: Date.now(),
+  }));
 });
 
 describe("Edit User is mounted per open (MS-3-1)", () => {
@@ -224,7 +230,10 @@ describe("Edit User is seeded from a fresh read, never the list row (CR-OC-3)", 
       .filter((el) => el !== screen.getByRole("combobox", { name: "Default Location" }))
       .map((el) => el.textContent);
 
-  /** A fresh read the test answers by hand. */
+  /**
+   * A fresh read the test answers by hand — stored when it answers, unless the
+   * result names its own `dataUpdatedAt`.
+   */
   function holdRefetch() {
     let answer!: (result: unknown) => void;
     mockRefetch.mockImplementation(
@@ -233,7 +242,8 @@ describe("Edit User is seeded from a fresh read, never the list row (CR-OC-3)", 
           answer = resolve;
         }),
     );
-    return (result: unknown) => act(async () => answer(result));
+    return (result: Record<string, unknown>) =>
+      act(async () => answer({ dataUpdatedAt: Date.now(), ...result }));
   }
 
   it("a STALE list row (A, B) and a fresh read (A, B, C): the form shows A, B, C, and adding D sends [A, B, C, D]", async () => {
@@ -242,7 +252,7 @@ describe("Edit User is seeded from a fresh read, never the list row (CR-OC-3)", 
     // The list row was read before another admin granted company C.
     mockUsersData = { users: [withCompanies("co_a", "co_b")], pagination: { totalPages: 1 } };
     const fresh = { users: [withCompanies("co_a", "co_b", "co_c")], pagination: { totalPages: 1 } };
-    mockRefetch.mockImplementation(async () => ({ status: "success", data: fresh }));
+    mockRefetch.mockImplementation(async () => ({ status: "success", data: fresh, dataUpdatedAt: Date.now() }));
     render(<AdminUsersPage />);
 
     await user.click(editButton());
@@ -297,6 +307,21 @@ describe("Edit User is seeded from a fresh read, never the list row (CR-OC-3)", 
     expect(screen.getByText("Couldn't load this user.")).toBeInTheDocument();
     expect(screen.queryByLabelText("Username")).toBeNull();
     expect(screen.queryByRole("checkbox", { name: "Admin Role" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save Changes" })).toBeNull();
+  });
+
+  // FR-R2 (14), FD-6: the belt under the library's guarantee — an answer whose
+  // data was stored BEFORE the tap did not read the user after it.
+  it("a success whose data was stored BEFORE the tap: the same sentence, and NO form", async () => {
+    const user = userEvent.setup();
+    const answer = holdRefetch();
+    const beforeTheTap = Date.now() - 1;
+    render(<AdminUsersPage />);
+
+    await user.click(editButton());
+    await answer({ status: "success", data: mockUsersData, dataUpdatedAt: beforeTheTap });
+    expect(screen.getByText("Couldn't load this user.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Username")).toBeNull();
     expect(screen.queryByRole("button", { name: "Save Changes" })).toBeNull();
   });
 

@@ -140,7 +140,8 @@ describe('the picker mirrors the server normalisation', () => {
 
   it('the field states the bar in its own sentence, and the dialog blocks on it in its own', () => {
     expect(fieldText).toContain('Order numbers are 1–20 digits.');
-    expect(dialogText).toContain('Order number: digits only — fix it or clear it.');
+    // REV 118 (FR-R2 (10), QA-10b): the blocker names the bar — 21–40 digits fail it too.
+    expect(dialogText).toContain('Order number: 1–20 digits only — fix it or clear it.');
   });
 
   it('the normalisation lines are IDENTICAL text — signature and body', () => {

@@ -1929,8 +1929,10 @@ describe("complete-order dialog — one completion per tap (MS-1-2)", () => {
 // ---------------------------------------------------------------------------
 
 describe("complete-order dialog — a committed leg whose reply can't be read (CR-OC-6)", () => {
+  // FR-R2 (6), QA-7: the server ACCEPTED the completion — what moved is not
+  // known from an unreadable body — and the batch log is admin-only.
   const UNREADABLE =
-    "Order completed. The server's reply couldn't be read, so Undo isn't available — check the batch log.";
+    "The server accepted the completion, but its reply couldn't be read, so Undo isn't available — ask an admin to check this order.";
 
   // The toast mocks are shared across this file; these pins count them.
   beforeEach(() => {
@@ -2052,6 +2054,107 @@ describe("complete-order dialog — a committed leg whose reply can't be read (C
     expect(toast.success as jest.Mock).not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalled();
     expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  // FR-R2 (3), QA-3: after an unreadable fulfil and a failed manual leg the
+  // incident is raised (the rollback has nothing it may send) — and a second
+  // Complete would fulfil again. The dialog stops for this order until it is
+  // selected again.
+  describe("an unreadable fulfil, then a failed manual leg: the order is STOPPED (FR-R2 (3))", () => {
+    const STOPPED =
+      "Part of this order went through but the rest failed and the reply couldn't be read — nothing more will be sent from here. Ask an admin to check this order.";
+    const stoppedLine = () => screen.queryByTestId("complete-order-stopped");
+
+    function failManualAfter(fulfil: () => Response) {
+      fetchMock.mockImplementation(async (url: unknown) => {
+        const href = String(url);
+        if (href.includes("/unfulfill")) {
+          return { ok: true, json: async () => ({ restored: [] }) } as unknown as Response;
+        }
+        if (href.includes("/fulfill")) return fulfil();
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({ error: "Insufficient inventory", code: "INSUFFICIENT_STOCK" }),
+        } as unknown as Response;
+      });
+    }
+
+    function seedMixedCart() {
+      seedOrder([CART_ITEM]);
+      act(() => {
+        useWorkbench
+          .getState()
+          .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+      });
+    }
+
+    it("Complete is disabled, the line says why, and a second tap sends NOTHING", async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      failManualAfter(unreadable);
+      seedMixedCart();
+      const { onOpenChange, onSuccess } = renderDialog();
+
+      await user.click(completeButton());
+      await waitFor(() => expect(stoppedLine()).toHaveTextContent(STOPPED));
+      expect(stoppedLine()).toHaveAttribute("role", "alert");
+      expect(completeButton()).toBeDisabled();
+      expect(fulfilCalls()).toHaveLength(1);
+      expect(deductCalls()).toHaveLength(1);
+
+      const sent = fetchMock.mock.calls.length;
+      await user.click(completeButton());
+      fireEvent.click(completeButton());
+      await act(async () => {});
+      expect(fetchMock.mock.calls.length).toBe(sent);
+      expect(fulfilCalls()).toHaveLength(1);
+      expect(completeButton()).toBeDisabled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(onSuccess).not.toHaveBeenCalled();
+    });
+
+    it("it lasts across a close and reopen; re-selecting the order clears it", async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      failManualAfter(unreadable);
+      seedMixedCart();
+      const { setOpen } = renderDialog();
+
+      await user.click(completeButton());
+      await waitFor(() => expect(stoppedLine()).toHaveTextContent(STOPPED));
+
+      setOpen(false);
+      setOpen(true);
+      expect(stoppedLine()).toHaveTextContent(STOPPED);
+      expect(completeButton()).toBeDisabled();
+
+      // Selected again: a fresh cart from the order as it is now.
+      seedMixedCart();
+      await waitFor(() => expect(stoppedLine()).toBeNull());
+      expect(completeButton()).toBeEnabled();
+    });
+
+    it("a READABLE fulfil whose rollback failed is not stopped (the narrow rule): Complete is re-armed", async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      failManualAfter(
+        () =>
+          ({
+            ok: true,
+            json: async () => ({
+              success: true,
+              batchId: "fulfil-batch-1",
+              summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
+              results: { fulfilled: [{ itemId: "it-cart", productId: 501, quantity: 2 }], skipped: [], failed: [] },
+            }),
+          }) as unknown as Response,
+      );
+      seedMixedCart();
+      renderDialog();
+
+      await user.click(completeButton());
+      await waitFor(() => expect((toast.error as jest.Mock).mock.calls.length).toBeGreaterThanOrEqual(2));
+      await waitFor(() => expect(completeButton()).toBeEnabled());
+      expect(stoppedLine()).toBeNull();
+    });
   });
 
   it("a READABLE completion still hands the host its Undo (unchanged)", async () => {

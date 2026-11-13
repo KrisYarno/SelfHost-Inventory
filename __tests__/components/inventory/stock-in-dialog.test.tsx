@@ -357,13 +357,13 @@ describe("the current-stock chip", () => {
     expect(newTotal()).toHaveTextContent("New: 5");
   });
 
-  it("a failed read: `Couldn't read current stock — it will be checked when you save.`, never 0, and no new total", async () => {
+  // FR-R2 (9), QA-10a: a stock-in is not checked against the stock on save, so
+  // the failure says only what happened.
+  it("a failed read: `Couldn't read current stock.`, never 0, and no new total", async () => {
     stockRead = "error";
     renderDialog();
     fireEvent.change(quantityField(), { target: { value: "5" } });
-    await waitFor(() =>
-      expect(chip()).toHaveTextContent("Couldn't read current stock — it will be checked when you save."),
-    );
+    await waitFor(() => expect(chip()).toHaveTextContent(/^Couldn't read current stock\.$/));
     expect(chip()).not.toHaveTextContent(/\d/);
     expect(newTotal()).toBeNull();
   });

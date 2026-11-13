@@ -503,13 +503,28 @@ describe("the status line: each state, and the precedence", () => {
     expect(screen.getByTestId("order-number-row-ord-3")).toBeInTheDocument();
   });
 
-  it("exactCount 2 with TWO byte-equal rows -> `{exactCount} orders have this number`", () => {
+  it("exactCount 2 with TWO byte-equal rows -> `2 orders have this number`", () => {
     const twin = order({ id: "ord-3", store: "South Shop" });
     settle({ data: { orders: [ORDER_1009, twin], moreCount: 0, exactCount: 2 } });
 
     expect(statusText()).toBe(
       "2 orders have this number — tap the right one, or save the number without linking.",
     );
+    expect(screen.queryByRole("button", { name: "Use this order" })).toBeNull();
+  });
+
+  // FR-R2 (13), FD-5: the sentence prints the BYTE-EQUAL count — the rows it
+  // asks the operator to choose between — never `exactCount`, which counts the
+  // collation variants too.
+  it("exactCount 3 with TWO byte-equal rows (the third a collation variant) -> `2 orders have this number …`", () => {
+    const twin = order({ id: "ord-3", store: "South Shop" });
+    const variant = order({ id: "ord-4", orderNumber: "1009 ", store: "East Shop" });
+    settle({ data: { orders: [ORDER_1009, twin, variant], moreCount: 0, exactCount: 3 } });
+
+    expect(statusText()).toBe(
+      "2 orders have this number — tap the right one, or save the number without linking.",
+    );
+    expect(statusText()).not.toContain("3 orders");
     expect(screen.queryByRole("button", { name: "Use this order" })).toBeNull();
   });
 

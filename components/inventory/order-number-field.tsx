@@ -277,7 +277,9 @@ export function OrderNumberField({
     } else if (showFound && found !== undefined) {
       statusLine = `Order ${text} found — ${found.store}, placed ${formatOrderDate(found.externalCreatedAt)}, ${formatOrderStatus(found.internalStatus)}.`;
     } else if (data !== undefined && byteEqual.length >= 2) {
-      statusLine = `${data.exactCount} orders have this number — tap the right one, or save the number without linking.`;
+      // The BYTE-EQUAL count (FR-R2 (13), FD-5): the rows this sentence asks the
+      // operator to choose between, not `exactCount`'s collation variants.
+      statusLine = `${byteEqual.length} orders have this number — tap the right one, or save the number without linking.`;
     } else {
       // No row byte-equal to the text, whatever `exactCount` says — which is
       // what the save will do with it (R108-OC-7).

@@ -27,6 +27,16 @@ const authRoutes = ["/auth/signin", "/auth/signup"];
 // Routes that should have rate limiting
 const rateLimitedRoutes = ["/api/", "/auth/"];
 
+// THE ONE per-path override (reconciliation Part 2, FR-R2 (1), QA-1). The order
+// search runs up to one call per digit at phone typing speed, and every bench
+// device behind one office IP shares this per-IP, per-pathname bucket — at the
+// default 30/min a handful of typed removals a minute starts answering 429. The
+// route is read-only, authenticated and keeps its OWN per-user 60/min, so this
+// exact pathname gets 240/min here. EXACT match, never a prefix: any deeper
+// path (and every other path) keeps the limiter's default 30.
+const ORDER_SEARCH_PATHNAME = "/api/reconciliation/orders/search";
+const ORDER_SEARCH_PER_IP_LIMIT = 240;
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -40,7 +50,11 @@ export async function middleware(request: NextRequest) {
 
   if (shouldRateLimit) {
     try {
-      enforceRateLimit(request, `middleware:${pathname}`);
+      enforceRateLimit(
+        request,
+        `middleware:${pathname}`,
+        pathname === ORDER_SEARCH_PATHNAME ? { limit: ORDER_SEARCH_PER_IP_LIMIT } : {}
+      );
     } catch (error) {
       if (error instanceof RateLimitError) {
         return NextResponse.json(

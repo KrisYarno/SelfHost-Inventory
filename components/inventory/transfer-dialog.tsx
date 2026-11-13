@@ -67,11 +67,50 @@ type InsufficientState = {
 
 const unitWord = (n: number) => (n === 1 ? 'unit' : 'units');
 
+/**
+ * One location's stock (FR-R2 (5), QA-5 / FD-4): no location → no chip; still
+ * reading → `Reading stock…`; the read failed → `Couldn't read stock.`; read →
+ * `{n} unit(s)`. A location nobody has read is never `0 units`.
+ */
+function StockChip({
+  locationId,
+  query,
+  className,
+}: {
+  locationId: number | null;
+  query: { status: 'pending' | 'error' | 'success'; data: number | undefined };
+  className?: string;
+}) {
+  if (locationId === null) return null;
+  if (query.status === 'error') {
+    return <span className="text-destructive">Couldn&apos;t read stock.</span>;
+  }
+  if (query.status === 'success' && query.data !== undefined) {
+    const n = query.data;
+    return (
+      <ValueChip tone={n > 0 ? 'positive' : n < 0 ? 'negative' : 'neutral'} className={className}>
+        {`${n} ${unitWord(n)}`}
+      </ValueChip>
+    );
+  }
+  return <span>Reading stock…</span>;
+}
+
 export function TransferDialog({ open, onOpenChange, product, onSuccess }: TransferDialogProps) {
   const { locations, selectedLocationId } = useLocation();
 
-  const [fromLocationId, setFromLocationId] = React.useState<number | null>(null);
-  const [toLocationId, setToLocationId] = React.useState<number | null>(null);
+  // Source, destination and quantity are seeded ONCE, at mount (FR-R2 (4),
+  // QA-4). The hosts mount this dialog per open, so every open starts here; an
+  // effect keyed on `locations` re-seeded an OPEN draft whenever the context
+  // handed out a new array (a session refetch on tab return), wiping what the
+  // operator had typed and chosen.
+  const [seed] = React.useState(() => {
+    if (!locations.length) return { from: null, to: null };
+    const from = selectedLocationId ?? locations[0]?.id ?? null;
+    return { from, to: locations.find((l) => l.id !== from)?.id ?? null };
+  });
+  const [fromLocationId, setFromLocationId] = React.useState<number | null>(seed.from);
+  const [toLocationId, setToLocationId] = React.useState<number | null>(seed.to);
   const [quantity, setQuantity] = React.useState<string>('');
 
   const [insufficient, setInsufficient] = React.useState<InsufficientState | null>(null);
@@ -93,25 +132,9 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
   const { busy, run, guardOpenChange } = useSubmitLatch();
 
   const fromQuantity = fromQuantityQuery.data ?? null;
-  const loadingFromQuantity = fromQuantityQuery.isLoading;
-  const loadingToQuantity = toQuantityQuery.isLoading;
-
-  // Seed defaults on open
-  React.useEffect(() => {
-    if (!open || !locations.length) return;
-
-    setQuantity('');
-
-    const initialFrom = selectedLocationId ?? locations[0]?.id ?? null;
-    const initialTo = locations.find((l) => l.id !== initialFrom)?.id ?? null;
-    setFromLocationId(initialFrom);
-    setToLocationId(initialTo);
-  }, [open, locations, selectedLocationId]);
 
   const qtyNum = Number.parseInt(quantity || '0', 10) > 0 ? Number.parseInt(quantity || '0', 10) : 0;
   const canSubmit = !!fromLocationId && !!toLocationId && fromLocationId !== toLocationId && qtyNum > 0;
-  const sourceDisplayQty = fromQuantity ?? 0;
-  const destinationDisplayQty = toQuantityQuery.data ?? 0;
   // The after-transfer line is a projection, so it is drawn only from KNOWN
   // stock: BOTH reads answered (FR-R1 (4), CR-OC-2). Loading or failed is not
   // 0, and a line computed from it would state numbers nobody read.
@@ -227,16 +250,11 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                   <ContextTag icon={<MapPin className="h-3 w-3 text-muted-foreground" />}>
                     {fromLoc?.name ?? 'Select a source'}
                   </ContextTag>
-                  {fromQuantityQuery.isError ? (
-                    <span className="text-destructive">Could not load current stock</span>
-                  ) : (
-                    <ValueChip
-                      tone={sourceDisplayQty > 0 ? 'positive' : sourceDisplayQty < 0 ? 'negative' : 'neutral'}
-                      className="uppercase tracking-wide"
-                    >
-                      {loadingFromQuantity ? 'Loading...' : `${sourceDisplayQty} units`}
-                    </ValueChip>
-                  )}
+                  <StockChip
+                    locationId={fromLocationId}
+                    query={fromQuantityQuery}
+                    className="uppercase tracking-wide"
+                  />
                 </div>
               </div>
             </DialogHeader>
@@ -274,16 +292,7 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                   </Select>
                   <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                     <span>Current stock:</span>
-                    {fromQuantityQuery.isError ? (
-                      <span className="text-destructive">Could not load current stock</span>
-                    ) : (
-                      <ValueChip
-                        tone={sourceDisplayQty > 0 ? 'positive' : sourceDisplayQty < 0 ? 'negative' : 'neutral'}
-                        className="text-[10px]"
-                      >
-                        {loadingFromQuantity ? '...' : `${sourceDisplayQty} units`}
-                      </ValueChip>
-                    )}
+                    <StockChip locationId={fromLocationId} query={fromQuantityQuery} className="text-[10px]" />
                   </div>
                 </div>
 
@@ -309,16 +318,7 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                   </Select>
                   <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                     <span>Current stock:</span>
-                    {toQuantityQuery.isError ? (
-                      <span className="text-destructive">Could not load current stock</span>
-                    ) : (
-                      <ValueChip
-                        tone={destinationDisplayQty > 0 ? 'positive' : destinationDisplayQty < 0 ? 'negative' : 'neutral'}
-                        className="text-[10px]"
-                      >
-                        {loadingToQuantity ? '...' : `${destinationDisplayQty} units`}
-                      </ValueChip>
-                    )}
+                    <StockChip locationId={toLocationId} query={toQuantityQuery} className="text-[10px]" />
                   </div>
                   {hasSameLocation && (
                     <p className="mt-1 flex items-center gap-1 text-xs text-destructive">

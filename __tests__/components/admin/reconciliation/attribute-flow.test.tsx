@@ -359,7 +359,10 @@ describe("the picker's answer is for the current text", () => {
     expect(screen.queryByText("No order number contains what you typed.")).toBeNull();
   });
 
-  it("a 5xx's prose is for a log, not the screen", async () => {
+  // FR-R2 (12), QA-10d: a 5xx used to render NOTHING, which reads as "no
+  // answer yet". It says the search failed — in this surface's words, never the
+  // server's prose.
+  it("a 5xx says `Couldn't search orders right now — try again.`; its prose is for a log, not the screen", async () => {
     const user = userEvent.setup();
     useOrderSearchMock.mockReturnValue({
       data: undefined,
@@ -373,7 +376,39 @@ describe("the picker's answer is for the current text", () => {
     renderPicker(makeRow());
     await user.type(screen.getByLabelText(/order number/i), "1009");
     await waitFor(() => expect(useOrderSearchMock).toHaveBeenLastCalledWith("1009"));
+    expect(await screen.findByTestId("order-search-error")).toHaveTextContent(
+      /^Couldn't search orders right now — try again\.$/,
+    );
+    expect(screen.getByTestId("order-search-error")).toHaveAttribute("role", "alert");
     expect(screen.queryByText(/PrismaClientKnownRequestError/)).toBeNull();
+  });
+
+  it("a 503 (no server sentence) says the same", async () => {
+    const user = userEvent.setup();
+    useOrderSearchMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: Object.assign(new Error("Request failed (503)"), { status: 503 }),
+    });
+    renderPicker(makeRow());
+    await user.type(screen.getByLabelText(/order number/i), "1009");
+    expect(await screen.findByTestId("order-search-error")).toHaveTextContent(
+      "Couldn't search orders right now — try again.",
+    );
+  });
+
+  it("a 4xx with no server sentence still says nothing (unchanged)", async () => {
+    const user = userEvent.setup();
+    useOrderSearchMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: Object.assign(new Error("Request failed (404)"), { status: 404 }),
+    });
+    renderPicker(makeRow());
+    await user.type(screen.getByLabelText(/order number/i), "1009");
+    await waitFor(() => expect(useOrderSearchMock).toHaveBeenLastCalledWith("1009"));
     expect(screen.queryByTestId("order-search-error")).toBeNull();
   });
 });

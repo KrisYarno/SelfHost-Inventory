@@ -551,9 +551,12 @@ export function FulfillOrderDialog({
               e.preventDefault();
               void run(handleFulfill);
             }}
+            // FR-R2 (11), FD-1: a failed re-check over stale data is NOT a
+            // verdict — the label says the check failed, and the action waits.
             disabled={
               isProcessing ||
               isLoadingValidation ||
+              validationQuery.isError ||
               !validation ||
               !selectedLocationId ||
               itemsWithStock === 0 ||

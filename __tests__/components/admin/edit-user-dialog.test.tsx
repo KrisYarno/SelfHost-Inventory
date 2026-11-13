@@ -178,6 +178,47 @@ describe("the PATCH body carries ONLY the fields that changed", () => {
 });
 
 // ===========================================================================
+// FR-R2 (8), QA-9: the username is TRIMMED before it is compared and sent
+// ===========================================================================
+
+describe("the username is trimmed before it is compared and before it is sent", () => {
+  it("`bob ` against a stored `bob` is NO change: Save disabled, and a forced submit sends nothing", async () => {
+    const user = userEvent.setup();
+    renderDialog(baseUser({ username: "bob" }));
+
+    await user.type(usernameField(), " ");
+    expect(usernameField()).toHaveValue("bob ");
+    expect(saveButton()).toBeDisabled();
+    fireEvent.submit(usernameField().closest("form")!);
+    expect(patches()).toEqual([]);
+  });
+
+  it("` alice ` is sent as exactly { username: \"alice\" }", async () => {
+    const user = userEvent.setup();
+    renderDialog(baseUser({ username: "bob" }));
+
+    await user.clear(usernameField());
+    await user.type(usernameField(), " alice ");
+    const sent = await save(user);
+
+    expect(sent.body).toEqual({ username: "alice" });
+  });
+
+  it("the length rule reads the trimmed name: ` a ` is refused, and nothing is sent", async () => {
+    const { toast } = jest.requireMock("sonner") as { toast: { error: jest.Mock } };
+    const user = userEvent.setup();
+    renderDialog(baseUser({ username: "bob" }));
+
+    await user.clear(usernameField());
+    await user.type(usernameField(), " a ");
+    await user.click(saveButton());
+
+    expect(toast.error).toHaveBeenCalledWith("Username must be between 2 and 50 characters");
+    expect(patches()).toEqual([]);
+  });
+});
+
+// ===========================================================================
 // AN EMPTY DIFF: Save disabled, no request
 // ===========================================================================
 

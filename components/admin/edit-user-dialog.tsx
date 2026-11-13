@@ -118,11 +118,13 @@ function sameCompanySet(a: CompanyAssociation[], b: CompanyAssociation[]): boole
  * nothing else. When the membership set differs, the FULL new list is sent (the
  * route replaces the set). A default location is sent only once one is picked
  * and it differs; `Not set` is display-only and is never sent (the route takes
- * no null).
+ * no null). The username is TRIMMED before it is compared and before it is
+ * sent (FR-R2 (8), QA-9): a stray space is not a change, and never saved.
  */
 function changedFields(initial: FormValues, current: FormValues): UserPatch {
   const body: UserPatch = {};
-  if (current.username !== initial.username) body.username = current.username;
+  const username = current.username.trim();
+  if (username !== initial.username) body.username = username;
   if (current.defaultLocationId !== null && current.defaultLocationId !== initial.defaultLocationId) {
     body.defaultLocationId = current.defaultLocationId;
   }
@@ -249,8 +251,9 @@ function EditUserForm({
     // Nothing changed: Save is disabled, and no request is sent.
     if (!hasChanges) return;
 
-    // Basic validation
-    if (username.length < 2 || username.length > 50) {
+    // Basic validation, on the username as it will be sent (trimmed).
+    const trimmedUsername = username.trim();
+    if (trimmedUsername.length < 2 || trimmedUsername.length > 50) {
       toast.error("Username must be between 2 and 50 characters");
       return;
     }

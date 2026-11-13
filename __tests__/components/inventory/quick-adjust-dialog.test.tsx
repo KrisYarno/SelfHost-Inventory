@@ -746,7 +746,7 @@ describe("the blockers", () => {
     await intoOrder(user);
     await user.type(orderField(), "20a4");
 
-    expect(message()).toBe("Order number: digits only — fix it or clear it.");
+    expect(message()).toBe("Order number: 1–20 digits only — fix it or clear it.");
     expect(screen.getByTestId("order-number-shape").textContent).toBe("Order numbers are 1–20 digits.");
     expect(actionButton()).toBeDisabled();
     await user.click(actionButton());
@@ -763,7 +763,7 @@ describe("the blockers", () => {
     await ready(user);
     await intoOrder(user);
     await user.type(orderField(), "1".repeat(21));
-    expect(message()).toBe("Order number: digits only — fix it or clear it.");
+    expect(message()).toBe("Order number: 1–20 digits only — fix it or clear it.");
     expect(actionButton()).toBeDisabled();
   });
 
@@ -1306,7 +1306,9 @@ describe("the rejected pick", () => {
     expect("selectedExternalOrderId" in second).toBe(false);
   });
 
-  it("an ORDER_GONE on a TYPED number (no pick) is a failed save, as before", async () => {
+  // FR-R2 (7), QA-8: the error toast goes through the house reader
+  // (`apiErrorMessage`), whose own copy for ORDER_GONE names no internal id.
+  it("an ORDER_GONE on a TYPED number (no pick) is a failed save: the house sentence, never the internal id", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     adjustAnswer = {
       status: 409,
@@ -1316,10 +1318,107 @@ describe("the rejected pick", () => {
     await intoOrder(user);
     await typeOrder(user, "9999");
     await submit(user);
-    await waitFor(() =>
-      expect(toastError).toHaveBeenCalledWith("order ord-2 no longer exists"),
-    );
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    expect(toastError.mock.calls[0]).toEqual(["this order no longer exists — refresh and re-check"]);
+    expect(String(toastError.mock.calls[0][0])).not.toContain("ord-2");
     expect(message()).toBeNull();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  // FR-R2 (2), QA-2: the search's cached answer still offered the dead order
+  // after a rejection (its 30 s staleTime), so the restored number read
+  // "found" from the cache with no new request — pick, reject, pick again.
+  // The REAL search hook here, under the host's real QueryClient.
+  it("after a rejection the field asks the search AGAIN; it never re-offers the dead order from the cache", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const actual = jest.requireActual("@/hooks/use-order-search") as {
+      useOrderSearch: (q: string, opts?: unknown) => unknown;
+    };
+    useOrderSearchMock.mockImplementation((q: string, opts?: unknown) => actual.useOrderSearch(q, opts));
+    // The order exists for the first search; it is gone by the second.
+    let searchAnswer: Record<string, unknown> = { orders: [ORDER_2044], moreCount: 0, exactCount: 1 };
+    const answerOthers = fetchMock.getMockImplementation() as (url: RequestInfo | URL, init?: RequestInit) => unknown;
+    fetchMock.mockImplementation((url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).startsWith("/api/reconciliation/orders/search")) {
+        const body = searchAnswer;
+        return Promise.resolve({ ok: true, status: 200, json: async () => body } as unknown as Response);
+      }
+      return answerOthers(url, init);
+    });
+    const searchCalls = () =>
+      fetchMock.mock.calls.filter((c) => String(c[0]).startsWith("/api/reconciliation/orders/search"));
+    adjustAnswer = REJECTED;
+
+    await ready(user);
+    await intoOrder(user);
+    await user.type(orderField(), "2044");
+    await user.click(await screen.findByRole("button", { name: "Use this order" }));
+    expect(screen.getByTestId("order-number-picked")).toBeInTheDocument();
+    expect(searchCalls()).toHaveLength(1);
+
+    searchAnswer = { orders: [], moreCount: 0, exactCount: 0 };
+    await submit(user);
+    await waitFor(() => expect(message()).not.toBeNull());
+    expect(orderField()).toHaveValue("2044");
+
+    // A NEW request for the restored number — not the cached "found".
+    await waitFor(() => expect(searchCalls()).toHaveLength(2));
+    expect(String(searchCalls()[1][0])).toBe("/api/reconciliation/orders/search?q=2044&productId=42&limit=5");
+    await waitFor(() =>
+      expect(screen.getByTestId("order-number-status")).toHaveTextContent(
+        "No order 2044 found. If the number is right, it's saved with this removal so an admin can link it later.",
+      ),
+    );
+    expect(screen.queryByRole("button", { name: "Use this order" })).toBeNull();
+    expect(screen.queryByTestId("order-number-row-ord-2")).toBeNull();
+  });
+
+  // FR-R2 (2), orchestrator fold: the re-check RESETS the search, so while it is
+  // in flight the field says "Checking…" — never the dead order's cached "found"
+  // with a "Use this order" that would re-pick it.
+  it("while the re-check is in flight the field reads Checking… and offers no stale order", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const actual = jest.requireActual("@/hooks/use-order-search") as {
+      useOrderSearch: (q: string, opts?: unknown) => unknown;
+    };
+    useOrderSearchMock.mockImplementation((q: string, opts?: unknown) => actual.useOrderSearch(q, opts));
+    let searchCount = 0;
+    let releaseSecond: (() => void) | null = null;
+    const answerOthers = fetchMock.getMockImplementation() as (url: RequestInfo | URL, init?: RequestInit) => unknown;
+    fetchMock.mockImplementation((url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).startsWith("/api/reconciliation/orders/search")) {
+        searchCount += 1;
+        if (searchCount === 1) {
+          const body = { orders: [ORDER_2044], moreCount: 0, exactCount: 1 };
+          return Promise.resolve({ ok: true, status: 200, json: async () => body } as unknown as Response);
+        }
+        const body = { orders: [], moreCount: 0, exactCount: 0 };
+        return new Promise((resolve) => {
+          releaseSecond = () => resolve({ ok: true, status: 200, json: async () => body } as unknown as Response);
+        });
+      }
+      return answerOthers(url, init);
+    });
+    adjustAnswer = REJECTED;
+
+    await ready(user);
+    await intoOrder(user);
+    await user.type(orderField(), "2044");
+    await user.click(await screen.findByRole("button", { name: "Use this order" }));
+    await submit(user);
+    await waitFor(() => expect(message()).not.toBeNull());
+
+    // The second search is held: the field must not show the cached "found".
+    await waitFor(() => expect(searchCount).toBe(2));
+    expect(screen.getByTestId("order-number-status")).toHaveTextContent("Checking…");
+    expect(screen.queryByRole("button", { name: "Use this order" })).toBeNull();
+
+    await act(async () => {
+      releaseSecond?.();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("order-number-status")).toHaveTextContent(/^No order 2044 found\./),
+    );
   });
 
   it("any OTHER 400 is a failed save: the server's sentence, and the pick is kept", async () => {

@@ -58,11 +58,23 @@ const RE_SELECT_SENTENCE =
 
 /**
  * A leg answered `ok` but its body could not be read (FR-R1 (8), CR-OC-6). The
- * route only answers 2xx once its write is committed, so the stock MOVED — but
- * the batch ids the Undo needs were in that body.
+ * route only answers 2xx once its write is committed, so the request was
+ * ACCEPTED — but what it did is unknown: an unreadable fulfil body may have
+ * covered a partial or skipped answer (FR-R2 (15), FD-3), and the batch ids the
+ * Undo needs were in that body. So the toast claims acceptance, not movement,
+ * and sends the operator to an admin (the batch log is admin-only; QA-7).
  */
 const UNREADABLE_REPLY_SENTENCE =
-  "Order completed. The server's reply couldn't be read, so Undo isn't available — check the batch log.";
+  "The server accepted the completion, but its reply couldn't be read, so Undo isn't available — ask an admin to check this order.";
+
+/**
+ * FR-R2 (3), QA-3: a committed leg whose reply could not be read, then a later
+ * leg that failed — the rollback has nothing it may send, so the incident is
+ * raised. Another tap would re-send a leg that went through; nothing more is
+ * sent for this order from here.
+ */
+const PARTIAL_UNREADABLE_SENTENCE =
+  "Part of this order went through but the rest failed and the reply couldn't be read — nothing more will be sent from here. Ask an admin to check this order.";
 
 export interface DeductionDetail {
   productId: number;
@@ -163,6 +175,14 @@ export function CompleteOrderDialog({
   // pass — the label and the disabled state read either.
   const { busy, run, guardOpenChange } = useSubmitLatch();
   const processing = busy || isProcessing;
+
+  // FR-R2 (3), QA-3: the SELECTION an unreadable-then-failed completion ended
+  // on. The store builds a new `selectedExternalOrder` object on every
+  // selection, so comparing identities ends the terminal state exactly when the
+  // order is selected again (or cleared) — and keeps it across a close and
+  // reopen of this dialog in between.
+  const [stoppedSelection, setStoppedSelection] = useState<typeof selectedExternalOrder>(null);
+  const stopped = selectedExternalOrder !== null && stoppedSelection === selectedExternalOrder;
 
   const isWCOrder = !!selectedExternalOrder;
 
@@ -265,6 +285,9 @@ export function CompleteOrderDialog({
   };
 
   const handleComplete = async () => {
+    // A belt under the disabled action: nothing more is sent for this order.
+    if (stopped) return;
+
     if (!csrfToken) {
       toast.error("Secure session is still initializing. Please wait a moment and try again.");
       return;
@@ -522,8 +545,10 @@ export function CompleteOrderDialog({
 
         // An unreadable `ok` body is a COMMITTED leg (FR-R1 (8)): read as `null`,
         // it names no entries and no summary, so the gate below has no verdict
-        // (FD1-3) and the leg stands as fulfilled — the rollback, if the manual
-        // leg then fails, sends nothing and names the incident (QA-3).
+        // (FD1-3) and the leg stands as fulfilled — whether it fulfilled every
+        // line, some, or skipped them is unknown (FR-R2 (15), FD-3). The
+        // rollback, if the manual leg then fails, sends nothing and names the
+        // incident (QA-3), and the dialog stops for this order (FR-R2 (3)).
         const fulfillBody = await fulfillResponse.json().catch(() => null);
         if (fulfillBody === null) replyUnreadable = true;
         batchIds.fulfilBatchId =
@@ -738,7 +763,13 @@ export function CompleteOrderDialog({
             // every path that reaches here.)
             const restoredFully = await rollbackWcLeg(fulfilledEntries, wcItems.length);
             if (restoredFully) wcFulfilled = false;
-            else raiseRollbackIncident();
+            else {
+              raiseRollbackIncident();
+              // FR-R2 (3), QA-3: the fulfil leg went through but its reply
+              // could not be read, so it could not be put back — a second tap
+              // would fulfil again. This order is stopped until re-selected.
+              if (replyUnreadable) setStoppedSelection(selectedExternalOrder);
+            }
             // QA-6b: same reason as the gate branch — the deduction and its
             // rollback both moved stock, and the throw below never reaches the
             // success block's invalidation.
@@ -829,8 +860,9 @@ export function CompleteOrderDialog({
       invalidateInventoryCaches(queryClient);
 
       // A committed completion whose reply could not be read has nothing an Undo
-      // could name: say so, and offer none. `onSuccess` is the host's Undo, so
-      // it is not called (FR-R1 (8)).
+      // could name: say the server accepted it — not what moved, which is
+      // unknown (FR-R2 (6), (15)) — and offer none. `onSuccess` is the host's
+      // Undo, so it is not called (FR-R1 (8)).
       if (replyUnreadable) {
         toast.success(UNREADABLE_REPLY_SENTENCE);
         return;
@@ -1137,6 +1169,17 @@ export function CompleteOrderDialog({
                     </div>
                   )}
 
+                  {/* FR-R2 (3): the terminal state for this order. */}
+                  {stopped && (
+                    <p
+                      role="alert"
+                      data-testid="complete-order-stopped"
+                      className="text-sm font-medium text-destructive"
+                    >
+                      {PARTIAL_UNREADABLE_SENTENCE}
+                    </p>
+                  )}
+
                   {/* Summary text */}
                   {isWCOrder ? (
                     <p className="text-sm text-muted-foreground">
@@ -1169,13 +1212,15 @@ export function CompleteOrderDialog({
             // for good once every tap-required line has been tapped.
             // CB1.5c: plus the request caps — either leg over its own cap would
             // be refused by its route with the whole cart already spent.
+            // FR-R2 (3): and never again for an order stopped mid-completion.
             disabled={
               processing ||
               csrfLoading ||
               !csrfToken ||
               !allAcknowledged ||
               wcOver ||
-              manualOver
+              manualOver ||
+              stopped
             }
           >
             {processing

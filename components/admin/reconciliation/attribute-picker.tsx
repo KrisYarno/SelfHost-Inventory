@@ -69,10 +69,15 @@ export function displayedPreviousOrderRecordId(
   return stamps.size === 1 ? Array.from(stamps)[0] : null;
 }
 
-/** The server's own sentence for a 4xx, or `null` (a 5xx's prose is for a log). */
-function clientErrorSentence(error: ApiError | null | undefined): string | null {
+/**
+ * What a failed search says: a 4xx in the server's own sentence; a 5xx in this
+ * surface's generic one (FR-R2 (12), QA-10d) — its prose is for a log, and
+ * silence read as "no answer yet"; anything else, nothing.
+ */
+function searchErrorSentence(error: ApiError | null | undefined): string | null {
   if (!error || typeof error.status !== "number") return null;
-  if (error.status < 400 || error.status >= 500) return null;
+  if (error.status >= 500) return "Couldn't search orders right now — try again.";
+  if (error.status < 400) return null;
   return error.serverMessage ?? null;
 }
 
@@ -110,8 +115,9 @@ export function AttributePicker({
   const results = answered ? search.data : undefined;
   // A refused search says why in the server's own words — a 4xx is the server
   // telling the admin what is wrong with what they typed (`search text is at
-  // most 40 characters`); the error card's rule (QA-5).
-  const searchError = answered ? clientErrorSentence(search.error) : null;
+  // most 40 characters`); the error card's rule (QA-5). A failed one (5xx) says
+  // so, in this surface's words.
+  const searchError = answered ? searchErrorSentence(search.error) : null;
 
   const rowCount = detail.data ? detail.data.ledgerRows.length : null;
   const previous = displayedPreviousOrderRecordId(row, detail.data);

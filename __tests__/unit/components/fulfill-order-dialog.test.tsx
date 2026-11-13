@@ -856,6 +856,25 @@ describe("fulfill dialog — it starts at the operator's location (MS-1-4)", () 
     expect(screen.queryByRole("button", { name: "No Items to Fulfill" })).toBeNull();
   });
 
+  // FR-R2 (11), FD-1: a re-check that FAILED over an earlier answer read
+  // `Couldn't check stock at …` and stayed ENABLED — a tap fulfilled on the
+  // stale answer. The action is disabled while the check is in error.
+  it("stale data plus a FAILED re-check: `Couldn't check stock at {location}`, and the action is DISABLED", async () => {
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(2);
+    const order = openOrder(2);
+    renderWithValidation(order, {
+      data: validationFor(order),
+      isError: true,
+      error: new Error("Failed to validate order"),
+    });
+
+    await waitFor(() => expect(actionNamed("Couldn't check stock at Main")).toBeDisabled());
+    fireEvent.click(actionNamed("Couldn't check stock at Main"));
+    await act(async () => {});
+    expect(mutateAsync).not.toHaveBeenCalled();
+  });
+
   it("the other labels are unchanged: a settled check with nothing ready is still `No Items to Fulfill`", async () => {
     locationsAre(TWO_LOCATIONS);
     operatorAt(2);
