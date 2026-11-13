@@ -673,10 +673,12 @@ describe("the capture", () => {
         await readyInGuardHost(user, onOpenChange);
 
         const release = holdNextAdjust();
-        fireEvent.click(confirmButton());
-        // The window is real: the request has started, the render has not caught up.
-        expect(screen.queryByRole("button", { name: "Adjusting..." })).toBeNull();
-        dismiss();
+        act(() => {
+          fireEvent.click(confirmButton());
+          // The window is real: the request has started, the render has not caught up.
+          expect(screen.queryByRole("button", { name: "Adjusting..." })).toBeNull();
+          dismiss();
+        });
         expect(onOpenChange).not.toHaveBeenCalled();
 
         // The request reaches fetch a tick later; release it once it has.
@@ -719,9 +721,11 @@ describe("the capture", () => {
       await readyInGuardHost(user, onOpenChange);
 
       const release = holdNextAdjust();
-      fireEvent.click(confirmButton());
-      expect(screen.queryByRole("button", { name: "Adjusting..." })).toBeNull();
-      fireEvent.click(confirmButton());
+      act(() => {
+        fireEvent.click(confirmButton());
+        expect(screen.queryByRole("button", { name: "Adjusting..." })).toBeNull();
+        fireEvent.click(confirmButton());
+      });
 
       await waitFor(() => expect(adjustCalls().length).toBeGreaterThanOrEqual(1));
       release();

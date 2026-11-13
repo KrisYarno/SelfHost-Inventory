@@ -1,11 +1,12 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { Plus, Minus, Package, MapPin } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
 import { useProductLocationQuantity } from "@/hooks/use-product-location-quantity";
 import { useAdjustInventory } from "@/hooks/use-inventory-mutations";
+import { useSubmitLatch } from "@/hooks/use-submit-latch";
 import {
   Dialog,
   DialogContent,
@@ -110,12 +111,13 @@ export function QuickAdjustDialog({
   });
   const adjustMutation = useAdjustInventory();
   const isSubmitting = adjustMutation.isPending;
-  // The SYNCHRONOUS half of "a submit is in flight" (B3-1 FD3-1). The rendered
-  // `isPending` lags the request — TanStack notifies its observers on a later
-  // task — so in the instant after Confirm a dismissal, or a second Confirm,
-  // would pass a guard that read only the render. Set before the request
-  // starts, cleared when it settles.
-  const submittingRef = useRef(false);
+  // The SYNCHRONOUS half of "a submit is in flight" (B3-1 FD3-1), now the
+  // shared submit latch (§ P2-B3-1R, M-a.1). The rendered `isPending` lags the
+  // request — TanStack notifies its observers on a later task — so in the
+  // instant after Confirm a dismissal, or a second Confirm, would pass a guard
+  // that read only the render. The latch's ref is set before the request
+  // starts and cleared when it settles.
+  const { run, guardOpenChange } = useSubmitLatch();
 
   const currentQuantity = quantityQuery.data ?? 0;
   const quantityNum = parseInt(quantity, 10) || 0;
@@ -147,14 +149,11 @@ export function QuickAdjustDialog({
   // A submit in flight cannot be dismissed (B3-1 FR3, FD2-3): Escape, a click
   // outside and the close button all reach Radix's `onOpenChange(false)`, so
   // this one guard covers the three, and Cancel goes through it too (it is
-  // also disabled once "Adjusting..." renders). It reads the synchronous latch
-  // as well as the render (FD3-1). The
-  // request's own answer still closes the dialog — `handleSubmit` calls the
-  // host's `onOpenChange` directly — and a failed one leaves it open, as ever.
-  const handleOpenChange = (next: boolean) => {
-    if (!next && (submittingRef.current || isSubmitting)) return;
-    onOpenChange(next);
-  };
+  // also disabled once "Adjusting..." renders). It reads the latch's
+  // synchronous ref (FD3-1). The request's own answer still closes the dialog —
+  // `handleSubmit` calls the host's raw `onOpenChange`, never this guard,
+  // which would drop it — and a failed one leaves it open, as ever.
+  const handleOpenChange = guardOpenChange(onOpenChange);
 
   const clearCapture = () => {
     setCapture({ productId: product.id, picked: null, reference: "" });
@@ -205,10 +204,6 @@ export function QuickAdjustDialog({
   };
 
   const handleSubmit = async () => {
-    // One removal per Confirm: a second click before "Adjusting..." renders
-    // would otherwise send a second request (B3-1 FD3-1).
-    if (submittingRef.current) return;
-
     if (!selectedLocationId) {
       toast.error("No location selected");
       return;
@@ -226,22 +221,29 @@ export function QuickAdjustDialog({
       return;
     }
 
-    submittingRef.current = true;
     try {
-      const result = await adjustMutation.mutateAsync({
-        productId: product.id,
-        locationId: selectedLocationId,
-        delta: adjustmentType === "add" ? quantityNum : -quantityNum,
-        reason,
-        notes: notes || undefined,
-        // Absent, not null, when the chip was never tapped — the route reads
-        // key PRESENCE to tell "unstated" from "stated as other".
-        intent: intent ?? undefined,
-        // The capture: identity only on a Remove under `order`, and at most one
-        // of the two (refused above). Absent keys, never empty values.
-        selectedExternalOrderId: sentPick?.id,
-        orderReference: sentReference ?? undefined,
-      });
+      // One removal per Confirm: a second click before "Adjusting..." renders
+      // would otherwise send a second request (B3-1 FD3-1). `run` answers it
+      // `undefined` while this one holds the latch, and releases the latch when
+      // the request settles, failed or not (FD4-1), before the lines below run.
+      const settled = await run(async () => ({
+        result: await adjustMutation.mutateAsync({
+          productId: product.id,
+          locationId: selectedLocationId,
+          delta: adjustmentType === "add" ? quantityNum : -quantityNum,
+          reason,
+          notes: notes || undefined,
+          // Absent, not null, when the chip was never tapped — the route reads
+          // key PRESENCE to tell "unstated" from "stated as other".
+          intent: intent ?? undefined,
+          // The capture: identity only on a Remove under `order`, and at most one
+          // of the two (refused above). Absent keys, never empty values.
+          selectedExternalOrderId: sentPick?.id,
+          orderReference: sentReference ?? undefined,
+        }),
+      }));
+      if (settled === undefined) return;
+      const { result } = settled;
 
       if (sentPick === null && sentReference === null) {
         toast.success(
@@ -265,6 +267,8 @@ export function QuickAdjustDialog({
         );
       }
 
+      // The host's RAW callback, never the guard (`handleOpenChange`), which
+      // drops a close while a submit holds the latch.
       onOpenChange(false);
       onSuccess?.();
 
@@ -278,8 +282,6 @@ export function QuickAdjustDialog({
     } catch (error) {
       console.error("Error adjusting inventory:", error);
       toast.error(error instanceof Error ? error.message : "Failed to adjust inventory");
-    } finally {
-      submittingRef.current = false;
     }
   };
 
