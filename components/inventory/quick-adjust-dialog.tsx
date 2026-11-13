@@ -1,33 +1,26 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Plus, Minus, Package, MapPin } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
 import { useProductLocationQuantity } from "@/hooks/use-product-location-quantity";
-import { useAdjustInventory } from "@/hooks/use-inventory-mutations";
+import { useAdjustInventory, type ApiMutationError } from "@/hooks/use-inventory-mutations";
 import { useSubmitLatch } from "@/hooks/use-submit-latch";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { ValueChip } from "@/components/ui/value-chip";
 import { ContextTag } from "@/components/ui/context-tag";
-import { InlineHighlight } from "@/components/ui/inline-highlight";
 import { ReceivingRedirectPrompt } from "@/components/inventory/receiving-redirect-prompt";
 import { IntentChip } from "@/components/inventory/intent-chip";
-import { OrderLookup, type PickedOrder } from "@/components/inventory/order-lookup";
+import { OrderNumberField, type OrderCapture } from "@/components/inventory/order-number-field";
 import type { DeductionIntent } from "@/lib/inventory/intent";
-import { ORDER_REFERENCE_HINT, ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
+import { SELECTED_ORDER_REJECTED_SENTENCE } from "@/lib/orders/order-capture-sentences";
+import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
+import { cn } from "@/lib/utils";
 import type { DialogProduct } from "@/types/inventory";
 
 interface QuickAdjustDialogProps {
@@ -42,28 +35,40 @@ interface QuickAdjustDialogProps {
 // server-side — and the adjust route now REFUSES the old vocabulary outright,
 // so leaving the select in place would have offered operators a field the API
 // rejects. One question, one answer, one place it is interpreted.
+//
+// Reconciliation Part 2, § P2-B3-1R (R-b.2): the dialog, phone first. It opens
+// on Remove; a Remove under the `order` chip names its order in ONE field
+// (`OrderNumberField`), picked → `selectedExternalOrderId`, typed →
+// `orderReference`, never both; one optional Note replaces the required Reason
+// (`reason` is never sent). The hosts MOUNT IT PER OPEN (the inventory and
+// products pages render it only while their product is set, and null the
+// product on close), so every open starts from an empty draft and nothing
+// typed for one product can reach another's removal: the FR2/FR3
+// product-tagged capture is gone with the shared mount it guarded against.
+// Every sentence below is the pack's, byte for byte.
 
-// Reconciliation Part 2, B3-1 (pack CB3b-ii.1b + § P2-B3-1): THE CAPTURE. A
-// Remove under the `order` chip can name its order — picked from the search
-// (`selectedExternalOrderId`) or typed (`orderReference`), never both — and the
-// server stamps the ledger row when it can stand behind the identity. The
-// sentences below are frozen by the pack, byte for byte.
-const CAPTURE_BOTH_SENTENCE = "Pick the order or type the reference, not both";
+/** The largest quantity the field can hold (`maxLength={6}`). */
+const MAX_QUANTITY = 999_999;
 
-/** The capture's two inputs, stored WITH the id of the product they were entered under. */
-interface Capture {
-  productId: number;
-  picked: PickedOrder | null;
-  reference: string;
+/** `unit` when the count is 1, `units` otherwise. */
+function unitWord(count: number): string {
+  return count === 1 ? "unit" : "units";
 }
-
-/** What any OTHER product's capture reads as: nothing. */
-const NO_CAPTURE: Pick<Capture, "picked" | "reference"> = { picked: null, reference: "" };
 
 /** The stored order id the server stamped the ledger row with (`log.orderRecordId` on the 200). */
 function stampedOrderId(result: unknown): string | null {
   const log = (result as { log?: { orderRecordId?: unknown } } | null | undefined)?.log;
   return typeof log?.orderRecordId === "string" ? log.orderRecordId : null;
+}
+
+/** The ONE 400 a picked order earns when it can no longer be used (`resolve-selected-order.ts`). */
+function isRejectedPick(error: unknown): boolean {
+  const err = error as ApiMutationError | null | undefined;
+  return (
+    err instanceof Error &&
+    err.code === "VALIDATION_ERROR" &&
+    err.message === SELECTED_ORDER_REJECTED_SENTENCE
+  );
 }
 
 export function QuickAdjustDialog({
@@ -73,213 +78,233 @@ export function QuickAdjustDialog({
   onSuccess,
 }: QuickAdjustDialogProps) {
   const { selectedLocationId, locations } = useLocation();
-  const [adjustmentType, setAdjustmentType] = useState<"add" | "remove">("add");
+  // Default Remove (row 106): most adjustments here are stock leaving.
+  const [direction, setDirection] = useState<"remove" | "add">("remove");
+  // Digits only, as typed: the field refuses anything else.
   const [quantity, setQuantity] = useState("");
-  const [reason, setReason] = useState("");
+  const [quantityRefused, setQuantityRefused] = useState(false);
   // null = the operator has not tapped the chip. Deliberately NOT pre-filled
   // with "other": the request must be able to say "nothing was stated", and a
   // default selection would make every untouched adjustment look answered.
   const [intent, setIntent] = useState<DeductionIntent | null>(null);
+  // The capture: HIDDEN, not cleared, when the direction or the chip leaves
+  // Remove + `order` (R107-OC-16 / G1-13). The body and the footer read it only
+  // under Remove + `order`, so a hidden capture is never sent and never blocks.
+  const [capture, setCapture] = useState<OrderCapture>({ text: "", picked: null });
   const [notes, setNotes] = useState("");
-  // The capture's two inputs. They exist ONLY while the capture shows (a Remove
-  // under `order`): leaving that state clears both, so an identity typed for a
-  // removal can never ride along on an add or on another intent.
-  //
-  // ...and an identity belongs to ONE product's removal, BY CONSTRUCTION (B3-1
-  // FR3, Q/A B3-1-QA-1). The inventory page keeps this dialog mounted and swaps
-  // `product` under it (B3-1 FR1, CR-1), so the capture is stored WITH the id
-  // of the product it was entered under, and everything the dialog shows or
-  // sends reads `ownCapture`: another product's capture reads as empty. Every
-  // write tags the product of the render it came from, so even a stale update
-  // React replays later — FR2's render-phase reset lost exactly that race —
-  // carries its own product's id and cannot surface under another.
-  //
-  // Keyed on the id, never the object: the page builds a fresh object on every
-  // open, and reopening the SAME product keeps the capture. A capture entered
-  // under A and still in state also reappears if the dialog goes back to A,
-  // which is right: it belongs to A. The other remembered fields are out of
-  // scope here.
-  const [capture, setCapture] = useState<Capture>({
-    productId: product.id,
-    picked: null,
-    reference: "",
+  // The rejected pick's notice (non-blocking): which of its two sentences, or
+  // none. Cleared by the next edit.
+  const [rejectedPick, setRejectedPick] = useState<"number" | "none" | null>(null);
+  // The order field takes focus only right after the chip is changed to `order`.
+  const focusOrderFieldRef = useRef(false);
+  useEffect(() => {
+    focusOrderFieldRef.current = false;
   });
-  const ownCapture = capture.productId === product.id ? capture : NO_CAPTURE;
 
   const quantityQuery = useProductLocationQuantity(product.id, selectedLocationId, {
     enabled: open,
   });
   const adjustMutation = useAdjustInventory();
-  const isSubmitting = adjustMutation.isPending;
-  // The SYNCHRONOUS half of "a submit is in flight" (B3-1 FD3-1), now the
-  // shared submit latch (§ P2-B3-1R, M-a.1). The rendered `isPending` lags the
-  // request — TanStack notifies its observers on a later task — so in the
-  // instant after Confirm a dismissal, or a second Confirm, would pass a guard
-  // that read only the render. The latch's ref is set before the request
-  // starts and cleared when it settles.
-  const { run, guardOpenChange } = useSubmitLatch();
+  // The shared submit latch (§ P2-B3-1R, M-a.1): one write per tap, and no
+  // dismissal while it is in flight. Its ref is set before the request starts
+  // and cleared when it settles, failed or not (FD3-1, FD4-1); `busy` is the
+  // same fact for rendering (the frozen form, the "…ing" label).
+  const { busy, run, guardOpenChange } = useSubmitLatch();
 
-  const currentQuantity = quantityQuery.data ?? 0;
-  const quantityNum = parseInt(quantity, 10) || 0;
-  const adjustedQuantity = adjustmentType === "add"
-    ? currentQuantity + quantityNum
-    : currentQuantity - quantityNum;
-  const selectedLocationName =
-    locations.find((loc) => loc.id === selectedLocationId)?.name ?? "Selected location";
+  const isRemove = direction === "remove";
+  const verb = isRemove ? "Remove" : "Add";
+  const q = quantity === "" ? null : Number(quantity);
+  const unitsPhrase = q === null ? "units" : `${q} ${unitWord(q)}`;
+  const location =
+    selectedLocationId === null
+      ? null
+      : (locations.find((loc) => loc.id === selectedLocationId)?.name ?? "Selected location");
+  // Stock is KNOWN only on a successful read: loading and failure are their own
+  // states, never 0 (row 105, #7). The server's availability check decides.
+  const knownStock =
+    selectedLocationId !== null && quantityQuery.status === "success" ? quantityQuery.data : null;
 
-  const captureActive = adjustmentType === "remove" && intent === "order";
-  const trimmedReference = ownCapture.reference.trim();
-  const sentPick = captureActive ? ownCapture.picked : null;
-  // Blank or whitespace-only is NOT a reference: it stays out of the body (the
-  // schema's `.min(1)` would refuse it) and out of every check below.
-  const sentReference = captureActive && trimmedReference !== "" ? trimmedReference : null;
-  const captureConflict = sentPick !== null && sentReference !== null;
-  // The server's bar, applied before the round trip: a reference it could never
-  // resolve is fixed here, not discovered in the toast.
-  const referenceShapeInvalid =
-    sentReference !== null && !ORDER_REFERENCE_SHAPE.test(sentReference);
+  const captureLive = isRemove && intent === "order";
+  const sentPick = captureLive ? capture.picked : null;
+  const textWellShaped = capture.text !== "" && ORDER_REFERENCE_SHAPE.test(capture.text);
+  const sentReference =
+    captureLive && capture.picked === null && textWellShaped ? capture.text : null;
+  // The pack's one named exception to "never block": text in the live order
+  // field that is not an order number keeps arbitrary free text out of
+  // `details.orderReference` until it is fixed or cleared (G1-12).
+  const captureIllShaped =
+    captureLive && capture.picked === null && capture.text !== "" && !textWellShaped;
 
-  const isValid =
-    quantityNum > 0 &&
-    reason.trim() &&
-    adjustedQuantity >= 0 &&
-    !captureConflict &&
-    !referenceShapeInvalid;
+  const blockers: string[] = [];
+  if (selectedLocationId === null) {
+    blockers.push("Close this and choose a location at the top of the page.");
+  }
+  if (q === null || q === 0) blockers.push("Enter how many units.");
+  if (isRemove && knownStock !== null && q !== null && q > knownStock) {
+    blockers.push(
+      `You can't remove more than the ${knownStock} ${unitWord(knownStock)} on record at ${location}.`,
+    );
+  }
+  if (captureIllShaped) blockers.push("Order number: digits only — fix it or clear it.");
 
-  // A submit in flight cannot be dismissed (B3-1 FR3, FD2-3): Escape, a click
-  // outside and the close button all reach Radix's `onOpenChange(false)`, so
-  // this one guard covers the three, and Cancel goes through it too (it is
-  // also disabled once "Adjusting..." renders). It reads the latch's
-  // synchronous ref (FD3-1). The request's own answer still closes the dialog —
-  // `handleSubmit` calls the host's raw `onOpenChange`, never this guard,
-  // which would drop it — and a failed one leaves it open, as ever.
+  const draftNonEmpty =
+    quantity !== "" ||
+    capture.text !== "" ||
+    capture.picked !== null ||
+    notes !== "" ||
+    intent !== null;
+
+  const summary = `${verb} ${unitsPhrase} of ${product.name}${location !== null ? ` at ${location}` : ""}`;
+  const actionLabel = busy ? `${isRemove ? "Removing" : "Adding"} ${unitsPhrase}…` : `${verb} ${unitsPhrase}`;
+  const orderLine = !captureLive
+    ? null
+    : capture.picked !== null
+      ? `Order ${capture.picked.orderNumber} · ${capture.picked.store}`
+      : textWellShaped
+        ? `Order number to save: ${capture.text}`
+        : capture.text === ""
+          ? "No order number — this removal won't be linked to an order."
+          : null;
+  const rejectedNotice =
+    rejectedPick === null
+      ? null
+      : rejectedPick === "number"
+        ? `That order can't be used anymore — tap "${verb} ${unitsPhrase}" again to save the number without linking it.`
+        : `That order can't be used anymore — tap "${verb} ${unitsPhrase}" again to save without an order number.`;
+  const message = blockers[0] ?? rejectedNotice;
+
+  const preview =
+    knownStock !== null && location !== null && q !== null && q >= 1
+      ? knownStock + (isRemove ? -q : q)
+      : null;
+
+  // Cancel and the X discard (the host unmounts the dialog); while a save is in
+  // flight the guard drops them, as it drops Escape and a click outside. It
+  // reads the latch's synchronous ref (FD3-1). The request's own answer still
+  // closes the dialog — `handleSubmit` calls the host's RAW `onOpenChange`,
+  // never this guard, which would drop it — and a failed one leaves it open.
   const handleOpenChange = guardOpenChange(onOpenChange);
 
-  const clearCapture = () => {
-    setCapture({ productId: product.id, picked: null, reference: "" });
+  /** Any edit clears the rejected pick's notice. */
+  const edited = () => setRejectedPick(null);
+
+  const handleDirectionChange = (next: "remove" | "add") => {
+    setDirection(next);
+    edited();
   };
 
-  // Each half survives the other's write only if it was entered under THIS
-  // product — the functional update reads what is in state, not this render.
-  const handlePick = (next: PickedOrder | null) => {
-    setCapture((prev) => ({
-      productId: product.id,
-      picked: next,
-      reference: prev.productId === product.id ? prev.reference : "",
-    }));
-  };
-
-  const handleReferenceChange = (next: string) => {
-    setCapture((prev) => ({
-      productId: product.id,
-      picked: prev.productId === product.id ? prev.picked : null,
-      reference: next,
-    }));
-  };
-
-  const handleAdjustmentTypeChange = (value: "add" | "remove") => {
-    setAdjustmentType(value);
-    if (value !== "remove") clearCapture();
-  };
-
-  const handleIntentChange = (next: DeductionIntent) => {
-    setIntent(next);
-    if (next !== "order") clearCapture();
+  const handleQuantityInput = (raw: string) => {
+    if (!/^[0-9]*$/.test(raw)) {
+      // REFUSED: the value stays as it was, and the field says why.
+      setQuantityRefused(true);
+      return;
+    }
+    const next = raw.replace(/^0+(?=[0-9])/, "");
+    setQuantity(next);
+    if (next === "") setQuantityRefused(false);
+    edited();
   };
 
   const handleIncrement = () => {
-    setQuantity((prev) => {
-      const current = Number.parseInt(prev, 10) || 0;
-      const next = Math.max(current + 1, 1);
-      return String(next);
-    });
+    setQuantity((prev) => String(Math.min((prev === "" ? 0 : Number(prev)) + 1, MAX_QUANTITY)));
+    edited();
   };
 
   const handleDecrement = () => {
-    setQuantity((prev) => {
-      const current = Number.parseInt(prev, 10) || 1;
-      const next = Math.max(current - 1, 1);
-      return String(next);
-    });
+    if (q === null || q <= 1) return;
+    setQuantity(String(q - 1));
+    edited();
+  };
+
+  const handleIntentChange = (next: DeductionIntent) => {
+    if (next === "order" && intent !== "order") focusOrderFieldRef.current = true;
+    setIntent(next);
+    edited();
+  };
+
+  const handleCaptureChange = (next: OrderCapture) => {
+    setCapture(next);
+    edited();
+  };
+
+  const handleNotesChange = (next: string) => {
+    setNotes(next);
+    edited();
   };
 
   const handleSubmit = async () => {
-    if (!selectedLocationId) {
-      toast.error("No location selected");
-      return;
-    }
-
-    // Refused HERE, before the server's own 400 could: the operator named the
-    // order twice, and only they know which one they meant.
-    if (captureConflict) {
-      toast.error(CAPTURE_BOTH_SENTENCE);
-      return;
-    }
-
-    if (!isValid) {
-      toast.error("Please fill in all required fields");
-      return;
-    }
+    if (blockers.length > 0 || selectedLocationId === null || q === null) return;
+    const delta = isRemove ? -q : q;
+    const sentNotes = notes.trim();
 
     try {
-      // One removal per Confirm: a second click before "Adjusting..." renders
-      // would otherwise send a second request (B3-1 FD3-1). `run` answers it
+      // One removal per tap: a second tap before the label changes would
+      // otherwise send a second request (B3-1 FD3-1). `run` answers it
       // `undefined` while this one holds the latch, and releases the latch when
       // the request settles, failed or not (FD4-1), before the lines below run.
       const settled = await run(async () => ({
         result: await adjustMutation.mutateAsync({
           productId: product.id,
           locationId: selectedLocationId,
-          delta: adjustmentType === "add" ? quantityNum : -quantityNum,
-          reason,
-          notes: notes || undefined,
-          // Absent, not null, when the chip was never tapped — the route reads
-          // key PRESENCE to tell "unstated" from "stated as other".
-          intent: intent ?? undefined,
-          // The capture: identity only on a Remove under `order`, and at most one
-          // of the two (refused above). Absent keys, never empty values.
-          selectedExternalOrderId: sentPick?.id,
-          orderReference: sentReference ?? undefined,
+          delta,
+          // The Note; `reason` is never sent.
+          ...(sentNotes !== "" ? { notes: sentNotes } : {}),
+          // The intent only on Remove, and absent (not null) when the chip was
+          // never tapped — the route reads key PRESENCE to tell "unstated"
+          // from "stated as other".
+          ...(isRemove && intent !== null ? { intent } : {}),
+          // The identity only on Remove + `order`: the picked id XOR the typed
+          // number. Absent keys, never empty values.
+          ...(sentPick !== null
+            ? { selectedExternalOrderId: sentPick.id }
+            : sentReference !== null
+              ? { orderReference: sentReference }
+              : {}),
         }),
       }));
       if (settled === undefined) return;
       const { result } = settled;
 
-      if (sentPick === null && sentReference === null) {
-        toast.success(
-          adjustmentType === "add"
-            ? `Added ${quantityNum} units to ${product.name}`
-            : `Removed ${quantityNum} units from ${product.name}`
-        );
+      const units = `${q} ${unitWord(q)}`;
+      if (!isRemove) {
+        toast.success(`Added ${units} of ${product.name} at ${location}.`);
+      } else if (intent !== "order") {
+        toast.success(`Removed ${units} of ${product.name} at ${location}.`);
+      } else if (sentPick === null && sentReference === null) {
+        toast.success(`Removed ${units} of ${product.name} at ${location} — not linked to an order.`);
       } else if (stampedOrderId(result) !== null) {
         toast.success(
-          `Removed ${quantityNum} units — attributed to order ${sentPick?.orderNumber ?? sentReference}`
+          `Removed ${units} of ${product.name} — linked to order ${sentPick?.orderNumber ?? sentReference}.`,
+        );
+      } else if (sentReference !== null) {
+        // ONE sentence for every way a typed number did not land — unmatched,
+        // ambiguous, not yours, unusable, or the lookup failing. The removal
+        // itself succeeded, and the number is on its audit event. Held for 10 s
+        // (the house idiom for a toast that must be read).
+        toast(
+          `Removed ${units} of ${product.name}. Order ${sentReference} wasn't linked — the number is saved so an admin can link it later.`,
+          { duration: 10000 },
         );
       } else {
-        // ONE sentence for every way the identity did not land — unmatched,
-        // ambiguous, not yours, unusable, or the lookup failing. The removal
-        // itself succeeded; only the stamp was withheld. Held for 10 s (the
-        // house idiom for a toast that must be read): the dialog closes as it
-        // appears, and sonner's 4 s default is gone before it can be read.
-        toast.warning(
-          `Removed ${quantityNum} units — the reference was not matched to an order you can see; the deduction is recorded unattributed`,
-          { duration: 10000 }
-        );
+        // A pick the server did not stamp: never said as linked, and its number
+        // is not on the event (only a typed number is), so nothing is promised.
+        toast.success(`Removed ${units} of ${product.name} at ${location} — not linked to an order.`);
       }
 
       // The host's RAW callback, never the guard (`handleOpenChange`), which
       // drops a close while a submit holds the latch.
       onOpenChange(false);
       onSuccess?.();
-
-      // Reset form
-      setQuantity("");
-      setReason("");
-      setIntent(null);
-      setNotes("");
-      setAdjustmentType("add");
-      clearCapture();
     } catch (error) {
+      if (sentPick !== null && isRejectedPick(error)) {
+        // The picked order can't be used anymore (deleted, or no longer the
+        // operator's). No error toast: keep the number when it is one, drop the
+        // pick, and let the next tap save the number unlinked.
+        const text = ORDER_REFERENCE_SHAPE.test(sentPick.orderNumber) ? sentPick.orderNumber : "";
+        setCapture({ text, picked: null });
+        setRejectedPick(text === "" ? "none" : "number");
+        return;
+      }
       console.error("Error adjusting inventory:", error);
       toast.error(error instanceof Error ? error.message : "Failed to adjust inventory");
     }
@@ -287,12 +312,20 @@ export function QuickAdjustDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-[500px]">
+      <DialogContent
+        className="sm:max-w-[500px] max-h-[85dvh]"
+        aria-describedby={undefined}
+        // A non-empty draft is not thrown away by a stray Escape or a tap
+        // outside; Cancel and the X still discard it.
+        onEscapeKeyDown={(event) => {
+          if (draftNonEmpty) event.preventDefault();
+        }}
+        onInteractOutside={(event) => {
+          if (draftNonEmpty) event.preventDefault();
+        }}
+      >
         <DialogHeader>
-          <DialogTitle>Quick Inventory Adjustment</DialogTitle>
-          <DialogDescription>
-            Adjust the inventory level for this product.
-          </DialogDescription>
+          <DialogTitle>Adjust stock</DialogTitle>
         </DialogHeader>
 
         {/* Product Info */}
@@ -302,205 +335,208 @@ export function QuickAdjustDialog({
             <span>Product</span>
           </div>
           <h4 className="mt-1 text-base font-semibold">{product.name}</h4>
-          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-            <ContextTag icon={<MapPin className="h-3 w-3 text-muted-foreground" />}>
-              {selectedLocationName}
-            </ContextTag>
-            {quantityQuery.isError ? (
-              <span className="text-destructive">Could not load current stock</span>
-            ) : (
-              <ValueChip
-                tone={currentQuantity > 0 ? "positive" : currentQuantity < 0 ? "negative" : "neutral"}
-              >
-                {quantityQuery.isLoading ? "Loading..." : `${currentQuantity} units`}
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs" data-testid="adjust-stock">
+            {location !== null && (
+              <ContextTag icon={<MapPin className="h-3 w-3 text-muted-foreground" />}>
+                {location}
+              </ContextTag>
+            )}
+            {selectedLocationId === null ? (
+              <span className="text-muted-foreground">No location selected.</span>
+            ) : quantityQuery.status === "error" ? (
+              <span className="text-destructive">
+                Couldn&apos;t read current stock — it will be checked when you save.
+              </span>
+            ) : knownStock !== null ? (
+              <ValueChip tone={knownStock > 0 ? "positive" : knownStock < 0 ? "negative" : "neutral"}>
+                {`${knownStock} ${unitWord(knownStock)}`}
               </ValueChip>
+            ) : (
+              <span className="text-muted-foreground">Reading stock…</span>
             )}
           </div>
         </div>
 
-        <div className="space-y-4">
-          {/* Adjustment Type */}
-          <div className="space-y-2">
-            <Label>Adjustment Type</Label>
-            <RadioGroup
-              value={adjustmentType}
-              onValueChange={(value: "add" | "remove") => handleAdjustmentTypeChange(value)}
-            >
-              <div className="flex items-center space-x-2">
-                <RadioGroupItem value="add" id="add" />
-                <label
-                  htmlFor="add"
-                  className="flex items-center gap-2 cursor-pointer"
-                >
-                  <Plus className="h-4 w-4 text-positive" />
-                  Add Stock
-                </label>
-              </div>
-              <div className="flex items-center space-x-2">
-                <RadioGroupItem value="remove" id="remove" />
-                <label
-                  htmlFor="remove"
-                  className="flex items-center gap-2 cursor-pointer"
-                >
-                  <Minus className="h-4 w-4 text-negative" />
-                  Remove Stock
-                </label>
-              </div>
-            </RadioGroup>
-          </div>
-
-          {/* Quantity */}
-          <div className="space-y-2">
-            <Label htmlFor="quantity" className="text-xs font-medium text-muted-foreground">
-              Quantity
-            </Label>
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                className="h-10 w-10 rounded-md border-border"
-                aria-label="Decrease quantity"
-                onClick={handleDecrement}
-                disabled={quantityNum <= 1}
+        {/* While saving, the WHOLE form is frozen (row 105, #13). */}
+        <fieldset disabled={busy} className="min-w-0">
+          <div className="space-y-4">
+            <div className="space-y-4">
+              {/* Direction: a segmented Remove | Add, Remove first. */}
+              <div
+                role="group"
+                aria-label="Remove or add"
+                className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted/30 p-1"
               >
-                <Minus className="h-4 w-4" />
-              </Button>
-              <Input
-                id="quantity"
-                type="number"
-                min="1"
-                inputMode="numeric"
-                pattern="[0-9]*"
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-                placeholder="Enter quantity"
-                className="h-10 flex-1 text-center text-lg font-semibold tabular-nums"
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                className="h-10 w-10 rounded-md border-border"
-                aria-label="Increase quantity"
-                onClick={handleIncrement}
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
-            </div>
-            <p role="status" aria-live="polite" className="text-[11px] text-muted-foreground">
-              {quantityNum > 0 ? (
-                <>
-                  After adjustment,{" "}
-                  <InlineHighlight>{selectedLocationName}</InlineHighlight>{" "}
-                  would have{" "}
-                  <span
-                    className={
-                      adjustedQuantity < 0
-                        ? "text-destructive font-semibold"
-                        : "text-positive font-semibold"
-                    }
+                {(["remove", "add"] as const).map((value) => (
+                  <Button
+                    key={value}
+                    type="button"
+                    variant={direction === value ? "default" : "ghost"}
+                    aria-pressed={direction === value}
+                    className="min-h-[44px]"
+                    onClick={() => handleDirectionChange(value)}
                   >
-                    {adjustedQuantity} units
-                  </span>
-                  .
-                </>
-              ) : null}
-            </p>
-          </div>
+                    {value === "remove" ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+                    {value === "remove" ? "Remove" : "Add"}
+                  </Button>
+                ))}
+              </div>
 
-          {/* T5 (pack REV-3): a POSITIVE delta here is stock arriving with no
-              receipt behind it. The prompt offers /receiving once per session
-              and never blocks — declining submits the identical adjustment. */}
-          <ReceivingRedirectPrompt active={adjustmentType === "add" && quantityNum > 0} />
-
-          {/* Reason */}
-          <div className="space-y-2">
-            <Label htmlFor="reason">Reason (required)</Label>
-            <Input
-              id="reason"
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="e.g., Damaged goods, Inventory count, Customer return"
-            />
-          </div>
-
-          {/* W2-1 (T7): the intent chip, replacing the coded-reason select.
-              Skippable — Confirm below never reads it. */}
-          <IntentChip
-            surface="adjust"
-            value={intent}
-            onChange={handleIntentChange}
-            disabled={isSubmitting}
-          />
-
-          {/* P2-B3-1: the capture — ONLY on a Remove under `order`. Pick the
-              order from the search, or type its number; never both. */}
-          {captureActive && (
-            <div className="space-y-4" data-testid="order-capture">
-              <OrderLookup
-                value={ownCapture.picked}
-                onChange={handlePick}
-                disabled={isSubmitting}
-              />
-
+              {/* Quantity */}
               <div className="space-y-2">
-                <Label htmlFor="order-reference">Or type the order number</Label>
-                <Input
-                  id="order-reference"
-                  value={ownCapture.reference}
-                  onChange={(e) => handleReferenceChange(e.target.value)}
-                  placeholder="e.g. 12345"
-                  inputMode="numeric"
-                  autoComplete="off"
-                  maxLength={40}
-                  aria-invalid={referenceShapeInvalid}
-                  aria-describedby={referenceShapeInvalid ? "order-reference-hint" : undefined}
-                  disabled={isSubmitting}
-                />
-                {referenceShapeInvalid && (
-                  <p id="order-reference-hint" className="text-[11px] text-destructive">
-                    {ORDER_REFERENCE_HINT}
+                <Label htmlFor="quantity" className="text-xs font-medium text-muted-foreground">
+                  {isRemove ? "Units to remove" : "Units to add"}
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-11 w-11 shrink-0 rounded-md border-border"
+                    aria-label="Decrease quantity"
+                    onClick={handleDecrement}
+                    disabled={q === null || q <= 1}
+                  >
+                    <Minus className="h-4 w-4" />
+                  </Button>
+                  <Input
+                    id="quantity"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    maxLength={6}
+                    value={quantity}
+                    onChange={(e) => handleQuantityInput(e.target.value)}
+                    onBlur={() => setQuantityRefused(false)}
+                    className="h-11 flex-1 text-center text-lg font-semibold tabular-nums"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-11 w-11 shrink-0 rounded-md border-border"
+                    aria-label="Increase quantity"
+                    onClick={handleIncrement}
+                  >
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+                {quantityRefused && (
+                  <p role="status" data-testid="quantity-refused" className="text-[11px] text-destructive">
+                    Whole units only.
+                  </p>
+                )}
+                {preview !== null && (
+                  <p data-testid="quantity-preview" className="text-[11px] text-muted-foreground">
+                    After this, {location} will have{" "}
+                    <span
+                      className={cn(
+                        "font-semibold",
+                        preview < 0 ? "text-destructive" : "text-positive",
+                      )}
+                    >
+                      {`${preview} ${unitWord(preview)}`}
+                    </span>
+                    .
                   </p>
                 )}
               </div>
 
-              {captureConflict && (
-                <p role="alert" data-testid="order-capture-conflict" className="text-sm text-destructive">
-                  {CAPTURE_BOTH_SENTENCE}
+              {/* W2-1 (T7): the intent chip — on Remove only. Skippable; it never
+                  blocks the save. */}
+              {isRemove && (
+                <IntentChip
+                  surface="adjust"
+                  layout="row"
+                  value={intent}
+                  onChange={handleIntentChange}
+                  disabled={busy}
+                />
+              )}
+
+              {/* The capture: ONLY on a Remove under `order`. */}
+              {captureLive && (
+                <OrderNumberField
+                  productId={product.id}
+                  quantity={q}
+                  value={capture}
+                  onChange={handleCaptureChange}
+                  disabled={busy}
+                  focusOnMount={focusOrderFieldRef.current}
+                />
+              )}
+
+              {/* T5 (pack REV-3): a POSITIVE delta here is stock arriving with no
+                  receipt behind it. The prompt offers /receiving once per session
+                  and never blocks — declining submits the identical adjustment. */}
+              {!isRemove && <ReceivingRedirectPrompt active={q !== null && q > 0} />}
+
+              {/* The Note: optional, shown in the product's history to admins and its author. */}
+              <div className="space-y-2">
+                <Label htmlFor="note">Note (optional)</Label>
+                <Textarea
+                  id="note"
+                  value={notes}
+                  onChange={(e) => handleNotesChange(e.target.value)}
+                  placeholder="Anything someone reviewing this should know"
+                  maxLength={2000}
+                  rows={3}
+                  aria-describedby="note-helper"
+                />
+                <p id="note-helper" className="text-[11px] text-muted-foreground">
+                  Seen by admins and by you.
+                </p>
+              </div>
+            </div>
+
+            {/* The sticky footer: what the tap will do, and the tap. */}
+            <div
+              data-testid="adjust-footer"
+              className="sticky bottom-0 -mx-4 px-4 sm:-mx-6 sm:px-6 -mb-4 pb-4 sm:-mb-6 sm:pb-6 bg-background border-t pt-3"
+            >
+              <p data-testid="adjust-summary" className="break-words text-sm font-medium">
+                {summary}
+              </p>
+              {orderLine !== null && (
+                <p data-testid="adjust-order-line" className="break-words text-[11px] text-muted-foreground">
+                  {orderLine}
                 </p>
               )}
+              {message !== null && (
+                <p
+                  data-testid="adjust-message"
+                  role="status"
+                  aria-live="polite"
+                  className={cn(
+                    "mt-1 break-words text-[11px]",
+                    blockers.length > 0 ? "text-destructive" : "text-warning",
+                  )}
+                >
+                  {message}
+                </p>
+              )}
+              <div className="mt-3 flex justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="min-h-[44px]"
+                  onClick={() => handleOpenChange(false)}
+                  disabled={busy}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  className="min-h-[44px]"
+                  onClick={handleSubmit}
+                  disabled={blockers.length > 0 || busy}
+                >
+                  {actionLabel}
+                </Button>
+              </div>
             </div>
-          )}
-
-          {/* Notes */}
-          <div className="space-y-2">
-            <Label htmlFor="notes">Additional Notes (optional)</Label>
-            <Textarea
-              id="notes"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Any additional details..."
-              rows={3}
-            />
           </div>
-        </div>
-
-        <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => handleOpenChange(false)}
-            disabled={isSubmitting}
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={handleSubmit}
-            disabled={!isValid || isSubmitting}
-          >
-            {isSubmitting ? "Adjusting..." : "Confirm Adjustment"}
-          </Button>
-        </DialogFooter>
+        </fieldset>
       </DialogContent>
     </Dialog>
   );

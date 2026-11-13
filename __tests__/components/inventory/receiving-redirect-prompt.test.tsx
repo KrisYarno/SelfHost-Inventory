@@ -153,7 +153,8 @@ describe("ReceivingRedirectPrompt", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Surface 1 — the quick adjust, ADD mode only
+// Surface 1 — the quick adjust, ADD mode only. § P2-B3-1R: the dialog opens on
+// Remove, so every Add arm selects Add first; the quantity is "Units to add".
 // ---------------------------------------------------------------------------
 
 describe("QuickAdjustDialog (add mode)", () => {
@@ -163,8 +164,9 @@ describe("QuickAdjustDialog (add mode)", () => {
     const user = userEvent.setup();
     wrap(<QuickAdjustDialog open onOpenChange={() => {}} product={product} />);
 
+    await user.click(screen.getByRole("button", { name: "Add" }));
     expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
-    await user.type(screen.getByLabelText("Quantity"), "5");
+    await user.type(screen.getByLabelText("Units to add"), "5");
 
     expect(screen.getByText(PROMPT)).toBeInTheDocument();
   });
@@ -173,8 +175,8 @@ describe("QuickAdjustDialog (add mode)", () => {
     const user = userEvent.setup();
     wrap(<QuickAdjustDialog open onOpenChange={() => {}} product={product} />);
 
-    await user.click(screen.getByLabelText(/remove stock/i));
-    await user.type(screen.getByLabelText("Quantity"), "5");
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+    await user.type(screen.getByLabelText("Units to remove"), "5");
 
     expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
   });
@@ -184,18 +186,19 @@ describe("QuickAdjustDialog (add mode)", () => {
     const fetchFn = global.fetch as jest.Mock;
     wrap(<QuickAdjustDialog open onOpenChange={() => {}} product={product} />);
 
-    await user.type(screen.getByLabelText("Quantity"), "5");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.type(screen.getByLabelText("Units to add"), "5");
     await user.click(screen.getByRole("button", { name: /no|continue/i }));
-    await user.type(screen.getByLabelText("Reason (required)"), "restock");
-    await user.click(screen.getByRole("button", { name: /confirm adjustment/i }));
+    await user.type(screen.getByLabelText("Note (optional)"), "restock");
+    await user.click(screen.getByRole("button", { name: "Add 5 units" }));
 
     await waitFor(() => expect(writeCalls(fetchFn).length).toBe(1));
     const [, init] = writeCalls(fetchFn)[0];
-    expect(JSON.parse(String((init as RequestInit).body))).toMatchObject({
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
       productId: 42,
       locationId: 2,
       delta: 5,
-      reason: "restock",
+      notes: "restock",
     });
   });
 });
@@ -240,7 +243,9 @@ describe("StockInDialog", () => {
     const first = wrap(
       <QuickAdjustDialog open onOpenChange={() => {}} product={product} />,
     );
-    await user.type(screen.getByLabelText("Quantity"), "5");
+    // § P2-B3-1R (the QuickAdjust part only): select Add first.
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.type(screen.getByLabelText("Units to add"), "5");
     expect(screen.getByText(PROMPT)).toBeInTheDocument();
     first.unmount();
 

@@ -2,6 +2,7 @@
 
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
 import {
   DEDUCTION_INTENTS,
   INTENT_HINT,
@@ -41,14 +42,61 @@ interface IntentChipProps {
   value: DeductionIntent | null;
   onChange: (value: DeductionIntent) => void;
   disabled?: boolean;
+  /**
+   * `stack` (the default; the workbench): one option per line, each with its
+   * hint. `row` (the adjust dialog, § P2-B3-1R R-b.2): the options side by side
+   * as 44 px targets, and ONE hint line — the selected option's — under them.
+   */
+  layout?: "stack" | "row";
 }
 
 /** The group's accessible name — also how tests address the chip specifically. */
 export const INTENT_CHIP_GROUP_LABEL = "What was this for?";
 
-export function IntentChip({ surface, value, onChange, disabled }: IntentChipProps) {
+export function IntentChip({ surface, value, onChange, disabled, layout = "stack" }: IntentChipProps) {
   const options: readonly DeductionIntent[] =
     surface === "workbench" ? WORKBENCH_INTENTS : DEDUCTION_INTENTS;
+
+  if (layout === "row") {
+    return (
+      <div className="space-y-2">
+        <Label className="text-xs font-medium text-muted-foreground">
+          {INTENT_CHIP_GROUP_LABEL} (optional)
+        </Label>
+        <RadioGroup
+          // Named for the same reason as the stack below; "" keeps it controlled.
+          aria-label={INTENT_CHIP_GROUP_LABEL}
+          value={value ?? ""}
+          onValueChange={(next: string) => onChange(next as DeductionIntent)}
+          disabled={disabled}
+          className="flex flex-wrap gap-2"
+        >
+          {options.map((option) => (
+            <label
+              key={option}
+              htmlFor={`intent-${surface}-${option}`}
+              className={cn(
+                "flex min-h-[44px] cursor-pointer items-center gap-2 rounded-md border px-3",
+                value === option ? "border-primary bg-primary/10" : "border-border",
+              )}
+            >
+              <RadioGroupItem
+                value={option}
+                id={`intent-${surface}-${option}`}
+                aria-label={INTENT_LABEL[option]}
+              />
+              <span className="text-sm">{INTENT_LABEL[option]}</span>
+            </label>
+          ))}
+        </RadioGroup>
+        {value !== null && (
+          <p data-testid="intent-chip-hint" className="text-[11px] text-muted-foreground">
+            {INTENT_HINT[value]}
+          </p>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-2">

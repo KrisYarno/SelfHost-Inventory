@@ -41,8 +41,8 @@ import {
 
 // The read transport (`ApiError`, `getJSON`) and the order search live in their
 // own leaf modules since reconciliation Part 2 B3-1b — the adjust dialog's
-// order lookup reads through them without importing this module. Re-exported
-// here so every existing importer compiles unchanged.
+// order number field reads through them without importing this module.
+// Re-exported here so every existing importer compiles unchanged.
 export type { ApiError };
 export { useOrderSearch } from "@/hooks/use-order-search";
 export type { OrderSearchResult, OrderSearchResponse } from "@/hooks/use-order-search";

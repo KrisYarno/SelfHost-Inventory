@@ -22,8 +22,10 @@
  * resolver, the picker and the adjust dialog each IMPORT it from there. What
  * used to be an equal-copies pin on the literal is now an IMPORT pin: every
  * reader imports the leaf, and none of them declares its own. Since B3-1 FR1
- * the order lookup reads the bar too, and the leaf also holds the ONE spelling
- * of the hint the dialog and the lookup show when a typed number fails it.
+ * the order lookup read the bar too; since § P2-B3-1R (R-b) the ONE order number
+ * field that replaced it does, and the old shared hint (`ORDER_REFERENCE_HINT`)
+ * is GONE — the field states the bar in its own sentence, and nothing imports
+ * or copies the old one.
  *
  * When the bar legitimately changes, it changes in the leaf; when the
  * normalisation changes, both copies of the function change in the same commit
@@ -39,7 +41,7 @@ const SOURCE = 'lib/orders/resolve-order-reference.ts';
 const MIRROR = 'components/admin/reconciliation/attribute-picker.tsx';
 const LEAF = 'lib/orders/order-reference-shape.ts';
 const DIALOG = 'components/inventory/quick-adjust-dialog.tsx';
-const LOOKUP = 'components/inventory/order-lookup.tsx';
+const FIELD = 'components/inventory/order-number-field.tsx';
 
 function read(rel: string): string {
   return fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
@@ -97,14 +99,14 @@ const sourceText = read(SOURCE);
 const mirrorText = read(MIRROR);
 const leafText = read(LEAF);
 const dialogText = read(DIALOG);
-const lookupText = read(LOOKUP);
+const fieldText = read(FIELD);
 
 /** Every reader of the bar, by path. */
 const IMPORTERS: Array<[string, string]> = [
   [SOURCE, sourceText],
   [MIRROR, mirrorText],
   [DIALOG, dialogText],
-  [LOOKUP, lookupText],
+  [FIELD, fieldText],
 ];
 
 describe('the picker mirrors the server normalisation', () => {
@@ -126,12 +128,19 @@ describe('the picker mirrors the server normalisation', () => {
     expect(shapeLiteral(text)).toBeNull();
   });
 
-  it('the hint has ONE spelling: the leaf declares it; the dialog and the lookup import it and copy no text (B3-1 FR1)', () => {
-    expect(leafText).toContain('export const ORDER_REFERENCE_HINT = "digits only, without #";');
-    for (const text of [dialogText, lookupText]) {
-      expect(importsHintFromLeaf(text)).toBe(true);
+  it('the old hint is GONE (§ P2-B3-1R R-b.3): the leaf no longer declares it; no reader imports it or copies its text', () => {
+    expect(leafText).not.toContain('ORDER_REFERENCE_HINT');
+    expect(leafText).not.toContain('digits only, without #');
+    for (const [, text] of IMPORTERS) {
+      expect(importsHintFromLeaf(text)).toBe(false);
+      expect(text).not.toContain('ORDER_REFERENCE_HINT');
       expect(text).not.toContain('digits only, without #');
     }
+  });
+
+  it('the field states the bar in its own sentence, and the dialog blocks on it in its own', () => {
+    expect(fieldText).toContain('Order numbers are 1–20 digits.');
+    expect(dialogText).toContain('Order number: digits only — fix it or clear it.');
   });
 
   it('the normalisation lines are IDENTICAL text — signature and body', () => {
@@ -175,6 +184,15 @@ describe('the comparison bites', () => {
     );
     expect(drifted).not.toBe(mirrorText);
     expect(importsShapeFromLeaf(drifted)).toBe(false);
+  });
+
+  it('a reader that imports the old hint again is caught', () => {
+    const drifted = dialogText.replace(
+      'import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";',
+      'import { ORDER_REFERENCE_HINT, ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";',
+    );
+    expect(drifted).not.toBe(dialogText);
+    expect(importsHintFromLeaf(drifted)).toBe(true);
   });
 
   it('a leaf that gains an import is caught', () => {

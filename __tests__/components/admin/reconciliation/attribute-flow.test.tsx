@@ -137,23 +137,28 @@ function setSearch(
     internalStatus: string;
     externalCreatedAt: string | null;
     itemCount: number;
+    store: string;
   }>,
   moreCount = 0,
 ) {
   useOrderSearchMock.mockReturnValue({
-    data: { orders, moreCount },
+    data: { orders, moreCount, exactCount: orders.filter((o) => o.orderNumber === "1009").length },
     isLoading: false,
     isError: false,
   });
 }
+
+const THIS_YEAR = new Date().getFullYear();
 
 const ORDER_1009 = {
   id: "ord-2",
   orderNumber: "1009",
   platform: "woocommerce",
   internalStatus: "PROCESSING",
-  externalCreatedAt: "2026-08-19T09:00:00.000Z",
+  // Midday UTC: the same calendar day in any test machine's zone.
+  externalCreatedAt: `${THIS_YEAR}-08-19T12:00:00.000Z`,
   itemCount: 4,
+  store: "North Shop",
 };
 
 function renderPicker(row: AttributionRow, onOpenChange = jest.fn()) {
@@ -230,6 +235,70 @@ describe("the picker", () => {
         "≤ 20 results — narrow the number",
       ),
     );
+  });
+
+  // § P2-B3-1R (R-b.3): the rows, the empty sentence, the seed, the `#`.
+  it("a row reads `{orderNumber} · {store} · placed {date} · {status}` — no `#`", async () => {
+    const user = userEvent.setup();
+    setSearch([ORDER_1009, { ...ORDER_1009, id: "ord-3", orderNumber: "21009", externalCreatedAt: "2019-03-05T12:00:00.000Z" }]);
+    renderPicker(makeRow());
+    await user.type(screen.getByLabelText(/order number/i), "1009");
+
+    const row = await screen.findByTestId("order-result-ord-2");
+    expect(row.textContent).toBe("1009 · North Shop · placed Aug 19 · processing");
+    expect(screen.getByTestId("order-result-ord-3").textContent).toBe(
+      "21009 · North Shop · placed Mar 5, 2019 · processing",
+    );
+    expect(row.textContent).not.toContain("#");
+  });
+
+  it("an empty answer says `No order number contains what you typed.`", async () => {
+    const user = userEvent.setup();
+    setSearch([]);
+    renderPicker(makeRow());
+    await user.type(screen.getByLabelText(/order number/i), "777");
+    expect(await screen.findByText("No order number contains what you typed.")).toBeInTheDocument();
+    expect(screen.queryByText("No order number starts with what you typed.")).toBeNull();
+  });
+
+  it("searches with NO product and the default page (the hook's one-argument call)", async () => {
+    const user = userEvent.setup();
+    renderPicker(makeRow());
+    await user.type(screen.getByLabelText(/order number/i), "1009");
+    await waitFor(() => expect(useOrderSearchMock).toHaveBeenCalledWith("1009"));
+    for (const call of useOrderSearchMock.mock.calls) expect(call).toHaveLength(1);
+  });
+
+  it("a leading `#` is stripped as typed, in view", async () => {
+    const user = userEvent.setup();
+    renderPicker(makeRow());
+    await user.type(screen.getByLabelText(/order number/i), "#1009");
+    expect(screen.getByLabelText(/order number/i)).toHaveValue("1009");
+    await waitFor(() => expect(useOrderSearchMock).toHaveBeenCalledWith("1009"));
+    expect(useOrderSearchMock.mock.calls.map((call) => call[0])).not.toContain("#1009");
+  });
+
+  it("the seed applies ONLY while the field is empty — what the admin typed first wins", async () => {
+    const user = userEvent.setup();
+    // The drill-down has not answered yet: no seed.
+    setDetail(undefined);
+    const { rerender } = render(<AttributePicker row={makeRow()} open onOpenChange={jest.fn()} />);
+    await user.type(screen.getByLabelText(/order number/i), "2044");
+
+    // Now it answers with a typed reference.
+    setDetail(
+      makeDetail({
+        auditEvent: {
+          id: 5,
+          actionType: "INVENTORY_DEDUCT",
+          createdAt: "2026-08-20T10:00:00.000Z",
+          orderReference: "1009",
+          label: "from the audit event (free text, admin-visible on /admin/logs)",
+        },
+      }),
+    );
+    rerender(<AttributePicker row={makeRow()} open onOpenChange={jest.fn()} />);
+    expect(screen.getByLabelText(/order number/i)).toHaveValue("2044");
   });
 
   it("an R2b batch is LOCKED to the order its fulfillment already named", () => {

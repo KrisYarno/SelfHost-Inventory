@@ -27,6 +27,7 @@ jest.mock("sonner", () => ({
 }));
 
 import { QuickAdjustDialog } from "@/components/inventory/quick-adjust-dialog";
+import { IntentChip } from "@/components/inventory/intent-chip";
 
 let fetchMock: jest.Mock;
 
@@ -57,18 +58,20 @@ function renderDialog() {
 }
 
 /**
- * The chip's own radiogroup. The dialog has a SECOND one (Add / Remove stock),
- * so every chip assertion scopes to this group by its accessible name — an
- * unscoped getAllByRole("radio") would silently conflate the two.
+ * The chip's own radiogroup, addressed by its accessible name — scoped, so no
+ * other control in the dialog can be conflated with it.
  */
 const chipGroup = () => within(screen.getByRole("radiogroup", { name: "What was this for?" }));
 
-/** Fill the fields the dialog has always required, then submit. */
+/**
+ * Fill the one field the dialog requires, then submit. § P2-B3-1R: the dialog
+ * opens on Remove (the only direction the chip shows on), and the required
+ * Reason is gone.
+ */
 async function submitWith(user: ReturnType<typeof userEvent.setup>, chip?: string) {
-  await user.type(screen.getByLabelText("Quantity"), "3");
-  await user.type(screen.getByLabelText("Reason (required)"), "tested bad");
+  await user.type(screen.getByLabelText("Units to remove"), "3");
   if (chip) await user.click(chipGroup().getByRole("radio", { name: chip }));
-  await user.click(screen.getByRole("button", { name: /confirm adjustment/i }));
+  await user.click(screen.getByRole("button", { name: "Remove 3 units" }));
   await waitFor(() =>
     expect(
       fetchMock.mock.calls.some((c) => String(c[0]) === "/api/inventory/adjust")
@@ -127,5 +130,45 @@ describe("quick-adjust — the chip never blocks", () => {
 
     expect(body.intent).toBe("damage-loss");
     expect("reasonCode" in body).toBe(false);
+  });
+});
+
+describe("the chip's two layouts (§ P2-B3-1R R-b.2)", () => {
+  it("an explicit `stack` renders exactly what the default renders (the workbench's layout is unchanged)", () => {
+    const { container: byDefault, unmount } = render(
+      <IntentChip surface="workbench" value="order" onChange={() => {}} />
+    );
+    const defaultHtml = byDefault.innerHTML;
+    unmount();
+    const { container: explicit } = render(
+      <IntentChip surface="workbench" value="order" onChange={() => {}} layout="stack" />
+    );
+    expect(explicit.innerHTML).toBe(defaultHtml);
+    // The stack shows every option's hint.
+    expect(screen.getByText("Went out against a customer order")).toBeInTheDocument();
+    expect(screen.getByText("Not classified — recorded as-is")).toBeInTheDocument();
+  });
+
+  it("`row`: the options side by side as 44 px targets, and ONLY the selected option's hint", () => {
+    const { rerender } = render(<IntentChip surface="adjust" value={null} onChange={() => {}} layout="row" />);
+    expect(chipGroup().getAllByRole("radio")).toHaveLength(3);
+    expect(screen.getByRole("radiogroup", { name: "What was this for?" })).toHaveClass("flex", "flex-wrap");
+    for (const radio of chipGroup().getAllByRole("radio")) {
+      expect(radio.closest("label")).toHaveClass("min-h-[44px]");
+    }
+    expect(screen.queryByTestId("intent-chip-hint")).toBeNull();
+
+    rerender(<IntentChip surface="adjust" value="order" onChange={() => {}} layout="row" />);
+    expect(screen.getByTestId("intent-chip-hint").textContent).toBe("Went out against a customer order");
+    expect(screen.queryByText("Damaged, expired or otherwise lost — counts as shrinkage")).toBeNull();
+    expect(screen.queryByText("Not classified — recorded as-is")).toBeNull();
+  });
+
+  it("`row`: a tap on the option's text selects it", async () => {
+    const user = userEvent.setup();
+    const onChange = jest.fn();
+    render(<IntentChip surface="adjust" value={null} onChange={onChange} layout="row" />);
+    await user.click(screen.getByText("Damage / loss"));
+    expect(onChange).toHaveBeenCalledWith("damage-loss");
   });
 });

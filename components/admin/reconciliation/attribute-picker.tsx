@@ -6,12 +6,14 @@
  *
  * Two modes, and the difference between them is the whole point:
  *
- *   - FREE: the admin types an order NUMBER and the server answers with at most
- *     twenty matches and an exact count of what it left off. The field is
- *     PRE-SEEDED with the reference the operator typed at the deduction when
- *     that reference looks like an order number — the commonest correction on
- *     this surface is "the number they typed was right, the resolver just could
- *     not use it".
+ *   - FREE: the admin types an order NUMBER — any part of it (§ P2-B3-1R) — and
+ *     the server answers with at most twenty matches, ranked exact first, and an
+ *     exact count of what it left off. The field is PRE-SEEDED with the
+ *     reference the operator typed at the deduction when that reference looks
+ *     like an order number and the field is still empty — the commonest
+ *     correction on this surface is "the number they typed was right, the
+ *     resolver just could not use it". A leading `#` is stripped as typed, in
+ *     view: order numbers are stored and shown without one.
  *   - LOCKED (R2b): the batch's own fulfillment already named an order. A
  *     manual attribution may COMPLETE that stamp, never redirect it (SETTLED
  *     11), so the field is read-only and the target is the event's order.
@@ -25,6 +27,7 @@ import * as React from "react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { formatOrderDate, formatOrderStatus } from "@/components/inventory/order-number-field";
 import { useDebounce } from "@/hooks/use-debounce";
 import { useBatchDetail, useOrderSearch } from "@/hooks/use-admin";
 import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
@@ -86,7 +89,9 @@ export function AttributePicker({
   React.useEffect(() => {
     if (seeded.current || seed === null) return;
     seeded.current = true;
-    setQuery(seed);
+    // Only into an EMPTY field: the drill-down can answer after the admin has
+    // started typing, and what they typed wins.
+    setQuery((current) => (current === "" ? seed : current));
   }, [seed]);
 
   const debounced = useDebounce(query, SEARCH_DEBOUNCE_MS);
@@ -114,7 +119,7 @@ export function AttributePicker({
             id="attribute-order-number"
             value={lock ? lock.orderRecordId : query}
             readOnly={lock !== null}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => setQuery(event.target.value.replace(/^#/, ""))}
             placeholder="Type an order number"
             inputMode="numeric"
           />
@@ -148,15 +153,17 @@ export function AttributePicker({
                   })
                 }
               >
-                <span className="font-medium">#{order.orderNumber}</span>{" "}
+                <span className="font-medium">{order.orderNumber}</span>
                 <span className="text-body-sm text-muted-foreground">
-                  {order.platform} · {order.internalStatus} · {order.itemCount} items
+                  {" "}
+                  · {order.store} · placed {formatOrderDate(order.externalCreatedAt)} ·{" "}
+                  {formatOrderStatus(order.internalStatus)}
                 </span>
               </button>
             ))}
             {search.data && search.data.orders.length === 0 && (
               <p className="text-body-sm text-muted-foreground">
-                No order number starts with what you typed.
+                No order number contains what you typed.
               </p>
             )}
           </div>

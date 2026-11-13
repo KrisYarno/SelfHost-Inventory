@@ -346,11 +346,17 @@ export default function InventoryPage() {
         </TabsContent>
       </Tabs>
 
-      {/* Quick Adjust Dialog */}
-      {selectedProduct && (
+      {/* Quick Adjust Dialog — mounted PER OPEN (pack § P2-B3-1R, R-b.2 / M-a.3):
+          rendered only while it is open for a product, and the product is
+          nulled when it closes, so every open is a fresh mount with an empty
+          draft. Nothing typed for one product can reach another's removal. */}
+      {selectedProduct && showQuickAdjust && (
         <QuickAdjustDialog
           open={showQuickAdjust}
-          onOpenChange={setShowQuickAdjust}
+          onOpenChange={(open) => {
+            setShowQuickAdjust(open);
+            if (!open) setSelectedProduct(null);
+          }}
           product={selectedProduct}
         />
       )}

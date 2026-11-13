@@ -1,5 +1,5 @@
 /** @jest-environment jsdom */
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import * as React from "react";
 
@@ -111,4 +111,61 @@ test("dialogs receive EXACTLY {id, name} as product", async () => {
   await waitFor(() => expect(dialogProps.stockIn.length).toBeGreaterThan(0));
   const last = dialogProps.stockIn[dialogProps.stockIn.length - 1] as { product?: unknown };
   expect(last.product).toEqual({ id: 1, name: "P1" });
+});
+
+// § P2-B3-1R (R-b.2 / M-a.3): the ADJUST dialog is mounted PER OPEN — rendered
+// only while it is open for a product, and the product nulled when it closes —
+// so every open is a fresh mount with an empty draft. (The Stock In and
+// Transfer mounts are M-b1's.)
+test("the adjust dialog is not rendered while closed, mounts per open, and its close nulls the product", async () => {
+  mockFetch();
+  wrap();
+  const trigger = await screen.findByRole("button", { name: /Cat1/ });
+  fireEvent.click(trigger); // expand accordion
+  const adjustBtn = await screen.findByRole("button", { name: /^adjust$/i });
+
+  // Closed: never rendered, not even with open=false.
+  expect(dialogProps.adjust).toHaveLength(0);
+
+  fireEvent.click(adjustBtn);
+  await waitFor(() => expect(dialogProps.adjust.length).toBeGreaterThan(0));
+  type AdjustProps = { open: boolean; product: unknown; onOpenChange: (open: boolean) => void };
+  const first = dialogProps.adjust[dialogProps.adjust.length - 1] as AdjustProps;
+  expect(first.open).toBe(true);
+  expect(first.product).toEqual({ id: 1, name: "P1" });
+
+  // The probe bites: while the product is set, a page re-render renders the
+  // dialogs that hang off it (Stock In, closed) again.
+  const stockInBefore = dialogProps.stockIn.length;
+  fireEvent.click(trigger);
+  fireEvent.click(trigger);
+  expect(dialogProps.stockIn.length).toBeGreaterThan(stockInBefore);
+
+  // Its close: unmounted, and the product nulled — so a page re-render renders
+  // neither the adjust dialog nor anything else that hangs off the product.
+  act(() => first.onOpenChange(false));
+  const adjustRendersAfterClose = dialogProps.adjust.length;
+  const stockInRendersAfterClose = dialogProps.stockIn.length;
+  fireEvent.click(trigger);
+  fireEvent.click(trigger);
+  expect(dialogProps.adjust.length).toBe(adjustRendersAfterClose);
+  expect(dialogProps.stockIn.length).toBe(stockInRendersAfterClose);
+
+  // Reopen: rendered again for the product.
+  fireEvent.click(await screen.findByRole("button", { name: /^adjust$/i }));
+  await waitFor(() => expect(dialogProps.adjust.length).toBeGreaterThan(adjustRendersAfterClose));
+  const second = dialogProps.adjust[dialogProps.adjust.length - 1] as AdjustProps;
+  expect(second.open).toBe(true);
+  expect(second.product).toEqual({ id: 1, name: "P1" });
+});
+
+test("another dialog's product does not mount the adjust dialog (closed is never rendered)", async () => {
+  mockFetch();
+  wrap();
+  fireEvent.click(await screen.findByRole("button", { name: /Cat1/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /stock in/i }));
+  await waitFor(() => expect(dialogProps.stockIn.length).toBeGreaterThan(0));
+  // The product is set for Stock In; the adjust dialog is still not rendered,
+  // so its next open is a fresh mount, never one carried over from this one.
+  expect(dialogProps.adjust).toHaveLength(0);
 });

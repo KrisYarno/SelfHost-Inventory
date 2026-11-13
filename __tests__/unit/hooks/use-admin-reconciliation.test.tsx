@@ -376,12 +376,12 @@ describe("useMoveBatch — no answer means no outcome", () => {
 // ONE `enabled` rule, the AbortSignal forwarded, the same error shape.
 // ---------------------------------------------------------------------------
 
-describe("the moved order search — re-exported, unchanged", () => {
+describe("the moved order search — re-exported; the key re-cut in § P2-B3-1R (R-b.3)", () => {
   it("use-admin re-exports the SAME hook the leaf module defines", () => {
     expect(useOrderSearch).toBe(leafUseOrderSearch);
   });
 
-  it("keeps the key [admin, reconciliation, orders, q], forwards the signal, and carries `note`", async () => {
+  it("keys [admin, reconciliation, orders, q, productId ?? null, limit ?? 20], forwards the signal, and carries `note`", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({ orders: [], moreCount: 0, note: "no order matching that number in your companies" }),
@@ -392,8 +392,11 @@ describe("the moved order search — re-exported, unchanged", () => {
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(
-      client.getQueryCache().find({ queryKey: ["admin", "reconciliation", "orders", "10 9"], exact: true }),
+      client
+        .getQueryCache()
+        .find({ queryKey: ["admin", "reconciliation", "orders", "10 9", null, 20], exact: true }),
     ).toBeDefined();
+    // Absent options stay off the URL: the route's defaults are the key's `null` / `20`.
     expect(mockFetch.mock.calls[0][0]).toBe("/api/reconciliation/orders/search?q=10%209");
     expect((mockFetch.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
     const data: OrderSearchResponse | undefined = result.current.data;
@@ -420,7 +423,7 @@ describe("the moved order search — re-exported, unchanged", () => {
     });
   });
 
-  it("the row type is the six-field projection", () => {
+  it("the row type is the seven-field projection plus the optional `thisProduct` (R-a.1)", () => {
     const row: OrderSearchResult = {
       id: "ord-1",
       orderNumber: "1001",
@@ -428,10 +431,87 @@ describe("the moved order search — re-exported, unchanged", () => {
       internalStatus: "pending",
       externalCreatedAt: null,
       itemCount: 3,
+      store: "North Shop",
     };
     expect(Object.keys(row).sort()).toEqual(
-      ["externalCreatedAt", "id", "internalStatus", "itemCount", "orderNumber", "platform"],
+      ["externalCreatedAt", "id", "internalStatus", "itemCount", "orderNumber", "platform", "store"],
     );
+    const withProduct: OrderSearchResult = { ...row, thisProduct: { orderedUnits: 2, uncheckedLines: 0 } };
+    expect(withProduct.thisProduct).toEqual({ orderedUnits: 2, uncheckedLines: 0 });
+    const answer: OrderSearchResponse = { orders: [row], moreCount: 0, exactCount: 1 };
+    expect(answer.exactCount).toBe(1);
+  });
+
+  it("a product and a page ride in the KEY and on the URL", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ orders: [], moreCount: 0, exactCount: 0 }) });
+    const { client, Wrapper } = harness();
+
+    const { result } = renderHook(() => useOrderSearch("1009", { productId: 42, limit: 5 }), {
+      wrapper: Wrapper,
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/reconciliation/orders/search?q=1009&productId=42&limit=5");
+    expect(
+      client.getQueryCache().find({ queryKey: ["admin", "reconciliation", "orders", "1009", 42, 5], exact: true }),
+    ).toBeDefined();
+  });
+
+  it("a product alone keys the default page (20) and leaves `limit` off the URL", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ orders: [], moreCount: 0, exactCount: 0 }) });
+    const { client, Wrapper } = harness();
+
+    const { result } = renderHook(() => useOrderSearch("1009", { productId: 42 }), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/reconciliation/orders/search?q=1009&productId=42");
+    expect(
+      client.getQueryCache().find({ queryKey: ["admin", "reconciliation", "orders", "1009", 42, 20], exact: true }),
+    ).toBeDefined();
+  });
+
+  it("the same text for another product is ANOTHER query — never the first one's answer", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ orders: [], moreCount: 0, exactCount: 0 }) });
+    const { Wrapper } = harness();
+
+    function Both() {
+      const a = useOrderSearch("1009", { productId: 42, limit: 5 });
+      const b = useOrderSearch("1009", { productId: 43, limit: 5 });
+      return { a, b };
+    }
+    const { result } = renderHook(() => Both(), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.a.isSuccess && result.current.b.isSuccess).toBe(true));
+    expect(mockFetch.mock.calls.map((call) => call[0]).sort()).toEqual([
+      "/api/reconciliation/orders/search?q=1009&productId=42&limit=5",
+      "/api/reconciliation/orders/search?q=1009&productId=43&limit=5",
+    ]);
+  });
+
+  it("NO placeholderData (R-b.1): a new key has no data until ITS answer arrives", async () => {
+    let answerSecond!: (value: unknown) => void;
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ orders: [], moreCount: 0, exactCount: 1 }) })
+      .mockImplementationOnce(() => new Promise((resolve) => (answerSecond = resolve)));
+    const { client, Wrapper } = harness();
+
+    const { result, rerender } = renderHook(({ q }) => leafUseOrderSearch(q, { productId: 42, limit: 5 }), {
+      wrapper: Wrapper,
+      initialProps: { q: "1009" },
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    rerender({ q: "10091" });
+    expect(result.current.status).toBe("pending");
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.isPlaceholderData).toBe(false);
+    const query = client
+      .getQueryCache()
+      .find({ queryKey: ["admin", "reconciliation", "orders", "10091", 42, 5], exact: true });
+    expect((query?.options as { placeholderData?: unknown } | undefined)?.placeholderData).toBeUndefined();
+
+    answerSecond({ ok: true, json: async () => ({ orders: [], moreCount: 0, exactCount: 0 }) });
+    await waitFor(() => expect(result.current.data?.exactCount).toBe(0));
   });
 });
 
@@ -501,7 +581,7 @@ describe("the order search's retry and freshness (B3-1 FR1)", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     const query = client
       .getQueryCache()
-      .find({ queryKey: ["admin", "reconciliation", "orders", "1"], exact: true });
+      .find({ queryKey: ["admin", "reconciliation", "orders", "1", null, 20], exact: true });
     expect((query?.options as { staleTime?: unknown } | undefined)?.staleTime).toBe(30_000);
   });
 });
