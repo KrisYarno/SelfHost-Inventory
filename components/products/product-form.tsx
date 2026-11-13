@@ -42,6 +42,24 @@ function initialThresholdMode(value: number | null | undefined): ThresholdMode {
   return "custom";
 }
 
+// The four per-product reorder overrides, in the order the body has always
+// carried them. `bufferDays` is the form's name for `customSafetyStockDays`.
+type ReorderOverrides = {
+  leadTimeDays: number | null;
+  customSafetyStockDays: number | null;
+  minOrderQuantity: number | null;
+  reorderPointOverride: number | null;
+};
+
+// A field's value as it would be sent, or null for blank. `valueAsNumber` yields
+// NaN for a blank input; a number below the field's floor (which validation
+// already refuses) is treated as blank too, as before. Whole days/units only.
+function readOverride(value: number | null | undefined, min: number): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= min
+    ? Math.floor(value)
+    : null;
+}
+
 interface ProductFormProps {
   // The loc-1 `products.quantity` mirror is retired (P2-B2.5) and no longer rides
   // the wire; this form never read it. `Omit` keeps every existing caller.
@@ -108,6 +126,15 @@ export function ProductForm({
       reorderPointOverride: number | null;
     } | null;
   })?.reorderConfig ?? null;
+  // The overrides as the form mounted with them (null = blank = inherit). The
+  // submit compares against THIS snapshot (MS-2-2), so the comparison is the
+  // form's own and does not depend on the caller. Create mode is all null.
+  const [initialOverrides] = useState<ReorderOverrides>(() => ({
+    leadTimeDays: reorderCfg?.leadTimeDays ?? null,
+    customSafetyStockDays: reorderCfg?.customSafetyStockDays ?? null,
+    minOrderQuantity: reorderCfg?.minOrderQuantity ?? null,
+    reorderPointOverride: reorderCfg?.reorderPointOverride ?? null,
+  }));
 
   const {
     register,
@@ -139,10 +166,10 @@ export function ProductForm({
           : null,
       // Reorder overrides pre-filled from the product's config when present (edit
       // mode); blank means inherit the global default.
-      leadTimeDays: reorderCfg?.leadTimeDays ?? null,
-      bufferDays: reorderCfg?.customSafetyStockDays ?? null,
-      minOrderQuantity: reorderCfg?.minOrderQuantity ?? null,
-      reorderPointOverride: reorderCfg?.reorderPointOverride ?? null,
+      leadTimeDays: initialOverrides.leadTimeDays,
+      bufferDays: initialOverrides.customSafetyStockDays,
+      minOrderQuantity: initialOverrides.minOrderQuantity,
+      reorderPointOverride: initialOverrides.reorderPointOverride,
     },
   });
 
@@ -249,25 +276,35 @@ export function ProductForm({
           ? data.retailPrice
           : null;
 
-      // Reorder overrides: blank -> inherit the global default (omitted). Only send the
-      // config when at least one real override is set. leadTime is always positive
-      // (>= 1); buffer allows 0 (no buffer); MOQ floors at 1; override pins the point.
+      // Reorder overrides (MS-2-2): each field is compared with the value the form
+      // mounted with. Equal -> omitted, so an untouched form sends no config at all.
+      // Cleared from a set value -> null (inherit the shop default) for lead time,
+      // buffer and the reorder point; MOQ is not nullable (schema + DB default 1),
+      // so a cleared MOQ is 1. Otherwise the new value. leadTime is always positive
+      // (>= 1); buffer allows 0 (no buffer); MOQ floors at 1; override pins the
+      // point. Create mounts all-null, so blank stays omitted there, as before.
+      const current: ReorderOverrides = {
+        leadTimeDays: readOverride(data.leadTimeDays, 1),
+        customSafetyStockDays: readOverride(data.bufferDays, 0),
+        minOrderQuantity: readOverride(data.minOrderQuantity, 1),
+        reorderPointOverride: readOverride(data.reorderPointOverride, 0),
+      };
       const reorderConfig: NonNullable<import("@/types/product").ProductFormData["reorderConfig"]> = {};
-      if (typeof data.leadTimeDays === "number" && Number.isFinite(data.leadTimeDays) && data.leadTimeDays >= 1) {
-        reorderConfig.leadTimeDays = Math.floor(data.leadTimeDays);
+      if (current.leadTimeDays !== initialOverrides.leadTimeDays) {
+        reorderConfig.leadTimeDays = current.leadTimeDays;
       }
-      if (typeof data.bufferDays === "number" && Number.isFinite(data.bufferDays) && data.bufferDays >= 0) {
-        reorderConfig.customSafetyStockDays = Math.floor(data.bufferDays);
+      if (current.customSafetyStockDays !== initialOverrides.customSafetyStockDays) {
+        reorderConfig.customSafetyStockDays = current.customSafetyStockDays;
       }
-      if (typeof data.minOrderQuantity === "number" && Number.isFinite(data.minOrderQuantity) && data.minOrderQuantity >= 1) {
-        reorderConfig.minOrderQuantity = Math.floor(data.minOrderQuantity);
+      if (current.minOrderQuantity !== initialOverrides.minOrderQuantity) {
+        const sentMinOrderQuantity = current.minOrderQuantity ?? 1;
+        // A cleared MOQ whose stored value is already 1 changes nothing: omitted.
+        if (sentMinOrderQuantity !== initialOverrides.minOrderQuantity) {
+          reorderConfig.minOrderQuantity = sentMinOrderQuantity;
+        }
       }
-      if (
-        typeof data.reorderPointOverride === "number" &&
-        Number.isFinite(data.reorderPointOverride) &&
-        data.reorderPointOverride >= 0
-      ) {
-        reorderConfig.reorderPointOverride = Math.floor(data.reorderPointOverride);
+      if (current.reorderPointOverride !== initialOverrides.reorderPointOverride) {
+        reorderConfig.reorderPointOverride = current.reorderPointOverride;
       }
 
       const productData = {

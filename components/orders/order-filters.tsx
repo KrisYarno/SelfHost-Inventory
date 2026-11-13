@@ -288,5 +288,9 @@ export function OrderFilters({
     </div>
   );
 
-  return isMobile ? <MobileFilters /> : <DesktopFilters />;
+  // Called as functions, never mounted as `<MobileFilters />`: both are declared
+  // inside this render, so as element types they were a NEW component on every
+  // render and React remounted the search input after each keystroke, dropping
+  // its focus and the phone keyboard (MS-1-3).
+  return isMobile ? MobileFilters() : DesktopFilters();
 }

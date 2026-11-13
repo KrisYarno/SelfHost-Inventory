@@ -8,9 +8,26 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { CatalogRow, InternalProductIndexEntry, Suggestion } from "@/types/bulk-map";
+import { rowKey } from "@/types/bulk-map";
 import { suggest } from "@/lib/matching/suggestion-matcher";
 import { PickerSuccessPanel } from "./picker-success-panel";
 import { BundleBuilder, type BundleBuilderComponent } from "./bundle-builder";
+
+/**
+ * What the bundle editor starts from (MS-2-1), owned by the mass-map host and
+ * tied to ONE row by `key` (`rowKey(row)`):
+ *   - `ready`: the components to seed the editor with (`[]` for a new bundle);
+ *   - `loading`: an existing bundle's components are still being fetched;
+ *   - `failed`: they could not be loaded, so there is nothing true to edit.
+ */
+export interface BundleSeed {
+  key: string;
+  status: "ready" | "loading" | "failed";
+  components: BundleBuilderComponent[];
+}
+
+/** VERBATIM (pack § P2-B3-1R, M-b3 fix 3). */
+const BUNDLE_LOAD_FAILED = "Couldn't load this bundle's components.";
 
 interface Props {
   row: CatalogRow | null;
@@ -25,7 +42,8 @@ interface Props {
   onKeepSuccess: () => void;
   // Bundle mode
   bundleMode?: boolean;
-  initialBundleComponents?: BundleBuilderComponent[];
+  bundleSeed?: BundleSeed | null;
+  onRetryBundleSeed?: () => void;
   onConfirmBundle?: (components: BundleBuilderComponent[]) => void;
   onConvertToBundle?: () => void;
   onConvertToSingle?: () => void;
@@ -74,7 +92,8 @@ export function InternalProductPicker({
   onFinishSuccess,
   onKeepSuccess,
   bundleMode = false,
-  initialBundleComponents,
+  bundleSeed = null,
+  onRetryBundleSeed,
   onConfirmBundle,
   onConvertToBundle,
   onConvertToSingle,
@@ -108,17 +127,48 @@ export function InternalProductPicker({
   }
 
   if (row && bundleMode && onConfirmBundle) {
+    // The editor seeds its components ONCE, at mount. So it mounts only once the
+    // seed for THIS row is ready, keyed by the row: another row is a fresh
+    // editor, never the previous row's components (MS-2-1).
+    const seed = bundleSeed && bundleSeed.key === rowKey(row) ? bundleSeed : null;
+    if (seed?.status === "ready") {
+      return (
+        <BundleBuilder
+          key={seed.key}
+          row={row}
+          index={index}
+          initialComponents={seed.components}
+          saving={saving}
+          errorMessage={errorMessage}
+          onConfirm={onConfirmBundle}
+          onCancel={onCancel}
+          onConvertToSingle={onConvertToSingle ?? onCancel}
+        />
+      );
+    }
+    if (seed?.status === "failed") {
+      return (
+        <div className="space-y-3 py-6 text-center">
+          <p role="alert" className="flex items-center justify-center gap-2 text-sm text-destructive">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            {BUNDLE_LOAD_FAILED}
+          </p>
+          {onRetryBundleSeed && (
+            <Button variant="outline" size="sm" onClick={onRetryBundleSeed}>
+              Retry
+            </Button>
+          )}
+        </div>
+      );
+    }
     return (
-      <BundleBuilder
-        row={row}
-        index={index}
-        initialComponents={initialBundleComponents}
-        saving={saving}
-        errorMessage={errorMessage}
-        onConfirm={onConfirmBundle}
-        onCancel={onCancel}
-        onConvertToSingle={onConvertToSingle ?? onCancel}
-      />
+      <p
+        className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground"
+        data-testid="bundle-seed-loading"
+      >
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Loading bundle components…
+      </p>
     );
   }
 

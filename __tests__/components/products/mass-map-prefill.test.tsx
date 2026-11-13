@@ -26,7 +26,7 @@
 import * as React from "react";
 import fs from "node:fs";
 import path from "node:path";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { CatalogResponse, CatalogRow } from "@/types/bulk-map";
 
@@ -268,6 +268,92 @@ describe("no deep link at all", () => {
     expect(container.querySelector('[data-row-key="2::"]')?.className).not.toContain(
       "ring-primary/40",
     );
+  });
+});
+
+// § P2-B3-1R, M-b3 fix 3 (G1-3): the deep link used to set the active row
+// directly, skipping the click handler that fetched an existing bundle's
+// components, so a deep-linked bundle opened an EMPTY editor (and confirming it
+// replaced the real components). It now goes through the one `selectRow`.
+describe("a deep link to an existing bundle (MS-2-1)", () => {
+  const BUNDLE_ROW: CatalogRow = {
+    externalProductId: "40",
+    externalVariantId: null,
+    parentTitle: "Gift Box",
+    variantTitle: null,
+    sku: "GB",
+    type: "simple",
+    attributes: [],
+    alreadyMapped: true,
+    existingMapping: {
+      linkId: "LBX",
+      internalProductId: null,
+      internalProductName: "",
+      isBundle: true,
+      componentCount: 2,
+    },
+  };
+
+  let resolveMappings: ((a: unknown) => void) | null = null;
+
+  beforeEach(() => {
+    resolveMappings = null;
+    global.fetch = jest.fn((url: string | URL | Request) => {
+      if (String(url).startsWith("/api/admin/product-mappings")) {
+        return new Promise((resolve) => {
+          resolveMappings = resolve;
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    }) as unknown as typeof fetch;
+    useCatalogMock.mockReturnValue({
+      data: catalog([...ROWS, BUNDLE_ROW]),
+      isLoading: false,
+      isFetching: false,
+      error: null,
+      refetch: jest.fn(),
+    });
+  });
+
+  it("loads the bundle's REAL components into the editor; nothing editable before they answer", async () => {
+    renderClient({ externalProductId: "40", externalVariantId: null, sku: "GB" });
+
+    await waitFor(() =>
+      expect(global.fetch).toHaveBeenCalledWith(
+        "/api/admin/product-mappings?integrationId=i1&pageSize=500",
+      ),
+    );
+    // The phone sheet hides the page behind it, so the queries reach into it.
+    expect(
+      screen.queryByRole("button", { name: "Confirm bundle mapping", hidden: true }),
+    ).toBeNull();
+
+    await act(async () => {
+      resolveMappings?.({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          mappings: [
+            {
+              id: "LBX",
+              bundleComponents: [
+                { internalProductId: 1, quantity: 2, sortOrder: 0, internalProduct: { name: "Widget 1" } },
+                { internalProductId: 2, quantity: 1, sortOrder: 1, internalProduct: { name: "Widget 2" } },
+              ],
+            },
+          ],
+        }),
+      });
+    });
+
+    expect(
+      screen.getByRole("button", { name: "Confirm bundle mapping", hidden: true }),
+    ).toBeInTheDocument();
+    expect(
+      screen
+        .getAllByRole("button", { name: /^Remove /, hidden: true })
+        .map((b) => b.getAttribute("aria-label")),
+    ).toEqual(["Remove Widget 1", "Remove Widget 2"]);
   });
 });
 

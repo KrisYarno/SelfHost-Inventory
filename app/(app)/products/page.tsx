@@ -98,14 +98,18 @@ export default function ProductsPage() {
       {/* Dialogs */}
       <CreateProductDialog open={createDialogOpen} onOpenChange={setCreateDialogOpen} />
 
-      <EditProductDialog
-        product={selectedProduct}
-        open={editDialogOpen}
-        onOpenChange={(open) => {
-          setEditDialogOpen(open);
-          if (!open) setSelectedProduct(null);
-        }}
-      />
+      {/* Mounted per open (M-a.3): every open is a fresh mount, so the dialog's
+          live read of the product and the form's defaults never carry over. */}
+      {editDialogOpen && selectedProduct && (
+        <EditProductDialog
+          product={selectedProduct}
+          open={editDialogOpen}
+          onOpenChange={(open) => {
+            setEditDialogOpen(open);
+            if (!open) setSelectedProduct(null);
+          }}
+        />
+      )}
 
       <DeleteProductDialog
         product={selectedProduct}

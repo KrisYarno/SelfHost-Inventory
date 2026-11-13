@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, AlertCircle } from "lucide-react";
 import {
@@ -21,7 +21,7 @@ import { useCatalog } from "./use-catalog";
 import { useInternalProductIndex } from "./use-internal-product-index";
 import { useRowActions } from "./use-row-actions";
 import { ExternalProductList } from "./external-product-list";
-import { InternalProductPicker } from "./internal-product-picker";
+import { InternalProductPicker, type BundleSeed } from "./internal-product-picker";
 import { RefreshButton } from "./refresh-button";
 import { useIsDesktop } from "./use-viewport";
 import type { BundleBuilderComponent } from "./bundle-builder";
@@ -60,9 +60,12 @@ export function MassMapClient({ integrationId, prefill }: Props) {
   >(null);
   const [tab, setTab] = useState<"unmapped" | "mapped">("unmapped");
   const [bundleMode, setBundleMode] = useState(false);
-  const [initialBundleComponents, setInitialBundleComponents] = useState<
-    BundleBuilderComponent[] | undefined
-  >(undefined);
+  // What the bundle editor starts from, for the active row only (MS-2-1). Set
+  // by `selectRow`, cleared by every close path.
+  const [bundleSeed, setBundleSeed] = useState<BundleSeed | null>(null);
+  // Bumped by every selection and every close, so a components fetch that
+  // answers after the person moved on lands nowhere.
+  const seedRequest = useRef(0);
 
   const rows = catalog.data?.rows ?? [];
   const unmapped = useMemo(() => rows.filter((r) => !r.alreadyMapped), [rows]);
@@ -94,6 +97,83 @@ export function MassMapClient({ integrationId, prefill }: Props) {
     prefillKey === null ? null : (rows.find((r) => rowKey(r) === prefillKey) ?? null);
   const prefillApplied = useRef(false);
 
+  // ---------------------------------------------------------------------
+  // THE ONE ENTRY POINT for selecting a row (MS-2-1): a list click, the deep
+  // link below, and Retry all come through here. It seeds the bundle editor:
+  //   - no existing bundle -> ready with no components, at once;
+  //   - an existing bundle -> loading until ITS components answer for THIS
+  //     selection (a late answer for an earlier selection is ignored);
+  //   - an error, a non-OK answer, or the link missing from the answer ->
+  //     failed. The editor never opens empty over a real bundle: confirming it
+  //     would replace the real components wholesale.
+  // ---------------------------------------------------------------------
+  const selectRow = useCallback(
+    (row: CatalogRow) => {
+      setError(null);
+      setSuccessFor(null);
+      setActiveRow(row);
+
+      const isBundle = row.isBundleCandidate || row.existingMapping?.isBundle === true;
+      setBundleMode(isBundle ?? false);
+
+      const key = rowKey(row);
+      const request = ++seedRequest.current;
+      const linkId = row.existingMapping?.isBundle ? row.existingMapping.linkId : null;
+      if (!linkId) {
+        setBundleSeed({ key, status: "ready", components: [] });
+        return;
+      }
+
+      setBundleSeed({ key, status: "loading", components: [] });
+      const settle = (seed: BundleSeed) => {
+        if (seedRequest.current !== request) return;
+        setBundleSeed((prev) => (prev?.key === key ? seed : prev));
+      };
+      const failed: BundleSeed = { key, status: "failed", components: [] };
+
+      fetch(`/api/admin/product-mappings?integrationId=${integrationId}&pageSize=500`)
+        .then(async (r) => {
+          if (!r.ok) return settle(failed);
+          const data = (await r.json()) as {
+            mappings?: Array<{
+              id: string;
+              bundleComponents?: Array<{
+                internalProductId: number;
+                quantity: number;
+                sortOrder: number;
+                internalProduct?: { name?: string };
+              }>;
+            }>;
+          };
+          const found = data.mappings?.find((m) => m.id === linkId);
+          // The route returns `bundleComponents` only for a bundle link; a link
+          // that is missing, or no longer a bundle, has no components to edit.
+          if (!found || !Array.isArray(found.bundleComponents)) return settle(failed);
+          settle({
+            key,
+            status: "ready",
+            components: found.bundleComponents.map((c) => ({
+              internalProductId: c.internalProductId,
+              internalProductName: c.internalProduct?.name ?? "",
+              quantity: c.quantity,
+              sortOrder: c.sortOrder,
+            })),
+          });
+        })
+        .catch(() => settle(failed));
+    },
+    [integrationId],
+  );
+
+  // Every close path (both Cancels, the phone sheet's close, finish, keep)
+  // comes through here: no row, no seed, and any in-flight components fetch
+  // is orphaned.
+  const closeSelection = () => {
+    seedRequest.current += 1;
+    setActiveRow(null);
+    setBundleSeed(null);
+  };
+
   useEffect(() => {
     if (prefillRow === null || prefillApplied.current) return;
     prefillApplied.current = true;
@@ -103,8 +183,10 @@ export function MassMapClient({ integrationId, prefill }: Props) {
     // Unmapped there selected a row on the list the other tab is showing: an
     // empty screen with an invisible selection.
     setTab(prefillRow.alreadyMapped ? "mapped" : "unmapped");
-    setActiveRow(prefillRow);
-  }, [prefillRow]);
+    // Through the one entry point, so an existing bundle's components load
+    // exactly as they do for a click (G1-3).
+    selectRow(prefillRow);
+  }, [prefillRow, selectRow]);
 
   const prefillMissing = prefillKey !== null && catalog.data !== undefined && prefillRow === null;
 
@@ -173,49 +255,14 @@ export function MassMapClient({ integrationId, prefill }: Props) {
 
   const handleFinishSuccess = () => {
     setSuccessFor(null);
-    setActiveRow(null);
     setBundleMode(false);
-    setInitialBundleComponents(undefined);
+    closeSelection();
   };
 
   const handleKeepSuccess = () => {
     setSuccessFor(null);
-    setActiveRow(null);
     setBundleMode(false);
-    setInitialBundleComponents(undefined);
-  };
-
-  const handleSelectRow = (row: CatalogRow) => {
-    setError(null);
-    setSuccessFor(null);
-    setActiveRow(row);
-
-    const isBundle = row.isBundleCandidate || row.existingMapping?.isBundle === true;
-    setBundleMode(isBundle ?? false);
-
-    if (row.existingMapping?.isBundle && row.existingMapping.linkId) {
-      // Editing an existing bundle: fetch its components and seed initialBundleComponents
-      fetch(`/api/admin/product-mappings?integrationId=${integrationId}&pageSize=500`)
-        .then((r) => (r.ok ? r.json() : { mappings: [] }))
-        .then((data: { mappings: Array<{ id: string; bundleComponents?: Array<{ internalProductId: number; quantity: number; sortOrder: number; internalProduct?: { name?: string } }> }> }) => {
-          const found = data.mappings.find((m) => m.id === row.existingMapping?.linkId);
-          if (found?.bundleComponents) {
-            setInitialBundleComponents(
-              found.bundleComponents.map((c) => ({
-                internalProductId: c.internalProductId,
-                internalProductName: c.internalProduct?.name ?? "",
-                quantity: c.quantity,
-                sortOrder: c.sortOrder,
-              })),
-            );
-          } else {
-            setInitialBundleComponents([]);
-          }
-        })
-        .catch(() => setInitialBundleComponents([]));
-    } else {
-      setInitialBundleComponents(undefined);
-    }
+    closeSelection();
   };
 
   if (catalog.isLoading) {
@@ -326,7 +373,7 @@ export function MassMapClient({ integrationId, prefill }: Props) {
               activeRowKey={activeKey}
               savingKey={saving && activeRow ? rowKey(activeRow) : null}
               errorKey={error && activeRow ? rowKey(activeRow) : null}
-              onRowSelect={handleSelectRow}
+              onRowSelect={selectRow}
               scrollToKey={prefillRow === null ? null : prefillKey}
             />
           </Card>
@@ -341,11 +388,12 @@ export function MassMapClient({ integrationId, prefill }: Props) {
                 errorMessage={error}
                 successFor={successFor}
                 onConfirm={handleConfirm}
-                onCancel={() => setActiveRow(null)}
+                onCancel={closeSelection}
                 onFinishSuccess={handleFinishSuccess}
                 onKeepSuccess={handleKeepSuccess}
                 bundleMode={bundleMode}
-                initialBundleComponents={initialBundleComponents}
+                bundleSeed={bundleSeed}
+                onRetryBundleSeed={() => activeRow && selectRow(activeRow)}
                 onConfirmBundle={handleConfirmBundle}
                 onConvertToBundle={() => setBundleMode(true)}
                 onConvertToSingle={() => setBundleMode(false)}
@@ -358,7 +406,9 @@ export function MassMapClient({ integrationId, prefill }: Props) {
       {!isDesktop && (
         <Sheet
           open={!!activeRow}
-          onOpenChange={(o) => !o && setActiveRow(null)}
+          onOpenChange={(o) => {
+            if (!o) closeSelection();
+          }}
         >
           <SheetContent side="bottom" className="h-[85vh] overflow-auto">
             <SheetHeader>
@@ -374,11 +424,12 @@ export function MassMapClient({ integrationId, prefill }: Props) {
                 errorMessage={error}
                 successFor={successFor}
                 onConfirm={handleConfirm}
-                onCancel={() => setActiveRow(null)}
+                onCancel={closeSelection}
                 onFinishSuccess={handleFinishSuccess}
                 onKeepSuccess={handleKeepSuccess}
                 bundleMode={bundleMode}
-                initialBundleComponents={initialBundleComponents}
+                bundleSeed={bundleSeed}
+                onRetryBundleSeed={() => activeRow && selectRow(activeRow)}
                 onConfirmBundle={handleConfirmBundle}
                 onConvertToBundle={() => setBundleMode(true)}
                 onConvertToSingle={() => setBundleMode(false)}

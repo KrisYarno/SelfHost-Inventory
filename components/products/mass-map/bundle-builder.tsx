@@ -19,7 +19,12 @@ export interface BundleBuilderComponent {
 interface Props {
   row: CatalogRow;
   index: InternalProductIndexEntry[];
-  initialComponents?: BundleBuilderComponent[];
+  /**
+   * Read ONCE, at mount. The host mounts the builder only when the row's
+   * components are known and keys it by the row (MS-2-1), so a later change to
+   * this prop never reaches the list being edited.
+   */
+  initialComponents: BundleBuilderComponent[];
   saving: boolean;
   errorMessage: string | null;
   onConfirm: (components: BundleBuilderComponent[]) => void;
@@ -29,7 +34,7 @@ interface Props {
 
 export function BundleBuilder({
   row,
-  initialComponents = [],
+  initialComponents,
   saving,
   errorMessage,
   onConfirm,

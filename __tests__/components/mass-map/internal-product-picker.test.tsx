@@ -3,7 +3,10 @@ import React from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { InternalProductPicker } from "@/components/products/mass-map/internal-product-picker";
+import {
+  InternalProductPicker,
+  type BundleSeed,
+} from "@/components/products/mass-map/internal-product-picker";
 import type { CatalogRow, InternalProductIndexEntry } from "@/types/bulk-map";
 
 const row: CatalogRow = {
@@ -149,5 +152,138 @@ describe("InternalProductPicker", () => {
       { wrapper },
     );
     expect(screen.getByText(/Mapped successfully/i)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// § P2-B3-1R, M-b3 fix 3 (MS-2-1): the bundle editor mounts only on a READY
+// seed for THIS row, keyed by the row. It used to mount at once, seeded with
+// whatever `initialBundleComponents` held (nothing yet, or the previous row's),
+// and confirming replaced the bundle's real components with that list.
+// ---------------------------------------------------------------------------
+
+const bundleRowA: CatalogRow = {
+  externalProductId: "10",
+  externalVariantId: null,
+  parentTitle: "Gift Box A",
+  variantTitle: null,
+  sku: "GBA",
+  type: "simple",
+  attributes: [],
+  alreadyMapped: true,
+  existingMapping: {
+    linkId: "LA",
+    internalProductId: null,
+    internalProductName: "",
+    isBundle: true,
+    componentCount: 2,
+  },
+};
+const bundleRowB: CatalogRow = {
+  ...bundleRowA,
+  externalProductId: "20",
+  parentTitle: "Gift Box B",
+  sku: "GBB",
+  existingMapping: { ...bundleRowA.existingMapping!, linkId: "LB", componentCount: 1 },
+};
+
+const seedA = (status: BundleSeed["status"]): BundleSeed => ({
+  key: "10::",
+  status,
+  components:
+    status === "ready"
+      ? [
+          { internalProductId: 1, internalProductName: "Widget A1", quantity: 2, sortOrder: 0 },
+          { internalProductId: 2, internalProductName: "Widget A2", quantity: 1, sortOrder: 1 },
+        ]
+      : [],
+});
+const seedB: BundleSeed = {
+  key: "20::",
+  status: "ready",
+  components: [{ internalProductId: 3, internalProductName: "Widget B1", quantity: 4, sortOrder: 0 }],
+};
+
+function BundlePicker({
+  row,
+  seed,
+  onRetry = jest.fn(),
+}: {
+  row: CatalogRow;
+  seed: BundleSeed | null;
+  onRetry?: () => void;
+}) {
+  return (
+    <InternalProductPicker
+      row={row}
+      index={index}
+      indexLoading={false}
+      saving={false}
+      errorMessage={null}
+      successFor={null}
+      onConfirm={jest.fn()}
+      onCancel={jest.fn()}
+      onFinishSuccess={jest.fn()}
+      onKeepSuccess={jest.fn()}
+      bundleMode
+      bundleSeed={seed}
+      onRetryBundleSeed={onRetry}
+      onConfirmBundle={jest.fn()}
+    />
+  );
+}
+
+const editorShown = () => screen.queryByRole("button", { name: "Confirm bundle mapping" });
+const componentNames = () =>
+  screen
+    .queryAllByRole("button", { name: /^Remove / })
+    .map((b) => (b.getAttribute("aria-label") ?? "").replace(/^Remove /, ""));
+
+describe("InternalProductPicker — the bundle seed (MS-2-1)", () => {
+  it("loading: a loading line and NO editor", () => {
+    render(<BundlePicker row={bundleRowA} seed={seedA("loading")} />, { wrapper });
+    expect(screen.getByTestId("bundle-seed-loading")).toBeInTheDocument();
+    expect(editorShown()).toBeNull();
+  });
+
+  it("failed: the verbatim sentence + Retry, and NO editor", async () => {
+    const user = userEvent.setup();
+    const onRetry = jest.fn();
+    render(<BundlePicker row={bundleRowA} seed={seedA("failed")} onRetry={onRetry} />, { wrapper });
+    expect(screen.getByText("Couldn't load this bundle's components.")).toBeInTheDocument();
+    expect(editorShown()).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("ready: the editor, seeded with THIS row's components", () => {
+    render(<BundlePicker row={bundleRowA} seed={seedA("ready")} />, { wrapper });
+    expect(editorShown()).not.toBeNull();
+    expect(componentNames()).toEqual(["Widget A1", "Widget A2"]);
+  });
+
+  it("a ready seed for ANOTHER row is not this row's: no editor", () => {
+    render(<BundlePicker row={bundleRowB} seed={seedA("ready")} />, { wrapper });
+    expect(editorShown()).toBeNull();
+    expect(screen.getByTestId("bundle-seed-loading")).toBeInTheDocument();
+  });
+
+  it("no seed at all: no editor", () => {
+    render(<BundlePicker row={bundleRowA} seed={null} />, { wrapper });
+    expect(editorShown()).toBeNull();
+  });
+
+  it("keyed by row: A's editor, then B's seed, shows B's components (a fresh mount)", () => {
+    const { rerender } = render(<BundlePicker row={bundleRowA} seed={seedA("ready")} />, { wrapper });
+    expect(componentNames()).toEqual(["Widget A1", "Widget A2"]);
+    rerender(<BundlePicker row={bundleRowB} seed={seedB} />);
+    expect(componentNames()).toEqual(["Widget B1"]);
+  });
+
+  it("loading then ready for the same row: the editor mounts with the answered components", () => {
+    const { rerender } = render(<BundlePicker row={bundleRowA} seed={seedA("loading")} />, { wrapper });
+    expect(editorShown()).toBeNull();
+    rerender(<BundlePicker row={bundleRowA} seed={seedA("ready")} />);
+    expect(componentNames()).toEqual(["Widget A1", "Widget A2"]);
   });
 });
