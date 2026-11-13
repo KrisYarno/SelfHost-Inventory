@@ -56,6 +56,14 @@ import type { WorkbenchIntent } from "@/lib/inventory/intent";
 const RE_SELECT_SENTENCE =
   "Re-select the order to rebuild the cart from its current state.";
 
+/**
+ * A leg answered `ok` but its body could not be read (FR-R1 (8), CR-OC-6). The
+ * route only answers 2xx once its write is committed, so the stock MOVED — but
+ * the batch ids the Undo needs were in that body.
+ */
+const UNREADABLE_REPLY_SENTENCE =
+  "Order completed. The server's reply couldn't be read, so Undo isn't available — check the batch log.";
+
 export interface DeductionDetail {
   productId: number;
   productName: string;
@@ -475,6 +483,12 @@ export function CompleteOrderDialog({
       fulfilBatchId: null,
     };
 
+    // FR-R1 (8): set when an `ok` leg's body could not be read. That leg is
+    // COMMITTED — never re-armed by leaving the dialog open for another tap —
+    // and the completion closes as a success with no Undo, since the batch ids
+    // the Undo names were in the body that could not be read.
+    let replyUnreadable = false;
+
     try {
       // Amendment 2: Dual API call for mixed carts
       // 1. Fulfill WC items via fulfillment API
@@ -506,7 +520,12 @@ export function CompleteOrderDialog({
           throw error;
         }
 
-        const fulfillBody = await fulfillResponse.json();
+        // An unreadable `ok` body is a COMMITTED leg (FR-R1 (8)): read as `null`,
+        // it names no entries and no summary, so the gate below has no verdict
+        // (FD1-3) and the leg stands as fulfilled — the rollback, if the manual
+        // leg then fails, sends nothing and names the incident (QA-3).
+        const fulfillBody = await fulfillResponse.json().catch(() => null);
+        if (fulfillBody === null) replyUnreadable = true;
         batchIds.fulfilBatchId =
           typeof fulfillBody?.batchId === "string" ? fulfillBody.batchId : null;
         wcFulfilled = true;
@@ -737,7 +756,10 @@ export function CompleteOrderDialog({
           throw error;
         }
 
-        const deductBody = await deductResponse.json();
+        // An unreadable `ok` body is a COMMITTED leg (FR-R1 (8)), never a failure
+        // the operator is invited to send again.
+        const deductBody = await deductResponse.json().catch(() => null);
+        if (deductBody === null) replyUnreadable = true;
         batchIds.deductSimpleBatchId =
           typeof deductBody?.batchId === "string" ? deductBody.batchId : null;
       }
@@ -805,6 +827,14 @@ export function CompleteOrderDialog({
       // Cross-page coherence: the deduct/fulfill above went through raw fetch,
       // so react-query caches (/inventory, dashboard, journal) must be told.
       invalidateInventoryCaches(queryClient);
+
+      // A committed completion whose reply could not be read has nothing an Undo
+      // could name: say so, and offer none. `onSuccess` is the host's Undo, so
+      // it is not called (FR-R1 (8)).
+      if (replyUnreadable) {
+        toast.success(UNREADABLE_REPLY_SENTENCE);
+        return;
+      }
 
       // Call the onSuccess callback with deduction details for undo support
       if (onSuccess) {

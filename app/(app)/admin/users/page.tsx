@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { UserApprovalCard } from "@/components/admin/user-approval-card";
 import { UserTable, User } from "@/components/admin/user-table";
@@ -32,10 +32,22 @@ export default function AdminUsersPage() {
   const [selectedUsers, setSelectedUsers] = useState<Set<number>>(new Set());
 
   // Edit dialog subject. The dialog is mounted PER OPEN (§ P2-B3-1R, MS-3-1 /
-  // M-a.3): it renders only while `editingUser` is set, and any close nulls
-  // it, so a cancelled draft (a ticked Admin box, edited memberships) can never
-  // come back on the next open of the same user.
-  const [editingUser, setEditingUser] = useState<User | null>(null);
+  // M-a.3): it renders only while `editing` is set, and any close nulls it, so
+  // a cancelled draft (a ticked Admin box, edited memberships) can never come
+  // back on the next open of the same user.
+  //
+  // FR-R1 (2), CR-OC-3: the form is seeded from a read issued AFTER the Edit
+  // tap, never from the list row the tap came from — the membership set is sent
+  // whole and the route deletes every membership absent from it, so a stale
+  // row silently removed a grant made since it was read. `user` is `null`
+  // until that read answers (`Loading…`); `failed` when it failed or the user
+  // is no longer in it (`Couldn't load this user.`, and no form).
+  const [editing, setEditing] = useState<
+    { id: number; user: User | null; failed: boolean } | null
+  >(null);
+  // Bumped by every Edit tap and every close, so a read answering after the
+  // dialog closed — or after another user's Edit — lands nowhere.
+  const editRequest = useRef(0);
 
   const pendingQuery = useAdminPendingUsers();
   const usersQuery = useAdminUsers({ filter, search, page });
@@ -62,8 +74,31 @@ export default function AdminUsersPage() {
     }
   }, [pendingQuery.error, usersQuery.error, router]);
 
-  const handleEdit = (user: User) => {
-    setEditingUser(user);
+  const handleEdit = (row: User) => {
+    const request = ++editRequest.current;
+    setEditing({ id: row.id, user: null, failed: false });
+    // `refetch` issues a NEW request (an in-flight one is cancelled, never
+    // reused), so the row it answers with was read after this tap. A failed
+    // read resolves with `status: "error"` — and may still carry the OLD data,
+    // which is exactly what must not seed the form.
+    const settle = (fresh: User | null) => {
+      if (editRequest.current !== request) return;
+      setEditing({ id: row.id, user: fresh, failed: fresh === null });
+    };
+    usersQuery.refetch().then(
+      (result) =>
+        settle(
+          result.status === "success"
+            ? (result.data?.users.find((u) => u.id === row.id) ?? null)
+            : null,
+        ),
+      () => settle(null),
+    );
+  };
+
+  const closeEdit = () => {
+    editRequest.current += 1;
+    setEditing(null);
   };
 
   // Refresh is handled by useUpdateUser's cache invalidation inside the dialog.
@@ -357,12 +392,13 @@ export default function AdminUsersPage() {
       </div>
 
       {/* Edit User Dialog — mounted per open; any close nulls the subject */}
-      {editingUser && (
+      {editing && (
         <EditUserDialog
-          user={editingUser}
+          user={editing.user}
+          readFailed={editing.failed}
           open
           onOpenChange={(open) => {
-            if (!open) setEditingUser(null);
+            if (!open) closeEdit();
           }}
           onSuccess={handleEditSuccess}
           locations={locations}

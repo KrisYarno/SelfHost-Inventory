@@ -23,7 +23,7 @@
  */
 
 import * as React from "react";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 jest.mock("next/navigation", () => ({
@@ -398,5 +398,97 @@ describe("the create is guarded while submitting (M-a.1)", () => {
     await user.click(within(createDialog()).getByRole("button", { name: "Create Integration" }));
     expect(await within(createDialog()).findByText("Integration Created!")).toBeInTheDocument();
     expect(mockCreate).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ===========================================================================
+// FR-R1 (10), CR-OC-7b: Edit adopts the latch + guard
+// ===========================================================================
+
+describe("the Edit save is guarded while in flight (M-a.1)", () => {
+  async function openEdit(user: User) {
+    const pencil = document.querySelector("svg.lucide-pencil")!.closest("button")!;
+    await user.click(pencil);
+    return screen.getByRole("dialog", { name: "Edit Integration" });
+  }
+
+  /** Hold the next PUT until the returned release is called. */
+  function holdUpdate() {
+    let release!: () => void;
+    mockUpdate.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({});
+        }),
+    );
+    return () => act(async () => release());
+  }
+
+  it("Escape, the X and Cancel are refused mid-save; the fields freeze; the answer closes it", async () => {
+    const user = userEvent.setup({ delay: null });
+    const release = holdUpdate();
+    render(<AdminIntegrationsPage />);
+
+    const edit = await openEdit(user);
+    await user.click(within(edit).getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(within(edit).getByRole("button", { name: "Saving..." })).toBeDisabled());
+    expect(within(edit).getByRole("button", { name: "Cancel" })).toBeDisabled();
+    expect(within(edit).getByLabelText("Store Name")).toBeDisabled();
+
+    await user.keyboard("{Escape}");
+    expect(queryEditDialog()).toBeInTheDocument();
+    await user.click(within(edit).getByRole("button", { name: "Close" }));
+    expect(queryEditDialog()).toBeInTheDocument();
+    fireEvent.click(within(edit).getByRole("button", { name: "Cancel" }));
+    expect(queryEditDialog()).toBeInTheDocument();
+    // The form was NOT reset under the save.
+    expect(within(edit).getByLabelText("Store Name")).toHaveValue("Old Shopify Store");
+
+    await release();
+    await waitFor(() => expect(queryEditDialog()).toBeNull());
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("a double tap sends ONE PUT", async () => {
+    const user = userEvent.setup({ delay: null });
+    const release = holdUpdate();
+    render(<AdminIntegrationsPage />);
+
+    const edit = await openEdit(user);
+    const form = within(edit).getByLabelText("Store Name").closest("form")!;
+    // Both submits in the instant before "Saving..." renders: only the latch's
+    // synchronous ref can refuse the second.
+    act(() => {
+      fireEvent.submit(form);
+      fireEvent.submit(form);
+    });
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+
+    await release();
+    await waitFor(() => expect(queryEditDialog()).toBeNull());
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("a FAILED save stays open with the form intact, and can be sent again", async () => {
+    const user = userEvent.setup({ delay: null });
+    mockUpdate.mockImplementationOnce(async () => {
+      throw new Error("Store URL unreachable");
+    });
+    render(<AdminIntegrationsPage />);
+
+    const edit = await openEdit(user);
+    await user.clear(within(edit).getByLabelText("Store Name"));
+    await user.type(within(edit).getByLabelText("Store Name"), "Renamed Store");
+    await user.click(within(edit).getByRole("button", { name: "Save Changes" }));
+
+    const { toast } = jest.requireMock("sonner");
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Store URL unreachable"));
+    expect(queryEditDialog()).toBeInTheDocument();
+    expect(within(edit).getByLabelText("Store Name")).toHaveValue("Renamed Store");
+
+    await user.click(within(edit).getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(queryEditDialog()).toBeNull());
   });
 });

@@ -55,19 +55,34 @@ function unitWord(count: number): string {
   return count === 1 ? "unit" : "units";
 }
 
+/**
+ * The ledger row the 200 carries (`log`), or `null` when the answer has none
+ * that can be read — a body that did not parse arrives here as `{}`. Without
+ * it nothing can be said about a link either way (FR-R1 (7), CR-OC-5).
+ */
+function readableLog(result: unknown): { orderRecordId?: unknown } | null {
+  const log = (result as { log?: unknown } | null | undefined)?.log;
+  return typeof log === "object" && log !== null ? (log as { orderRecordId?: unknown }) : null;
+}
+
 /** The stored order id the server stamped the ledger row with (`log.orderRecordId` on the 200). */
 function stampedOrderId(result: unknown): string | null {
-  const log = (result as { log?: { orderRecordId?: unknown } } | null | undefined)?.log;
+  const log = readableLog(result);
   return typeof log?.orderRecordId === "string" ? log.orderRecordId : null;
 }
 
-/** The ONE 400 a picked order earns when it can no longer be used (`resolve-selected-order.ts`). */
+/**
+ * A picked order the save could not use: the ONE 400 the resolver answers when
+ * it can no longer be used (`resolve-selected-order.ts`), or the lock's 409
+ * `ORDER_GONE` when it vanished between that check and the write (FR-R1 (3),
+ * CR-OC-4). Both get the same recovery.
+ */
 function isRejectedPick(error: unknown): boolean {
   const err = error as ApiMutationError | null | undefined;
+  if (!(err instanceof Error)) return false;
   return (
-    err instanceof Error &&
-    err.code === "VALIDATION_ERROR" &&
-    err.message === SELECTED_ORDER_REJECTED_SENTENCE
+    (err.code === "VALIDATION_ERROR" && err.message === SELECTED_ORDER_REJECTED_SENTENCE) ||
+    err.code === "ORDER_GONE"
   );
 }
 
@@ -169,7 +184,7 @@ export function QuickAdjustDialog({
     rejectedPick === null
       ? null
       : rejectedPick === "number"
-        ? `That order can't be used anymore — tap "${verb} ${unitsPhrase}" again to save the number without linking it.`
+        ? `That order can't be used anymore — tap "${verb} ${unitsPhrase}" again to save the number; it links only if one order with that number is found.`
         : `That order can't be used anymore — tap "${verb} ${unitsPhrase}" again to save without an order number.`;
   const message = blockers[0] ?? rejectedNotice;
 
@@ -268,6 +283,10 @@ export function QuickAdjustDialog({
       const units = `${q} ${unitWord(q)}`;
       if (!isRemove) {
         toast.success(`Added ${units} of ${product.name} at ${location}.`);
+      } else if (readableLog(result) === null) {
+        // A 200 whose ledger row can't be read: the removal happened, and
+        // nothing is known about a link — so nothing is claimed (FR-R1 (7)).
+        toast.success(`Removed ${units} of ${product.name} at ${location}.`);
       } else if (intent !== "order") {
         toast.success(`Removed ${units} of ${product.name} at ${location}.`);
       } else if (sentPick === null && sentReference === null) {
@@ -299,7 +318,8 @@ export function QuickAdjustDialog({
       if (sentPick !== null && isRejectedPick(error)) {
         // The picked order can't be used anymore (deleted, or no longer the
         // operator's). No error toast: keep the number when it is one, drop the
-        // pick, and let the next tap save the number unlinked.
+        // pick, and let the next tap save the number — which the server then
+        // resolves like any typed number (it links only on one match).
         const text = ORDER_REFERENCE_SHAPE.test(sentPick.orderNumber) ? sentPick.orderNumber : "";
         setCapture({ text, picked: null });
         setRejectedPick(text === "" ? "none" : "number");

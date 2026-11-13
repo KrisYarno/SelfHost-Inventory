@@ -22,7 +22,7 @@
  */
 
 import * as React from "react";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -323,5 +323,117 @@ describe("memberships", () => {
     const sent = await save(user);
 
     expect(sent.body).toEqual({ companies: [] });
+  });
+});
+
+// ===========================================================================
+// FR-R1 (2): the read states, and the submit latch (CR-OC-3)
+// ===========================================================================
+
+describe("before the fresh read answers, there is no form", () => {
+  function renderWithoutUser(readFailed?: boolean) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <EditUserDialog
+          user={null}
+          readFailed={readFailed}
+          open
+          onOpenChange={jest.fn()}
+          onSuccess={jest.fn()}
+          locations={LOCATIONS}
+          companies={COMPANIES}
+        />
+      </QueryClientProvider>,
+    );
+  }
+
+  it("in flight: `Loading…`, and no field, no Save", () => {
+    renderWithoutUser();
+    expect(screen.getByRole("heading", { name: "Edit User" })).toBeInTheDocument();
+    expect(screen.getByText("Loading…")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Username")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save Changes" })).toBeNull();
+  });
+
+  it("failed: `Couldn't load this user.`, and no field, no Save", () => {
+    renderWithoutUser(true);
+    expect(screen.getByText("Couldn't load this user.")).toBeInTheDocument();
+    expect(screen.queryByText("Loading…")).toBeNull();
+    expect(screen.queryByLabelText("Username")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save Changes" })).toBeNull();
+  });
+});
+
+describe("a save in flight: one PATCH, and no dismissal (M-a.1)", () => {
+  /** Hold every PATCH until the returned release is called. */
+  function holdPatch() {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    global.fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === "PATCH") await held;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ message: "User updated successfully", user: {} }),
+      };
+    }) as unknown as typeof fetch;
+    return () => act(async () => release());
+  }
+
+  it("a double Enter sends ONE PATCH", async () => {
+    const release = holdPatch();
+    const { onOpenChange } = renderDialog();
+    fireEvent.change(usernameField(), { target: { value: "packer2" } });
+
+    // Both submits in the instant before any render: only the latch's
+    // synchronous ref can refuse the second.
+    act(() => {
+      fireEvent.submit(usernameField().closest("form")!);
+      fireEvent.submit(usernameField().closest("form")!);
+    });
+    await waitFor(() => expect(patches()).toHaveLength(1));
+
+    await release();
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(patches()).toHaveLength(1);
+  });
+
+  it("a double tap on Save sends ONE PATCH", async () => {
+    const release = holdPatch();
+    renderDialog();
+    fireEvent.change(usernameField(), { target: { value: "packer2" } });
+
+    act(() => {
+      fireEvent.click(saveButton());
+      fireEvent.click(saveButton());
+    });
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    await release();
+    expect(patches()).toHaveLength(1);
+  });
+
+  it("Escape and Cancel mid-write do not close; the answer does, once, through the raw callback", async () => {
+    const user = userEvent.setup();
+    const release = holdPatch();
+    const { onOpenChange, onSuccess } = renderDialog();
+
+    await user.type(usernameField(), "2");
+    await user.click(saveButton());
+    await waitFor(() => expect(patches()).toHaveLength(1));
+
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onOpenChange).not.toHaveBeenCalled();
+    // The whole form is frozen while it is in flight.
+    expect(usernameField()).toBeDisabled();
+
+    await release();
+    await waitFor(() => expect(onOpenChange.mock.calls).toEqual([[false]]));
+    expect(onSuccess).toHaveBeenCalledTimes(1);
   });
 });

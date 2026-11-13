@@ -6,6 +6,7 @@ import { ArrowLeftRight, MapPin, AlertCircle, Package } from 'lucide-react';
 import { useLocation } from '@/contexts/location-context';
 import { useProductLocationQuantity } from '@/hooks/use-product-location-quantity';
 import { useTransferInventory, type ApiMutationError } from '@/hooks/use-inventory-mutations';
+import { useSubmitLatch } from '@/hooks/use-submit-latch';
 import {
   Dialog,
   DialogContent,
@@ -72,7 +73,6 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
   const [fromLocationId, setFromLocationId] = React.useState<number | null>(null);
   const [toLocationId, setToLocationId] = React.useState<number | null>(null);
   const [quantity, setQuantity] = React.useState<string>('');
-  const [isSubmitting, setIsSubmitting] = React.useState(false);
 
   const [insufficient, setInsufficient] = React.useState<InsufficientState | null>(null);
   // "Change the quantity" hands focus back to this field when the alert closes.
@@ -85,6 +85,12 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
     enabled: open,
   });
   const transferMutation = useTransferInventory();
+  // The shared submit latch (§ P2-B3-1R, M-a.1; FR-R1 (1)): one transfer per
+  // tap, and no dismissal (Escape, a click outside, the X, Cancel) while it is
+  // in flight. The hosts mount this dialog per open, so a dismissal mid-request
+  // used to UNMOUNT it, and a not-enough-stock answer then landed on nothing —
+  // no alert, no toast (CR-G1-1). `busy` is the same fact for rendering.
+  const { busy, run, guardOpenChange } = useSubmitLatch();
 
   const fromQuantity = fromQuantityQuery.data ?? null;
   const loadingFromQuantity = fromQuantityQuery.isLoading;
@@ -106,8 +112,16 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
   const canSubmit = !!fromLocationId && !!toLocationId && fromLocationId !== toLocationId && qtyNum > 0;
   const sourceDisplayQty = fromQuantity ?? 0;
   const destinationDisplayQty = toQuantityQuery.data ?? 0;
-  const projectedSource = qtyNum > 0 ? sourceDisplayQty - qtyNum : sourceDisplayQty;
-  const projectedDestination = qtyNum > 0 ? destinationDisplayQty + qtyNum : destinationDisplayQty;
+  // The after-transfer line is a projection, so it is drawn only from KNOWN
+  // stock: BOTH reads answered (FR-R1 (4), CR-OC-2). Loading or failed is not
+  // 0, and a line computed from it would state numbers nobody read.
+  const projection =
+    fromQuantityQuery.status === 'success' && toQuantityQuery.status === 'success'
+      ? {
+          source: fromQuantityQuery.data - qtyNum,
+          destination: toQuantityQuery.data + qtyNum,
+        }
+      : null;
   const hasSameLocation = Boolean(fromLocationId && toLocationId && fromLocationId === toLocationId);
 
   const handleIncrement = () => {
@@ -147,11 +161,17 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
       quantity: qtyNum,
     };
 
-    setIsSubmitting(true);
     try {
-      await transferMutation.mutateAsync(payload);
+      const settled = await run(async () => {
+        await transferMutation.mutateAsync(payload);
+        return true as const;
+      });
+      // A second tap while the first holds the latch: nothing was sent.
+      if (settled === undefined) return;
 
       toast.success(`Moved ${payload.quantity} units of ${product.name}`);
+      // The host's RAW callback, never the guard, which drops a close while a
+      // submit holds the latch.
       onOpenChange(false);
       setQuantity('');
       setInsufficient(null);
@@ -172,14 +192,17 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
       }
       console.error('Error performing transfer:', error);
       toast.error(error instanceof Error ? error.message : 'Failed to transfer inventory');
-    } finally {
-      setIsSubmitting(false);
     }
   };
 
+  // Escape, a click outside, the X and Cancel — dropped while a transfer is in
+  // flight (the latch's synchronous ref; FD3-1). A failed one releases it, and
+  // the answer (the not-enough-stock alert included) lands on a mounted dialog.
+  const handleOpenChange = guardOpenChange(onOpenChange);
+
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className="max-w-md w-[95vw] sm:w-full overflow-hidden border border-border bg-background p-0 shadow-2xl">
           <div className="space-y-5 p-6">
             <DialogHeader className="space-y-2">
@@ -218,160 +241,163 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
               </div>
             </DialogHeader>
 
-            {/* From / To location selectors */}
-            <div className="space-y-4 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
-              <div className="space-y-1.5">
-                <Label className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-                  <MapPin className="h-3.5 w-3.5 text-muted-foreground" />
-                  From location
-                </Label>
-                <Select
-                  value={fromLocationId ? String(fromLocationId) : undefined}
-                  onValueChange={(value) => {
-                    const id = Number(value);
-                    setFromLocationId(id);
-                    if (id === toLocationId) {
-                      const alt = locations.find((loc) => loc.id !== id);
-                      setToLocationId(alt?.id ?? null);
-                    }
-                  }}
-                >
-                  <SelectTrigger className="mt-0.5 h-10 w-full rounded-md border border-border bg-surface text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
-                    <SelectValue placeholder="Select source" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-surface text-foreground">
-                    {locations.map((loc) => (
-                      <SelectItem key={loc.id} value={String(loc.id)}>
-                        {loc.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                  <span>Current stock:</span>
-                  {fromQuantityQuery.isError ? (
-                    <span className="text-destructive">Could not load current stock</span>
-                  ) : (
-                    <ValueChip
-                      tone={sourceDisplayQty > 0 ? 'positive' : sourceDisplayQty < 0 ? 'negative' : 'neutral'}
-                      className="text-[10px]"
-                    >
-                      {loadingFromQuantity ? '...' : `${sourceDisplayQty} units`}
-                    </ValueChip>
+            {/* While a transfer is in flight the fields are frozen (M-a.1). */}
+            <fieldset disabled={busy} className="min-w-0 space-y-5">
+              {/* From / To location selectors */}
+              <div className="space-y-4 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
+                <div className="space-y-1.5">
+                  <Label className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                    <MapPin className="h-3.5 w-3.5 text-muted-foreground" />
+                    From location
+                  </Label>
+                  <Select
+                    value={fromLocationId ? String(fromLocationId) : undefined}
+                    onValueChange={(value) => {
+                      const id = Number(value);
+                      setFromLocationId(id);
+                      if (id === toLocationId) {
+                        const alt = locations.find((loc) => loc.id !== id);
+                        setToLocationId(alt?.id ?? null);
+                      }
+                    }}
+                  >
+                    <SelectTrigger className="mt-0.5 h-10 w-full rounded-md border border-border bg-surface text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+                      <SelectValue placeholder="Select source" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-surface text-foreground">
+                      {locations.map((loc) => (
+                        <SelectItem key={loc.id} value={String(loc.id)}>
+                          {loc.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                    <span>Current stock:</span>
+                    {fromQuantityQuery.isError ? (
+                      <span className="text-destructive">Could not load current stock</span>
+                    ) : (
+                      <ValueChip
+                        tone={sourceDisplayQty > 0 ? 'positive' : sourceDisplayQty < 0 ? 'negative' : 'neutral'}
+                        className="text-[10px]"
+                      >
+                        {loadingFromQuantity ? '...' : `${sourceDisplayQty} units`}
+                      </ValueChip>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                    <MapPin className="h-3.5 w-3.5 text-muted-foreground" />
+                    To location
+                  </Label>
+                  <Select
+                    value={toLocationId ? String(toLocationId) : undefined}
+                    onValueChange={(value) => setToLocationId(Number(value))}
+                  >
+                    <SelectTrigger className="mt-0.5 h-10 w-full rounded-md border border-border bg-surface text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+                      <SelectValue placeholder="Select destination" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-surface text-foreground">
+                      {locations.map((loc) => (
+                        <SelectItem key={loc.id} value={String(loc.id)}>
+                          {loc.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                    <span>Current stock:</span>
+                    {toQuantityQuery.isError ? (
+                      <span className="text-destructive">Could not load current stock</span>
+                    ) : (
+                      <ValueChip
+                        tone={destinationDisplayQty > 0 ? 'positive' : destinationDisplayQty < 0 ? 'negative' : 'neutral'}
+                        className="text-[10px]"
+                      >
+                        {loadingToQuantity ? '...' : `${destinationDisplayQty} units`}
+                      </ValueChip>
+                    )}
+                  </div>
+                  {hasSameLocation && (
+                    <p className="mt-1 flex items-center gap-1 text-xs text-destructive">
+                      <AlertCircle className="h-3 w-3" />
+                      Source and destination must be different.
+                    </p>
                   )}
                 </div>
               </div>
 
-              <div className="space-y-1.5">
-                <Label className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-                  <MapPin className="h-3.5 w-3.5 text-muted-foreground" />
-                  To location
-                </Label>
-                <Select
-                  value={toLocationId ? String(toLocationId) : undefined}
-                  onValueChange={(value) => setToLocationId(Number(value))}
-                >
-                  <SelectTrigger className="mt-0.5 h-10 w-full rounded-md border border-border bg-surface text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
-                    <SelectValue placeholder="Select destination" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-surface text-foreground">
-                    {locations.map((loc) => (
-                      <SelectItem key={loc.id} value={String(loc.id)}>
-                        {loc.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                  <span>Current stock:</span>
-                  {toQuantityQuery.isError ? (
-                    <span className="text-destructive">Could not load current stock</span>
-                  ) : (
-                    <ValueChip
-                      tone={destinationDisplayQty > 0 ? 'positive' : destinationDisplayQty < 0 ? 'negative' : 'neutral'}
-                      className="text-[10px]"
-                    >
-                      {loadingToQuantity ? '...' : `${destinationDisplayQty} units`}
-                    </ValueChip>
-                  )}
+              {/* Quantity + stepper */}
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-muted-foreground">Quantity to move</p>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-10 w-10 rounded-md border-border bg-surface text-xl text-foreground"
+                    aria-label="Decrease quantity"
+                    onClick={handleDecrement}
+                    disabled={busy}
+                  >
+                    −
+                  </Button>
+                  <Input
+                    ref={qtyRef}
+                    type="number"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={quantity}
+                    onChange={(e) => setQuantity(e.target.value)}
+                    className="h-10 w-24 rounded-md border-border bg-surface text-center text-lg font-semibold tracking-wider text-foreground"
+                    placeholder="0"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-10 w-10 rounded-md border-border bg-surface text-xl text-foreground"
+                    aria-label="Increase quantity"
+                    onClick={handleIncrement}
+                    disabled={busy}
+                  >
+                    +
+                  </Button>
                 </div>
-                {hasSameLocation && (
-                  <p className="mt-1 flex items-center gap-1 text-xs text-destructive">
-                    <AlertCircle className="h-3 w-3" />
-                    Source and destination must be different.
-                  </p>
-                )}
+                <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
+                  {qtyNum > 0 && projection !== null ? (
+                    <>
+                      After transfer:{' '}
+                      <InlineHighlight className="text-foreground">
+                        {fromLoc?.name ?? 'Source'}
+                      </InlineHighlight>{' '}
+                      -&gt;{' '}
+                      <span className={projection.source < 0 ? 'text-destructive font-semibold' : 'text-foreground font-semibold'}>
+                        {projection.source} units
+                      </span>{' '}
+                      |{' '}
+                      <InlineHighlight className="text-foreground">
+                        {toLoc?.name ?? 'Destination'}
+                      </InlineHighlight>{' '}
+                      -&gt;{' '}
+                      <span className="text-success font-semibold">
+                        {projection.destination} units
+                      </span>
+                    </>
+                  ) : null}
+                </p>
               </div>
-            </div>
-
-            {/* Quantity + stepper */}
-            <div className="space-y-2">
-              <p className="text-xs font-medium text-muted-foreground">Quantity to move</p>
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  className="h-10 w-10 rounded-md border-border bg-surface text-xl text-foreground"
-                  aria-label="Decrease quantity"
-                  onClick={handleDecrement}
-                  disabled={isSubmitting}
-                >
-                  −
-                </Button>
-                <Input
-                  ref={qtyRef}
-                  type="number"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  value={quantity}
-                  onChange={(e) => setQuantity(e.target.value)}
-                  className="h-10 w-24 rounded-md border-border bg-surface text-center text-lg font-semibold tracking-wider text-foreground"
-                  placeholder="0"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  className="h-10 w-10 rounded-md border-border bg-surface text-xl text-foreground"
-                  aria-label="Increase quantity"
-                  onClick={handleIncrement}
-                  disabled={isSubmitting}
-                >
-                  +
-                </Button>
-              </div>
-              <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
-                {qtyNum > 0 ? (
-                  <>
-                    After transfer:{' '}
-                    <InlineHighlight className="text-foreground">
-                      {fromLoc?.name ?? 'Source'}
-                    </InlineHighlight>{' '}
-                    -&gt;{' '}
-                    <span className={projectedSource < 0 ? 'text-destructive font-semibold' : 'text-foreground font-semibold'}>
-                      {projectedSource} units
-                    </span>{' '}
-                    |{' '}
-                    <InlineHighlight className="text-foreground">
-                      {toLoc?.name ?? 'Destination'}
-                    </InlineHighlight>{' '}
-                    -&gt;{' '}
-                    <span className="text-success font-semibold">
-                      {projectedDestination} units
-                    </span>
-                  </>
-                ) : null}
-              </p>
-            </div>
+            </fieldset>
 
             <DialogFooter className="mt-2 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <Button
                 type="button"
                 variant="outline"
                 className="h-10 w-full sm:w-auto"
-                onClick={() => onOpenChange(false)}
-                disabled={isSubmitting}
+                onClick={() => handleOpenChange(false)}
+                disabled={busy}
               >
                 Cancel
               </Button>
@@ -379,9 +405,9 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                 type="button"
                 className="h-10 w-full bg-primary text-primary-foreground hover:bg-primary/90 sm:w-auto"
                 onClick={handleSubmit}
-                disabled={!canSubmit || isSubmitting}
+                disabled={!canSubmit || busy}
               >
-                {isSubmitting ? 'Transferring...' : qtyNum > 0 ? `Transfer ${qtyNum} units` : 'Transfer'}
+                {busy ? 'Transferring...' : qtyNum > 0 ? `Transfer ${qtyNum} units` : 'Transfer'}
               </Button>
             </DialogFooter>
           </div>

@@ -572,9 +572,15 @@ export function FulfillOrderDialog({
               <>
                 {/* § P2-B3-1R (MS-1-4): the action names the lines and the
                     location it will deduct from. With no location chosen it
-                    says so — "No Items to Fulfill" there would be untrue. */}
+                    says so — "No Items to Fulfill" there would be untrue. So
+                    would it while the stock there is still being checked, or
+                    when the check failed (FR-R1 (5), CR-G1-4): those say so. */}
                 {selectedLocation === null
                   ? "Select a location"
+                  : isLoadingValidation
+                  ? `Checking stock at ${selectedLocation.name}…`
+                  : validationQuery.isError
+                  ? `Couldn't check stock at ${selectedLocation.name}`
                   : itemsWithStock > 0
                   ? `Fulfill ${itemsWithStock} ${itemsWithStock === 1 ? "line" : "lines"} from ${selectedLocation.name}`
                   : "No Items to Fulfill"}

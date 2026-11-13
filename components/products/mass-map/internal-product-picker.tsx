@@ -147,17 +147,25 @@ export function InternalProductPicker({
       );
     }
     if (seed?.status === "failed") {
+      // Retry, or a way OUT (FR-R1 (11), CR-G1-5): on desktop the picker is an
+      // inline panel with no close of its own, so `Cancel` closes the selection
+      // the way the editor's Cancel does.
       return (
         <div className="space-y-3 py-6 text-center">
           <p role="alert" className="flex items-center justify-center gap-2 text-sm text-destructive">
             <AlertCircle className="h-4 w-4 shrink-0" />
             {BUNDLE_LOAD_FAILED}
           </p>
-          {onRetryBundleSeed && (
-            <Button variant="outline" size="sm" onClick={onRetryBundleSeed}>
-              Retry
+          <div className="flex justify-center gap-2">
+            <Button variant="outline" size="sm" onClick={onCancel}>
+              Cancel
             </Button>
-          )}
+            {onRetryBundleSeed && (
+              <Button variant="outline" size="sm" onClick={onRetryBundleSeed}>
+                Retry
+              </Button>
+            )}
+          </div>
         </div>
       );
     }

@@ -26,8 +26,14 @@ jest.mock("@/hooks/use-csrf", () => ({
   useCSRF: () => ({ token: "t", isLoading: false, error: null, refreshToken: async () => {} }),
   withCSRFHeaders: (h: HeadersInit) => h,
 }));
+// Mutable so a pin can stand the operator at no location (FR-R1 (4)); every
+// other pin is at Office.
+const mockLocation: { selectedLocationId: number | null; locations: Array<{ id: number; name: string }> } = {
+  selectedLocationId: 2,
+  locations: [{ id: 2, name: "Office" }],
+};
 jest.mock("@/contexts/location-context", () => ({
-  useLocation: () => ({ selectedLocationId: 2, locations: [{ id: 2, name: "Office" }] }),
+  useLocation: () => mockLocation,
 }));
 jest.mock("sonner", () => ({
   toast: { error: jest.fn(), success: jest.fn(), warning: jest.fn() },
@@ -43,12 +49,16 @@ const PRODUCT_B = { id: 43, name: "BPC 5mg" };
 type Answer = { status: number; body: Record<string, unknown> };
 let stockInAnswer: Answer;
 let holdStockIn: Promise<void> | null;
+/** The current-stock read: a count, a failure, or an answer that never comes. */
+let stockRead: number | "error" | "hang";
 
 function mockFetch() {
   const fn = jest.fn(async (url: RequestInfo | URL) => {
     const href = String(url);
     if (href.includes("/api/inventory/product/")) {
-      return { ok: true, json: async () => ({ currentQuantity: 7 }) } as unknown as Response;
+      if (stockRead === "hang") return new Promise<Response>(() => {});
+      if (stockRead === "error") return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
+      return { ok: true, json: async () => ({ currentQuantity: stockRead }) } as unknown as Response;
     }
     if (href.includes("/api/inventory/stock-in")) {
       if (holdStockIn) await holdStockIn;
@@ -111,6 +121,8 @@ beforeEach(() => {
   window.sessionStorage.setItem(RECEIVING_PROMPT_SESSION_KEY, "1");
   stockInAnswer = { status: 200, body: { success: true } };
   holdStockIn = null;
+  stockRead = 7;
+  mockLocation.selectedLocationId = 2;
   mockFetch();
 });
 
@@ -302,5 +314,67 @@ describe("a stock-in in flight cannot be dismissed", () => {
     await waitFor(() => expect(cancelButton()).toBeEnabled());
     await user.click(cancelButton());
     expect(onOpenChange.mock.calls).toEqual([[false]]);
+  });
+});
+
+// ===========================================================================
+// FR-R1 (4): the current-stock chip — the adjust dialog's four states, and no
+// projection from stock that is not known (CR-OC-2, CR-G1-7)
+// ===========================================================================
+
+describe("the current-stock chip", () => {
+  const chip = () => screen.getByTestId("stock-in-stock");
+  const newTotal = () => screen.queryByText(/^New:/);
+
+  it("`Reading stock…` while the read is in flight — and no new total, even with a quantity", () => {
+    stockRead = "hang";
+    renderDialog();
+    fireEvent.change(quantityField(), { target: { value: "5" } });
+    expect(chip()).toHaveTextContent("Reading stock…");
+    expect(chip()).not.toHaveTextContent(/\d/);
+    expect(newTotal()).toBeNull();
+  });
+
+  it("`{n} units` once the read answers, and the new total from it", async () => {
+    renderDialog();
+    await waitFor(() => expect(chip()).toHaveTextContent("7 units"));
+    expect(newTotal()).toBeNull();
+    fireEvent.change(quantityField(), { target: { value: "5" } });
+    expect(newTotal()).toHaveTextContent("New: 12");
+  });
+
+  it("`1 unit` for one", async () => {
+    stockRead = 1;
+    renderDialog();
+    await waitFor(() => expect(chip()).toHaveTextContent(/^1 unit$/));
+  });
+
+  it("`0 units` is a KNOWN zero — the new total is drawn from it", async () => {
+    stockRead = 0;
+    renderDialog();
+    await waitFor(() => expect(chip()).toHaveTextContent("0 units"));
+    fireEvent.change(quantityField(), { target: { value: "5" } });
+    expect(newTotal()).toHaveTextContent("New: 5");
+  });
+
+  it("a failed read: `Couldn't read current stock — it will be checked when you save.`, never 0, and no new total", async () => {
+    stockRead = "error";
+    renderDialog();
+    fireEvent.change(quantityField(), { target: { value: "5" } });
+    await waitFor(() =>
+      expect(chip()).toHaveTextContent("Couldn't read current stock — it will be checked when you save."),
+    );
+    expect(chip()).not.toHaveTextContent(/\d/);
+    expect(newTotal()).toBeNull();
+  });
+
+  it("no location: `No location selected.`, no read, and no new total", () => {
+    mockLocation.selectedLocationId = null;
+    const fetchFn = mockFetch();
+    renderDialog();
+    fireEvent.change(quantityField(), { target: { value: "5" } });
+    expect(chip()).toHaveTextContent("No location selected.");
+    expect(newTotal()).toBeNull();
+    expect(fetchFn.mock.calls.filter(([url]) => String(url).includes("/api/inventory/product/"))).toHaveLength(0);
   });
 });

@@ -317,6 +317,28 @@ describe("MassMapClient — the bundle editor's seed (MS-2-1)", () => {
     expect(editorShown()).toBeNull();
   });
 
+  // FR-R1 (11), CR-G1-5: the failed view's way out on desktop.
+  it("Cancel from the failed view: no selection, no editor; a reopen loads afresh", async () => {
+    const { container } = bundleHarness();
+    const user = await openMappedTab();
+
+    await user.click(rowButton(container, "10::"));
+    await answer(0, { ok: false, status: 500, json: async () => ({}) });
+    expect(screen.getByText(FAILED)).toBeInTheDocument();
+    // The row is the active selection (the list's ring).
+    expect(rowButton(container, "10::")).toHaveClass("ring-primary/40");
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByText(FAILED)).toBeNull();
+    expect(editorShown()).toBeNull();
+    expect(screen.getByText(/Pick a row from the list to map it/)).toBeInTheDocument();
+    expect(rowButton(container, "10::")).not.toHaveClass("ring-primary/40");
+
+    await user.click(rowButton(container, "10::"));
+    expect(mappingCalls).toHaveLength(2);
+    expect(screen.getByTestId("bundle-seed-loading")).toBeInTheDocument();
+  });
+
   it("Retry recovers: a fresh fetch, then the real components", async () => {
     const { container } = bundleHarness();
     const user = await openMappedTab();

@@ -12,7 +12,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import * as React from "react";
@@ -33,6 +33,11 @@ jest.mock("@/contexts/location-context", () => {
   };
 });
 
+jest.mock("sonner", () => ({
+  toast: { error: jest.fn(), success: jest.fn(), warning: jest.fn() },
+}));
+
+import { toast } from "sonner";
 import { TransferDialog } from "@/components/inventory/transfer-dialog";
 
 const wrap = (ui: React.ReactElement) => {
@@ -193,4 +198,200 @@ it("no file under components/, hooks/ or app/(app)/ contains `autoAddForTransfer
     walk(path.join(root, tree));
   }
   expect(hits).toEqual([]);
+});
+
+// ===========================================================================
+// FR-R1 (1): the shared submit latch (CR-G1-1, CR-OC-7a)
+//
+// The hosts mount this dialog PER OPEN, and its `onOpenChange` was raw: an
+// Escape while the transfer was in flight UNMOUNTED it, and a not-enough-stock
+// answer then set state on nothing — no alert, no toast, and the operator
+// believed the stock had moved. A double tap sent two transfers.
+// ===========================================================================
+
+describe("a transfer in flight (M-a.1)", () => {
+  /** Hold the transfer POST until released; it then answers with `answer`. */
+  function holdTransfer(answer: { status: number; body: Record<string, unknown> }) {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fn = jest.fn(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u.includes("/api/inventory/transfer")) {
+        await held;
+        return { ok: answer.status < 400, status: answer.status, json: async () => answer.body };
+      }
+      if (u.includes("/api/inventory/product/")) {
+        const locationId = new URL(u, "http://test.local").searchParams.get("locationId");
+        return { ok: true, json: async () => ({ currentQuantity: locationId === "2" ? 2 : 0 }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    global.fetch = fn as unknown as typeof fetch;
+    return { fn, release: () => act(async () => release()) };
+  }
+
+  const transferCalls = (fn: jest.Mock) =>
+    fn.mock.calls.filter(([url]) => String(url).includes("/api/inventory/transfer"));
+
+  /** The pages' shape: rendered only while open, unmounted on close. */
+  function PerOpenHost({ onOpenChange }: { onOpenChange: jest.Mock }) {
+    const [open, setOpen] = React.useState(true);
+    return open ? (
+      <TransferDialog
+        open
+        onOpenChange={(next) => {
+          onOpenChange(next);
+          setOpen(next);
+        }}
+        product={{ id: 42, name: "AOD 2mg" }}
+      />
+    ) : null;
+  }
+
+  async function typeFive() {
+    expect(await screen.findAllByText(/2 units/)).not.toHaveLength(0);
+    fireEvent.change(quantityField(), { target: { value: "5" } });
+  }
+
+  it("Escape while the POST is pending does not close; the not-enough-stock alert still shows when the answer arrives", async () => {
+    const user = userEvent.setup();
+    const onOpenChange = jest.fn();
+    const { fn, release } = holdTransfer({ status: 400, body: insufficientBody({ currentQuantity: 2 }) });
+    wrap(<PerOpenHost onOpenChange={onOpenChange} />);
+    await typeFive();
+
+    await user.click(screen.getByRole("button", { name: /transfer 5 units/i }));
+    await waitFor(() => expect(transferCalls(fn)).toHaveLength(1));
+    expect(screen.getByRole("button", { name: "Transferring..." })).toBeDisabled();
+
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    // Cancel is refused too, and the fields are frozen.
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(quantityField()).toBeDisabled();
+
+    await release();
+    const alert = await screen.findByRole("alertdialog");
+    expect(alert).toHaveTextContent("Only 2 units at Office.");
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("Escape in the instant after the tap (before any render) is dropped too", async () => {
+    const onOpenChange = jest.fn();
+    const { release } = holdTransfer({ status: 400, body: insufficientBody({ currentQuantity: 2 }) });
+    wrap(<PerOpenHost onOpenChange={onOpenChange} />);
+    await typeFive();
+
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /transfer 5 units/i }));
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    });
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    await release();
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Only 2 units at Office.");
+  });
+
+  it("a double tap sends ONE transfer", async () => {
+    const onOpenChange = jest.fn();
+    const { fn, release } = holdTransfer({ status: 200, body: { success: true } });
+    wrap(<PerOpenHost onOpenChange={onOpenChange} />);
+    await typeFive();
+
+    // Both taps in the instant before "Transferring..." renders (FD3-1): only
+    // the latch's synchronous ref can refuse the second.
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /transfer 5 units/i }));
+      fireEvent.click(screen.getByRole("button", { name: /transfer 5 units/i }));
+    });
+    await waitFor(() => expect(transferCalls(fn)).toHaveLength(1));
+
+    await release();
+    // The success closes it — once, through the host's raw callback.
+    await waitFor(() => expect(onOpenChange.mock.calls).toEqual([[false]]));
+    expect(transferCalls(fn)).toHaveLength(1);
+    expect(toast.success as jest.Mock).toHaveBeenCalledWith("Moved 5 units of AOD 2mg");
+  });
+
+  it("a FAILED transfer releases the latch: Transfer sends again, Cancel closes", async () => {
+    const onOpenChange = jest.fn();
+    const { fn, release } = holdTransfer({ status: 500, body: { error: "boom" } });
+    wrap(<PerOpenHost onOpenChange={onOpenChange} />);
+    await typeFive();
+
+    fireEvent.click(screen.getByRole("button", { name: /transfer 5 units/i }));
+    await release();
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalledWith("boom"));
+    await waitFor(() => expect(screen.getByRole("button", { name: /transfer 5 units/i })).toBeEnabled());
+
+    fireEvent.click(screen.getByRole("button", { name: /transfer 5 units/i }));
+    await waitFor(() => expect(transferCalls(fn)).toHaveLength(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+  });
+});
+
+// ===========================================================================
+// FR-R1 (4): the after-transfer line is drawn only from KNOWN stock (CR-OC-2)
+// ===========================================================================
+
+describe("the after-transfer line", () => {
+  type Read = number | "error" | "hang";
+  /** Answer each location's stock read: a count, a failure, or never. */
+  function stockReads(source: Read, destination: Read) {
+    const fn = jest.fn((url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u.includes("/api/inventory/product/")) {
+        const locationId = new URL(u, "http://test.local").searchParams.get("locationId");
+        const read = locationId === "2" ? source : destination;
+        if (read === "hang") return new Promise(() => {});
+        if (read === "error") return Promise.resolve({ ok: false, status: 500, json: async () => ({}) });
+        return Promise.resolve({ ok: true, json: async () => ({ currentQuantity: read }) });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    global.fetch = fn as unknown as typeof fetch;
+  }
+
+  const afterLine = () => screen.getByRole("status");
+
+  function renderAndType(qty: string) {
+    wrap(<TransferDialog open onOpenChange={() => {}} product={{ id: 42, name: "AOD 2mg" }} />);
+    fireEvent.change(quantityField(), { target: { value: qty } });
+  }
+
+  it("both reads answered: the projection from the read counts", async () => {
+    stockReads(7, 4);
+    renderAndType("3");
+    await waitFor(() =>
+      expect(afterLine()).toHaveTextContent("After transfer: Office -> 4 units | Warehouse -> 7 units"),
+    );
+  });
+
+  it.each([
+    ["the source still reading", "hang", 4],
+    ["the destination still reading", 7, "hang"],
+    ["the source read failed", "error", 4],
+    ["the destination read failed", 7, "error"],
+    ["both failed", "error", "error"],
+  ] as Array<[string, Read, Read]>)("%s: NO projection (unknown is not 0)", async (_label, source, destination) => {
+    stockReads(source, destination);
+    renderAndType("3");
+    // Let every read that will answer, answer, before the line is judged: a
+    // count shows as its chip, a failure as the chips' failure text (the
+    // source has two chips, the destination one).
+    const failures = (source === "error" ? 2 : 0) + (destination === "error" ? 1 : 0);
+    await waitFor(() => {
+      if (typeof source === "number") expect(screen.getAllByText(`${source} units`)).toHaveLength(2);
+      if (typeof destination === "number") expect(screen.getAllByText(`${destination} units`)).toHaveLength(1);
+      expect(screen.queryAllByText("Could not load current stock")).toHaveLength(failures);
+    });
+    expect(afterLine()).toBeEmptyDOMElement();
+  });
 });

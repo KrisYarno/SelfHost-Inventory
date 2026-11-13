@@ -318,6 +318,66 @@ describe("the picker", () => {
   });
 });
 
+// FR-R1 (9), CR-G1-8: an answer renders only once it is for the CURRENT text,
+// and a refused search says why in the server's words.
+describe("the picker's answer is for the current text", () => {
+  it("NO rows (and no empty sentence) during the debounce gap; the answer for the new text renders after it", async () => {
+    const user = userEvent.setup();
+    renderPicker(makeRow());
+    const field = screen.getByLabelText(/order number/i);
+    await user.type(field, "1009");
+    expect(await screen.findByTestId("order-result-ord-2")).toBeInTheDocument();
+
+    // One more digit: the key is still "1009" for 250 ms, and its rows are not
+    // an answer to "10091".
+    await user.type(field, "1");
+    expect(field).toHaveValue("10091");
+    expect(screen.queryByTestId("order-result-ord-2")).toBeNull();
+    expect(screen.queryByText("No order number contains what you typed.")).toBeNull();
+    expect(screen.queryByTestId("order-search-more")).toBeNull();
+
+    await waitFor(() => expect(useOrderSearchMock).toHaveBeenLastCalledWith("10091"));
+    expect(await screen.findByTestId("order-result-ord-2")).toBeInTheDocument();
+  });
+
+  it("a refused search renders the server's 400 sentence", async () => {
+    const user = userEvent.setup();
+    useOrderSearchMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: Object.assign(new Error("Request failed (400)"), {
+        status: 400,
+        serverMessage: "search text is at most 40 characters",
+      }),
+    });
+    renderPicker(makeRow());
+    await user.type(screen.getByLabelText(/order number/i), "1".repeat(41));
+
+    expect(await screen.findByText("search text is at most 40 characters")).toBeInTheDocument();
+    expect(screen.getByTestId("order-search-error")).toHaveAttribute("role", "alert");
+    expect(screen.queryByText("No order number contains what you typed.")).toBeNull();
+  });
+
+  it("a 5xx's prose is for a log, not the screen", async () => {
+    const user = userEvent.setup();
+    useOrderSearchMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: Object.assign(new Error("Request failed (500)"), {
+        status: 500,
+        serverMessage: "PrismaClientKnownRequestError: connection lost",
+      }),
+    });
+    renderPicker(makeRow());
+    await user.type(screen.getByLabelText(/order number/i), "1009");
+    await waitFor(() => expect(useOrderSearchMock).toHaveBeenLastCalledWith("1009"));
+    expect(screen.queryByText(/PrismaClientKnownRequestError/)).toBeNull();
+    expect(screen.queryByTestId("order-search-error")).toBeNull();
+  });
+});
+
 describe("the confirm", () => {
   it("says what it cannot compute instead of showing an empty overlap", async () => {
     const user = userEvent.setup();

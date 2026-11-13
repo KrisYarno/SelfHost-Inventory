@@ -86,10 +86,13 @@ export default function AdminIntegrationsPage() {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [editingIntegration, setEditingIntegration] = useState<Integration | null>(null);
   const [formData, setFormData] = useState<IntegrationFormData>(EMPTY_FORM);
-  const [submitting, setSubmitting] = useState(false);
   // The create dialog's latch: one create per tap, and no dismissal while it is
   // in flight (M-a.1).
   const { busy: creating, run: runCreate, guardOpenChange } = useSubmitLatch();
+  // The Edit dialog's own latch (FR-R1 (10), CR-OC-7b): one PUT per tap, and no
+  // dismissal while it is in flight — so a late success can never close, and
+  // reset, a form opened after it.
+  const { busy: saving, run: runEdit, guardOpenChange: guardEditOpenChange } = useSubmitLatch();
   const [webhookUrl, setWebhookUrl] = useState("");
   const [showWebhookSecret, setShowWebhookSecret] = useState(false);
   const [syncDialogOpen, setSyncDialogOpen] = useState(false);
@@ -135,20 +138,21 @@ export default function AdminIntegrationsPage() {
   const handleEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingIntegration) return;
+    const id = editingIntegration.id;
 
-    setSubmitting(true);
+    await runEdit(async () => {
+      try {
+        await updateIntegration.mutateAsync({ id, body: formData });
 
-    try {
-      await updateIntegration.mutateAsync({ id: editingIntegration.id, body: formData });
-
-      toast.success("Integration updated successfully");
-      closeEditDialog();
-    } catch (error) {
-      console.error("Error updating integration:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to update integration");
-    } finally {
-      setSubmitting(false);
-    }
+        toast.success("Integration updated successfully");
+        // The RAW close, never the guard: this runs while the latch is held,
+        // and a close sent through the guard would be dropped (M-a.1).
+        closeEditDialog();
+      } catch (error) {
+        console.error("Error updating integration:", error);
+        toast.error(error instanceof Error ? error.message : "Failed to update integration");
+      }
+    });
   };
 
   const handleDelete = async (integration: Integration) => {
@@ -336,6 +340,11 @@ export default function AdminIntegrationsPage() {
   // Radix's onOpenChange and the Cancel/Close buttons; a close is dropped
   // while a create is in flight.
   const onCreateOpenChange = guardOpenChange((o) => (o ? openCreateDialog() : closeCreateDialog()));
+  // Radix's onOpenChange and Cancel for Edit; a close is dropped while a save
+  // is in flight.
+  const onEditOpenChange = guardEditOpenChange((open) => {
+    if (!open) closeEditDialog();
+  });
 
   const groupedIntegrations = integrations.reduce((acc, integration) => {
     const companyName = integration.company.name;
@@ -1015,12 +1024,7 @@ export default function AdminIntegrationsPage() {
       </div>
 
       {/* Edit Dialog */}
-      <Dialog
-        open={isEditDialogOpen}
-        onOpenChange={(open) => {
-          if (!open) closeEditDialog();
-        }}
-      >
+      <Dialog open={isEditDialogOpen} onOpenChange={onEditOpenChange}>
         <DialogContent className="max-w-2xl">
           <form onSubmit={handleEdit}>
             <DialogHeader>
@@ -1029,7 +1033,8 @@ export default function AdminIntegrationsPage() {
                 Update integration settings
               </DialogDescription>
             </DialogHeader>
-            <div className="space-y-4 py-4">
+            {/* The fields freeze while a save is in flight (M-a.1). */}
+            <fieldset disabled={saving} className="min-w-0 space-y-4 py-4">
               <div className="space-y-2">
                 <label className="text-sm font-medium">Company</label>
                 <Input
@@ -1186,13 +1191,18 @@ export default function AdminIntegrationsPage() {
                   back to the API secret to verify webhook signatures.
                 </p>
               </div>
-            </div>
+            </fieldset>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={closeEditDialog}>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onEditOpenChange(false)}
+                disabled={saving}
+              >
                 Cancel
               </Button>
-              <Button type="submit" disabled={submitting}>
-                {submitting ? "Saving..." : "Save Changes"}
+              <Button type="submit" disabled={saving}>
+                {saving ? "Saving..." : "Save Changes"}
               </Button>
             </DialogFooter>
           </form>

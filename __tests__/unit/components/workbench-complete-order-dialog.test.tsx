@@ -1917,3 +1917,153 @@ describe("complete-order dialog — one completion per tap (MS-1-2)", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// FR-R1 (8), CR-OC-6: an `ok` leg whose body can't be read is COMMITTED.
+//
+// The routes answer 2xx only once the write is committed, so the stock moved.
+// The bare `.json()` used to throw into the catch AFTER the commit: an error
+// toast, the dialog kept open with the cart — and one more tap re-sent the
+// deduction. Now the leg counts as committed, the dialog closes as a success,
+// and the toast says why there is no Undo (the batch ids were in that body).
+// ---------------------------------------------------------------------------
+
+describe("complete-order dialog — a committed leg whose reply can't be read (CR-OC-6)", () => {
+  const UNREADABLE =
+    "Order completed. The server's reply couldn't be read, so Undo isn't available — check the batch log.";
+
+  // The toast mocks are shared across this file; these pins count them.
+  beforeEach(() => {
+    (toast.success as jest.Mock).mockClear();
+    (toast.error as jest.Mock).mockClear();
+  });
+
+  const unreadable = () =>
+    ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError("Unexpected end of JSON input");
+      },
+    }) as unknown as Response;
+
+  const deductCalls = () =>
+    fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/inventory/deduct-simple"));
+  const fulfilCalls = () => fetchMock.mock.calls.filter(([url]) => String(url).includes("/fulfill"));
+  const unfulfilCalls = () => fetchMock.mock.calls.filter(([url]) => String(url).includes("/unfulfill"));
+
+  function seedManualCart() {
+    act(() => {
+      useWorkbench.getState().setOrderReference("manual-ref");
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+  }
+
+  const confirm = () =>
+    screen.getByRole("button", { name: /^(Complete Order|Processing\.\.\.)$/ });
+
+  it("an unreadable DEDUCT body: the success toast, NO Undo, the dialog closed, ONE deduct POST", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    fetchMock.mockImplementation(async () => unreadable());
+    seedManualCart();
+    const { onOpenChange, onSuccess } = renderDialog();
+
+    await user.click(confirm());
+    await waitFor(() => expect(toast.success as jest.Mock).toHaveBeenCalledWith(UNREADABLE));
+
+    // Closed as a success — once, through the host's raw callback — and the
+    // cart is cleared, so nothing is left to send twice.
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+    expect(useWorkbench.getState().orderItems).toHaveLength(0);
+    // `onSuccess` is the host's Undo: never offered.
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(toast.error as jest.Mock).not.toHaveBeenCalled();
+    expect(deductCalls()).toHaveLength(1);
+  });
+
+  it("an unreadable FULFIL body is treated as fulfilled: the manual leg proceeds, nothing is rolled back", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    fetchMock.mockImplementation(async (url: unknown) =>
+      String(url).includes("/fulfill")
+        ? unreadable()
+        : ({ ok: true, json: async () => ({ success: true, batchId: "deduct-batch-1" }) } as unknown as Response),
+    );
+    seedOrder([CART_ITEM]);
+    act(() => {
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    const { onOpenChange, onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.success as jest.Mock).toHaveBeenCalledWith(UNREADABLE));
+
+    expect(fulfilCalls()).toHaveLength(1);
+    // The manual leg ran, exactly as after a readable fulfil.
+    expect(deductCalls()).toHaveLength(1);
+    // Fulfilled means fulfilled: no rollback was attempted.
+    expect(unfulfilCalls()).toHaveLength(0);
+    expect(toast.error as jest.Mock).not.toHaveBeenCalled();
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it("an unreadable FULFIL body on a WC-only cart: closed as a success, no Undo", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    fetchMock.mockImplementation(async () => unreadable());
+    seedOrder([CART_ITEM]);
+    const { onOpenChange, onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.success as jest.Mock).toHaveBeenCalledWith(UNREADABLE));
+    expect(fulfilCalls()).toHaveLength(1);
+    expect(unfulfilCalls()).toHaveLength(0);
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it("an unreadable fulfil body, then a FAILED manual leg: the fulfil still counts — the rollback runs and names the incident", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    fetchMock.mockImplementation(async (url: unknown) => {
+      const href = String(url);
+      if (href.includes("/fulfill")) return unreadable();
+      return {
+        ok: false,
+        status: 400,
+        json: async () => ({ error: "Insufficient inventory", code: "INSUFFICIENT_STOCK" }),
+      } as unknown as Response;
+    });
+    seedOrder([CART_ITEM]);
+    act(() => {
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    const { onOpenChange, onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    // The fulfil leg is owed back; with no readable entries the rollback has
+    // nothing it may send, so it raises the incident (QA-3: 0 of the cart's 1).
+    await waitFor(() => expect((toast.error as jest.Mock).mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(unfulfilCalls()).toHaveLength(0);
+    expect(toast.success as jest.Mock).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it("a READABLE completion still hands the host its Undo (unchanged)", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    fetchMock.mockImplementation(
+      async () => ({ ok: true, json: async () => ({ success: true, batchId: "deduct-batch-1" }) }) as unknown as Response,
+    );
+    seedManualCart();
+    const { onSuccess } = renderDialog();
+
+    await user.click(confirm());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1));
+    expect(toast.success as jest.Mock).not.toHaveBeenCalledWith(UNREADABLE);
+  });
+});

@@ -21,8 +21,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { ValueChip } from "@/components/ui/value-chip";
 import { ReceivingRedirectPrompt } from "@/components/inventory/receiving-redirect-prompt";
 import type { DialogProduct } from "@/types/inventory";
+
+/** `unit` when the count is 1, `units` otherwise. */
+function unitWord(count: number): string {
+  return count === 1 ? "unit" : "units";
+}
 
 interface StockInDialogProps {
   open: boolean;
@@ -53,9 +59,12 @@ export function StockInDialog({
   // `busy` is the same fact for rendering: the frozen form and "Adding Stock...".
   const { busy, run, guardOpenChange } = useSubmitLatch();
 
-  const currentQuantity = quantityQuery.data ?? 0;
+  // Stock is KNOWN only on a successful read (FR-R1 (4), CR-OC-2; the adjust
+  // dialog's rule): loading and failure are their own states, never 0, and the
+  // new total is drawn only from a known count.
+  const knownStock =
+    selectedLocationId !== null && quantityQuery.status === "success" ? quantityQuery.data : null;
   const quantityNum = parseInt(quantity, 10) || 0;
-  const newQuantity = currentQuantity + quantityNum;
 
   const isValid = quantityNum > 0;
 
@@ -141,21 +150,28 @@ export function StockInDialog({
           <div>
             <h4 className="font-medium">{product.name}</h4>
             <div role="status" aria-live="polite" className="flex items-center gap-4 mt-1">
-              <div className="flex items-center gap-1">
+              {/* The current-stock chip: the adjust dialog's four states. */}
+              <div className="flex items-center gap-1" data-testid="stock-in-stock">
                 <Package className="h-4 w-4 text-muted-foreground" />
-                {quantityQuery.isError ? (
-                  <span className="text-sm text-destructive">Could not load current stock</span>
-                ) : (
-                  <span className="text-sm text-muted-foreground">
-                    Current: {quantityQuery.isLoading ? "Loading..." : currentQuantity}
+                {selectedLocationId === null ? (
+                  <span className="text-sm text-muted-foreground">No location selected.</span>
+                ) : quantityQuery.status === "error" ? (
+                  <span className="text-sm text-destructive">
+                    Couldn&apos;t read current stock — it will be checked when you save.
                   </span>
+                ) : knownStock !== null ? (
+                  <ValueChip tone={knownStock > 0 ? "positive" : knownStock < 0 ? "negative" : "neutral"}>
+                    {`${knownStock} ${unitWord(knownStock)}`}
+                  </ValueChip>
+                ) : (
+                  <span className="text-sm text-muted-foreground">Reading stock…</span>
                 )}
               </div>
-              {quantityNum > 0 ? (
+              {knownStock !== null && quantityNum > 0 ? (
                 <>
                   <span className="text-muted-foreground">→</span>
                   <Badge variant="default" className="text-xs">
-                    New: {newQuantity}
+                    New: {knownStock + quantityNum}
                   </Badge>
                 </>
               ) : null}

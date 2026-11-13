@@ -29,7 +29,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { formatOrderDate, formatOrderStatus } from "@/components/inventory/order-number-field";
 import { useDebounce } from "@/hooks/use-debounce";
-import { useBatchDetail, useOrderSearch } from "@/hooks/use-admin";
+import { useBatchDetail, useOrderSearch, type ApiError } from "@/hooks/use-admin";
 import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
 import type { AttributionRow, BatchDetail } from "@/lib/reconciliation/attribution";
 import { AttributeConfirm, type AttributeTarget } from "./attribute-confirm";
@@ -69,6 +69,13 @@ export function displayedPreviousOrderRecordId(
   return stamps.size === 1 ? Array.from(stamps)[0] : null;
 }
 
+/** The server's own sentence for a 4xx, or `null` (a 5xx's prose is for a log). */
+function clientErrorSentence(error: ApiError | null | undefined): string | null {
+  if (!error || typeof error.status !== "number") return null;
+  if (error.status < 400 || error.status >= 500) return null;
+  return error.serverMessage ?? null;
+}
+
 export function AttributePicker({
   row,
   open,
@@ -96,6 +103,15 @@ export function AttributePicker({
 
   const debounced = useDebounce(query, SEARCH_DEBOUNCE_MS);
   const search = useOrderSearch(lock ? "" : debounced);
+  // An answer renders only once it is the answer for the CURRENT text (FR-R1
+  // (9), CR-G1-8): in the debounce gap the key is still the previous text's,
+  // and its rows are not an answer to what is in the field now.
+  const answered = debounced === query;
+  const results = answered ? search.data : undefined;
+  // A refused search says why in the server's own words — a 4xx is the server
+  // telling the admin what is wrong with what they typed (`search text is at
+  // most 40 characters`); the error card's rule (QA-5).
+  const searchError = answered ? clientErrorSentence(search.error) : null;
 
   const rowCount = detail.data ? detail.data.ledgerRows.length : null;
   const previous = displayedPreviousOrderRecordId(row, detail.data);
@@ -133,12 +149,17 @@ export function AttributePicker({
 
         {lock === null && (
           <div className="space-y-2">
-            {search.data && search.data.moreCount > 0 && (
-              <p className="text-body-sm text-muted-foreground" data-testid="order-search-more">
-                ≤ 20 results — narrow the number ({search.data.moreCount} more match)
+            {searchError !== null && (
+              <p role="alert" className="text-body-sm text-destructive" data-testid="order-search-error">
+                {searchError}
               </p>
             )}
-            {search.data?.orders.map((order) => (
+            {results && results.moreCount > 0 && (
+              <p className="text-body-sm text-muted-foreground" data-testid="order-search-more">
+                ≤ 20 results — narrow the number ({results.moreCount} more match)
+              </p>
+            )}
+            {results?.orders.map((order) => (
               <button
                 key={order.id}
                 type="button"
@@ -161,7 +182,7 @@ export function AttributePicker({
                 </span>
               </button>
             ))}
-            {search.data && search.data.orders.length === 0 && (
+            {results && results.orders.length === 0 && (
               <p className="text-body-sm text-muted-foreground">
                 No order number contains what you typed.
               </p>

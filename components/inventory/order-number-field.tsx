@@ -251,8 +251,15 @@ export function OrderNumberField({
   }
 
   const data = settled && search.status === "success" ? search.data : undefined;
-  const found = data?.orders.find((order) => order.orderNumber === text);
-  const showFound = data !== undefined && data.exactCount === 1 && found !== undefined;
+  // The rows on the page whose number is BYTE-EQUAL to the text — what the save
+  // resolves the number against. `exactCount` is the route's count, which can
+  // include collation variants of the number; the status line speaks about
+  // what the save will do, so it reads THESE rows (FR-R1 (6), CR-G1-3;
+  // R108-OC-7): one is found, two or more are the `≥2` choice, none is not
+  // found.
+  const byteEqual = data?.orders.filter((order) => order.orderNumber === text) ?? [];
+  const found = byteEqual.length === 1 ? byteEqual[0] : undefined;
+  const showFound = data !== undefined && found !== undefined;
   const noCompany = data?.note === NO_COMPANY_MEMBERSHIP_NOTE;
 
   let statusLine: React.ReactNode = null;
@@ -269,11 +276,11 @@ export function OrderNumberField({
         "You're not in any company yet, so orders can't be looked up — the number will still be saved with this removal.";
     } else if (showFound && found !== undefined) {
       statusLine = `Order ${text} found — ${found.store}, placed ${formatOrderDate(found.externalCreatedAt)}, ${formatOrderStatus(found.internalStatus)}.`;
-    } else if (data !== undefined && data.exactCount >= 2) {
+    } else if (data !== undefined && byteEqual.length >= 2) {
       statusLine = `${data.exactCount} orders have this number — tap the right one, or save the number without linking.`;
     } else {
-      // exactCount 0 — or 1 with no row byte-equal to the text, which is what
-      // the save will do with it (R108-OC-7).
+      // No row byte-equal to the text, whatever `exactCount` says — which is
+      // what the save will do with it (R108-OC-7).
       statusLine = `No order ${text} found. If the number is right, it's saved with this removal so an admin can link it later.`;
     }
   }

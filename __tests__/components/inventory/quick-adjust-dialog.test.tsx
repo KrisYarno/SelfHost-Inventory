@@ -1198,9 +1198,11 @@ describe("the rejected pick", () => {
     await pickOrder(user);
 
     await submit(user);
+    // REV 116 (CR-OC-1): the retry RESOLVES the number, so the notice no longer
+    // promises "without linking it" — it says when it links.
     await waitFor(() =>
       expect(message()).toBe(
-        'That order can\'t be used anymore — tap "Remove 3 units" again to save the number without linking it.',
+        'That order can\'t be used anymore — tap "Remove 3 units" again to save the number; it links only if one order with that number is found.',
       ),
     );
     expect(toastError).not.toHaveBeenCalled();
@@ -1265,6 +1267,59 @@ describe("the rejected pick", () => {
     const second = await submit(user);
     expect("orderReference" in second).toBe(false);
     expect("selectedExternalOrderId" in second).toBe(false);
+  });
+
+  // REV 116 (CR-OC-4): the picked order vanished between the resolver's check
+  // and the lock — a 409 `ORDER_GONE` — is the same fact, and gets the same
+  // recovery (it used to be an error toast with the pick kept: three taps out).
+  it("a 409 ORDER_GONE on a pick gets the SAME recovery: no toast, the number kept, the notice, the action enabled", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onOpenChange = jest.fn();
+    adjustAnswer = {
+      status: 409,
+      body: { error: "order ord-2 no longer exists", code: "ORDER_GONE" },
+    };
+    await ready(user, { onOpenChange });
+    await intoOrder(user);
+    await pickOrder(user);
+
+    const first = await submit(user);
+    expect(first.selectedExternalOrderId).toBe("ord-2");
+    await waitFor(() =>
+      expect(message()).toBe(
+        'That order can\'t be used anymore — tap "Remove 3 units" again to save the number; it links only if one order with that number is found.',
+      ),
+    );
+    expect(toastError).not.toHaveBeenCalled();
+    expect(toastSuccess).not.toHaveBeenCalled();
+    expect(toastPlain).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("order-number-picked")).toBeNull();
+    expect(orderField()).toHaveValue("2044");
+    expect(orderLine()).toBe("Order number to save: 2044");
+    expect(actionButton()).toBeEnabled();
+
+    // The next tap saves the NUMBER, with no id.
+    adjustAnswer = { status: 200, body: { success: true, log: { id: 1, orderRecordId: null }, batchId: "b-2" } };
+    const second = await submit(user);
+    expect(second.orderReference).toBe("2044");
+    expect("selectedExternalOrderId" in second).toBe(false);
+  });
+
+  it("an ORDER_GONE on a TYPED number (no pick) is a failed save, as before", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    adjustAnswer = {
+      status: 409,
+      body: { error: "order ord-2 no longer exists", code: "ORDER_GONE" },
+    };
+    await ready(user);
+    await intoOrder(user);
+    await typeOrder(user, "9999");
+    await submit(user);
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith("order ord-2 no longer exists"),
+    );
+    expect(message()).toBeNull();
   });
 
   it("any OTHER 400 is a failed save: the server's sentence, and the pick is kept", async () => {
@@ -1430,7 +1485,9 @@ describe("the toasts", () => {
 
   it("a PICK the server did not stamp is never said as linked", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    adjustAnswer.body = { success: true };
+    // The ledger row is readable and carries no stamp (FR-R1 (7): a 200 with
+    // NO readable `log` is its own case, below).
+    adjustAnswer.body = { success: true, log: { id: 1, orderRecordId: null } };
     await ready(user);
     await intoOrder(user);
     await pickOrder(user);
@@ -1440,6 +1497,37 @@ describe("the toasts", () => {
       "Removed 3 units of AOD 2mg at Office — not linked to an order.",
     ]);
     expect(toastPlain).not.toHaveBeenCalled();
+  });
+
+  // FR-R1 (7), CR-OC-5: a 200 whose `log` can't be read says nothing about a
+  // link either way — the removal happened, and that is all that is known.
+  it.each([
+    ["an empty body `{}` (what an unparseable body arrives as)", {}],
+    ["a body with no `log`", { success: true, batchId: "b-1" }],
+    ["a `log` that is not an object", { success: true, log: null }],
+  ])("a 200 with no readable log after a TYPED number (%s): the plain removal toast, never \"wasn't linked\"", async (_label, body) => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onOpenChange = jest.fn();
+    adjustAnswer = { status: 200, body };
+    await ready(user, { onOpenChange });
+    await intoOrder(user);
+    await typeOrder(user, "9999");
+    await submit(user);
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
+    expect(toastSuccess.mock.calls[0]).toEqual(["Removed 3 units of AOD 2mg at Office."]);
+    expect(toastPlain).not.toHaveBeenCalled();
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+  });
+
+  it("a 200 with no readable log after a PICK: the plain removal toast, never \"not linked\"", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    adjustAnswer = { status: 200, body: {} };
+    await ready(user);
+    await intoOrder(user);
+    await pickOrder(user);
+    await submit(user);
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
+    expect(toastSuccess.mock.calls[0]).toEqual(["Removed 3 units of AOD 2mg at Office."]);
   });
 
   it("a server 400 still renders the server's own sentence, and the dialog stays", async () => {

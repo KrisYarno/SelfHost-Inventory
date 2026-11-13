@@ -208,10 +208,12 @@ function BundlePicker({
   row,
   seed,
   onRetry = jest.fn(),
+  onCancel = jest.fn(),
 }: {
   row: CatalogRow;
   seed: BundleSeed | null;
   onRetry?: () => void;
+  onCancel?: () => void;
 }) {
   return (
     <InternalProductPicker
@@ -222,7 +224,7 @@ function BundlePicker({
       errorMessage={null}
       successFor={null}
       onConfirm={jest.fn()}
-      onCancel={jest.fn()}
+      onCancel={onCancel}
       onFinishSuccess={jest.fn()}
       onKeepSuccess={jest.fn()}
       bundleMode
@@ -254,6 +256,20 @@ describe("InternalProductPicker — the bundle seed (MS-2-1)", () => {
     expect(editorShown()).toBeNull();
     await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  // FR-R1 (11), CR-G1-5: on desktop the picker is an inline panel with no
+  // close of its own, so the failed view had no way out but Retry.
+  it("failed: `Cancel` is the way out — it closes the selection (the host's onCancel)", async () => {
+    const user = userEvent.setup();
+    const onCancel = jest.fn();
+    const onRetry = jest.fn();
+    render(<BundlePicker row={bundleRowA} seed={seedA("failed")} onCancel={onCancel} onRetry={onRetry} />, {
+      wrapper,
+    });
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onRetry).not.toHaveBeenCalled();
   });
 
   it("ready: the editor, seeded with THIS row's components", () => {

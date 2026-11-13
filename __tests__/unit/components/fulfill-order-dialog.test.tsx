@@ -803,6 +803,78 @@ describe("fulfill dialog — it starts at the operator's location (MS-1-4)", () 
     // Closed means not mounted: nothing asked for this order's validation.
     expect(useFulfillmentValidation as jest.Mock).not.toHaveBeenCalled();
   });
+
+  // FR-R1 (5), CR-G1-4: with a location chosen, the action said "No Items to
+  // Fulfill" while the stock there was still being checked, and when the check
+  // failed — neither is known to be true. Each now says what it is.
+  const actionNamed = (name: string) => screen.getByRole("button", { name });
+
+  /** Render with the validation hook answering `state` from the first render. */
+  function renderWithValidation(order: ExternalOrder, state: Record<string, unknown>) {
+    (useFulfillmentValidation as jest.Mock).mockReturnValue({
+      data: undefined,
+      isFetching: false,
+      isError: false,
+      error: null,
+      refetch: jest.fn(),
+      ...state,
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <FulfillOrderDialog order={order} open onOpenChange={jest.fn()} onSuccess={jest.fn()} csrfToken="test-csrf" />
+      </QueryClientProvider>
+    );
+  }
+
+  it("while the stock at the chosen location is being checked: `Checking stock at {location}…`, disabled", async () => {
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(2);
+    renderWithValidation(openOrder(2), { isFetching: true });
+
+    await waitFor(() => expect(actionNamed("Checking stock at Main…")).toBeDisabled());
+    expect(screen.queryByRole("button", { name: "No Items to Fulfill" })).toBeNull();
+  });
+
+  it("a re-check over an earlier answer names the check too (the action waits for it)", async () => {
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(2);
+    const order = openOrder(2);
+    renderWithValidation(order, { data: validationFor(order), isFetching: true });
+
+    await waitFor(() => expect(actionNamed("Checking stock at Main…")).toBeDisabled());
+  });
+
+  it("when the check FAILED: `Couldn't check stock at {location}`, disabled — never `No Items to Fulfill`", async () => {
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(2);
+    renderWithValidation(openOrder(2), { isError: true, error: new Error("Failed to validate order") });
+
+    await waitFor(() => expect(actionNamed("Couldn't check stock at Main")).toBeDisabled());
+    expect(screen.queryByRole("button", { name: "No Items to Fulfill" })).toBeNull();
+  });
+
+  it("the other labels are unchanged: a settled check with nothing ready is still `No Items to Fulfill`", async () => {
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(2);
+    const order = openOrder(1);
+    const validation = validationFor(order);
+    validation.items[0].issues = ["Insufficient stock"];
+    validation.canFulfill = false;
+    renderWithValidation(order, { data: validation });
+
+    await waitFor(() => expect(actionNamed("No Items to Fulfill")).toBeDisabled());
+  });
+
+  it("no location chosen is still `Select a location`, whatever the check is doing", async () => {
+    locationsAre(TWO_LOCATIONS);
+    operatorAt(null);
+    renderWithValidation(openOrder(2), { isFetching: true });
+
+    await waitFor(() => expect(confirmButton()).toHaveTextContent(/^Select a location$/));
+  });
 });
 
 describe("fulfill dialog — a fulfil in flight cannot be dismissed (R108-OC-9)", () => {

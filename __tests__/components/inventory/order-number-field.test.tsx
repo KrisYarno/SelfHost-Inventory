@@ -347,8 +347,14 @@ describe("settled: nothing answers until the answer is for the current text", ()
     expect(statusText()).toBe("Checking…");
     expect(screen.queryByTestId("order-number-row-ord-2")).toBeNull();
 
+    // A "contains" row with no exact match (FR-R1 (6): a byte-equal `1009` row
+    // would now be FOUND whatever `exactCount` said — the old fixture's
+    // `[ORDER_1009]` with `exactCount: 0` was a state the route never answers).
     await act(async () => {
-      answer({ ok: true, json: async () => ({ orders: [ORDER_1009], moreCount: 0, exactCount: 0 }) });
+      answer({
+        ok: true,
+        json: async () => ({ orders: [order({ orderNumber: "10091" })], moreCount: 0, exactCount: 0 }),
+      });
     });
     await waitFor(() =>
       expect(statusText()).toBe(
@@ -364,8 +370,13 @@ describe("settled: nothing answers until the answer is for the current text", ()
 
     fireEvent.change(field(), { target: { value: "1009" } });
     await waitFor(() => expect(answers).toHaveLength(1));
+    // A "contains" row, so it is listed as a row (a byte-equal one would be the
+    // found order, which is never repeated as a row — FR-R1 (6)).
     await act(async () => {
-      answers[0]({ ok: true, json: async () => ({ orders: [ORDER_1009], moreCount: 0, exactCount: 0 }) });
+      answers[0]({
+        ok: true,
+        json: async () => ({ orders: [order({ orderNumber: "10091" })], moreCount: 0, exactCount: 0 }),
+      });
     });
     await waitFor(() => expect(screen.getByTestId("order-number-row-ord-2")).toBeInTheDocument());
 
@@ -476,6 +487,41 @@ describe("the status line: each state, and the precedence", () => {
     expect(screen.queryByRole("button", { name: "Use this order" })).toBeNull();
     expect(screen.getByTestId("order-number-row-ord-2")).toBeInTheDocument();
     expect(screen.getByTestId("order-number-row-ord-3")).toBeInTheDocument();
+  });
+
+  // FR-R1 (6), CR-G1-3: the status line counts the BYTE-EQUAL rows on the page —
+  // what the save resolves against — not `exactCount`, which can include
+  // collation variants of the number.
+  it("exactCount 2 with ONE byte-equal row (the other a collation variant) -> FOUND, never `2 orders…`", () => {
+    const variant = order({ id: "ord-3", orderNumber: "1009 ", store: "South Shop" });
+    settle({ data: { orders: [ORDER_1009, variant], moreCount: 0, exactCount: 2 } });
+
+    expect(statusText()).toBe("Order 1009 found — North Shop, placed Aug 19, processing.");
+    expect(screen.getByRole("button", { name: "Use this order" })).toBeInTheDocument();
+    // The found order is not repeated; the variant stays a row to tap.
+    expect(screen.queryByTestId("order-number-row-ord-2")).toBeNull();
+    expect(screen.getByTestId("order-number-row-ord-3")).toBeInTheDocument();
+  });
+
+  it("exactCount 2 with TWO byte-equal rows -> `{exactCount} orders have this number`", () => {
+    const twin = order({ id: "ord-3", store: "South Shop" });
+    settle({ data: { orders: [ORDER_1009, twin], moreCount: 0, exactCount: 2 } });
+
+    expect(statusText()).toBe(
+      "2 orders have this number — tap the right one, or save the number without linking.",
+    );
+    expect(screen.queryByRole("button", { name: "Use this order" })).toBeNull();
+  });
+
+  it("exactCount 2 with NO byte-equal row -> the not-found sentence", () => {
+    const variants = [
+      order({ id: "ord-3", orderNumber: "1009 " }),
+      order({ id: "ord-4", orderNumber: " 1009" }),
+    ];
+    settle({ data: { orders: variants, moreCount: 0, exactCount: 2 } });
+
+    expect(statusText()).toBe(NOT_FOUND("1009"));
+    expect(screen.queryByRole("button", { name: "Use this order" })).toBeNull();
   });
 
   it("checking comes FIRST: an answer (even a failure) for a lagging debounce is not shown", () => {
