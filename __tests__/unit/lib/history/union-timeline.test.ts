@@ -21,6 +21,8 @@ jest.mock('@/lib/prisma', () => ({
   },
 }));
 
+import fs from 'node:fs';
+import path from 'node:path';
 import prisma from '@/lib/prisma';
 import { getProductTimeline, type TimelineEntry } from '@/lib/history/union-timeline';
 
@@ -467,5 +469,185 @@ describe('getProductTimeline — authorization projection (R-L5)', () => {
     const e4 = res.entries.find((e) => e.kind === 'event' && (e as any).event.id === 104) as any;
     expect(e4.event.restricted).toBe(false);
     expect(e4.event.action).toBe('Fulfilled order 1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE NOTE (reconciliation Part 2, pack § P2-B3-1R, R-a.2; owner decision row
+// 107: seen by admins + its author). Non-null only for an INVENTORY_ADJUSTMENT
+// (the adjust dialog and Stock In), never on a restricted event, only for an
+// admin or the event's own user, and only when a non-empty trimmed legacy
+// `reason` and/or `notes` exists — in that order, de-duplicated, ` — `-joined.
+// ---------------------------------------------------------------------------
+
+describe('getProductTimeline — the adjustment Note and its audience (R-a.2)', () => {
+  const AUTHOR = { userId: 5, isAdmin: false };
+  const OTHER_OPERATOR = { userId: 6, isAdmin: false };
+  const bob = { id: 5, username: 'bob', email: 'secret@x.com' };
+
+  const adjust = (id: number, details: Row, over: Row = {}): Row => ({
+    id,
+    createdAt: new Date(T.t5.getTime() - id * 1000),
+    actionType: 'INVENTORY_ADJUSTMENT',
+    entityType: 'INVENTORY',
+    entityId: '7',
+    actorKind: 'USER',
+    action: `adjust ${id}`,
+    companyId: null,
+    batchId: null,
+    affectedCount: 1,
+    details,
+    ipAddress: 'x',
+    userAgent: 'y',
+    user: bob,
+    ...over,
+  });
+
+  function buildNoteDb() {
+    return {
+      audit: [
+        adjust(1, { notes: 'counted twice' }),
+        adjust(2, { reason: 'old words' }),
+        adjust(3, { reason: 'damaged box', notes: 'photo on file' }),
+        adjust(4, { reason: ' same ', notes: 'same' }),
+        adjust(5, {}),
+        adjust(6, { reason: '   ', notes: '' }),
+        // Stock In's event is an INVENTORY_ADJUSTMENT with its marker (R-a.4).
+        adjust(7, { source: 'stock-in', notes: 'pallet 3' }),
+        // (a): a non-adjust event's `notes` is never a Note.
+        adjust(8, { notes: 'transfer words' }, { actionType: 'INVENTORY_TRANSFER' }),
+        // (b): the author's own adjustment, company-scoped to a company the
+        // author is not a member of — restricted, so no Note even for them.
+        adjust(9, { notes: 'scoped words' }, { companyId: 'c9' }),
+        // No joined user: the author is unknown, so only an admin sees it.
+        adjust(10, { notes: 'system words' }, { user: null }),
+      ],
+      inv: [] as Row[],
+      memberships: [] as Row[],
+    };
+  }
+
+  async function notesFor(caller: { userId: number; isAdmin: boolean }) {
+    install(buildNoteDb());
+    const res = await getProductTimeline({ productId: 7, caller, limit: 50 });
+    return new Map(
+      res.entries
+        .filter((e) => e.kind === 'event')
+        .map((e) => [(e as any).event.id as number, (e as any).event.note as string | null]),
+    );
+  }
+
+  it('an admin sees the Note of every adjustment; the shape is reason then notes, de-duplicated, joined', async () => {
+    const notes = await notesFor(ADMIN);
+    expect(notes.get(1)).toBe('counted twice');
+    expect(notes.get(2)).toBe('old words');
+    expect(notes.get(3)).toBe('damaged box — photo on file');
+    expect(notes.get(4)).toBe('same');
+    expect(notes.get(5)).toBeNull();
+    expect(notes.get(6)).toBeNull();
+    expect(notes.get(7)).toBe('pallet 3');
+    expect(notes.get(10)).toBe('system words');
+  });
+
+  it("the author sees their own Notes — legacy reasons included", async () => {
+    const notes = await notesFor(AUTHOR);
+    expect(notes.get(1)).toBe('counted twice');
+    expect(notes.get(2)).toBe('old words');
+    expect(notes.get(3)).toBe('damaged box — photo on file');
+    expect(notes.get(7)).toBe('pallet 3');
+    // An event with no joined user has no author to match.
+    expect(notes.get(10)).toBeNull();
+  });
+
+  it('another operator sees no Note at all — not the new notes, not the legacy reason', async () => {
+    const notes = await notesFor(OTHER_OPERATOR);
+    for (const id of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) expect(notes.get(id)).toBeNull();
+
+    install(buildNoteDb());
+    const json = JSON.stringify(
+      await getProductTimeline({ productId: 7, caller: OTHER_OPERATOR, limit: 50 }),
+    );
+    for (const words of ['counted twice', 'old words', 'damaged box', 'photo on file', 'pallet 3']) {
+      expect(json).not.toContain(words);
+    }
+  });
+
+  it('a non-adjust event carrying `notes` -> null, for an admin as for its author (a)', async () => {
+    expect((await notesFor(ADMIN)).get(8)).toBeNull();
+    expect((await notesFor(AUTHOR)).get(8)).toBeNull();
+  });
+
+  it("a restricted adjustment -> null even for its author (b, the belt)", async () => {
+    install(buildNoteDb());
+    const res = await getProductTimeline({ productId: 7, caller: AUTHOR, limit: 50 });
+    const ev = res.entries.find((e) => e.kind === 'event' && (e as any).event.id === 9) as any;
+    expect(ev.event.restricted).toBe(true);
+    expect(ev.event.note).toBeNull();
+    expect(JSON.stringify(res)).not.toContain('scoped words');
+  });
+
+  it("the fulfillment's customer note never becomes a Note, even for an admin (a)", async () => {
+    install(buildDb());
+    const res = await getProductTimeline({ productId: 7, caller: ADMIN, limit: 50 });
+    const byId = new Map(
+      res.entries.filter((e) => e.kind === 'event').map((e) => [(e as any).event.id, (e as any).event]),
+    );
+    expect(byId.get(104).note).toBeNull();
+    expect(byId.get(105).note).toBeNull();
+    // The adjustment in the reference fixture carries no reason and no notes.
+    expect(byId.get(101).note).toBeNull();
+    expect(JSON.stringify(res)).not.toContain('customer note');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE BOUNDARY (R-a.2): the Note is the operator's free text, so the module that
+// projects it must never be on the model's path. A SOURCE SCAN — it loads
+// nothing, so no mock can talk it out of its answer.
+// ---------------------------------------------------------------------------
+
+describe('union-timeline never reaches the assistant, the reports or the MCP sidecar (R-a.2)', () => {
+  const REPO_ROOT = path.resolve(__dirname, '../../../..');
+  const ROOTS = ['lib/assistant', 'lib/reports', 'mcp'];
+  const SKIP = new Set(['node_modules', 'dist']);
+  const IMPORTS_TIMELINE =
+    /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)["'][^"']*union-timeline(?:\.[cm]?[jt]sx?)?["']/;
+
+  function walk(rel: string, out: string[]): void {
+    const abs = path.join(REPO_ROOT, rel);
+    for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
+      if (SKIP.has(entry.name)) continue;
+      const child = path.join(rel, entry.name);
+      if (entry.isDirectory()) walk(child, out);
+      else if (/\.[cm]?[jt]sx?$/.test(entry.name)) out.push(child);
+    }
+  }
+
+  const files: string[] = [];
+  for (const root of ROOTS) walk(root, files);
+
+  it('scans a real set of modules (not vacuous)', () => {
+    expect(files.length).toBeGreaterThan(20);
+    for (const root of ROOTS) expect(files.some((f) => f.startsWith(root))).toBe(true);
+  });
+
+  it('no module under lib/assistant, lib/reports or mcp imports union-timeline', () => {
+    const offenders = files.filter((f) =>
+      IMPORTS_TIMELINE.test(fs.readFileSync(path.join(REPO_ROOT, f), 'utf8')),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it('the pattern bites (positive controls)', () => {
+    for (const src of [
+      "import { getProductTimeline } from '@/lib/history/union-timeline';",
+      'import type { TimelineEntry } from "../history/union-timeline";',
+      "const t = require('@/lib/history/union-timeline');",
+      "const t = await import('@/lib/history/union-timeline.ts');",
+      "export { getProductTimeline } from '@/lib/history/union-timeline';",
+    ]) {
+      expect(IMPORTS_TIMELINE.test(src)).toBe(true);
+    }
+    expect(IMPORTS_TIMELINE.test("const label = 'union-timeline';")).toBe(false);
   });
 });

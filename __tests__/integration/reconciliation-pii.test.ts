@@ -99,6 +99,9 @@ const LEAKY_ORDER = {
   // set grows.
   variantName: '10 mg / 2 vials',
   _count: { items: 2 },
+  // The order search's OWN select adds the store's name (pack § P2-B3-1R,
+  // R-a.1); every other producer rebuilds field by field and never reads it.
+  company: { name: 'Acme Store' },
 };
 
 /**
@@ -364,10 +367,12 @@ const ROUTES: Array<{ name: string; call: () => Promise<Response> }> = [
       }) as Promise<Response>,
   },
   {
+    // With `productId` (R-a.1), so the walk covers `thisProduct` — read from
+    // the LEAKY item rows, which carry the variant string and an email.
     name: 'GET /api/reconciliation/orders/search',
     call: () =>
       searchGET(
-        new NextRequest('http://localhost/api/reconciliation/orders/search?q=100'),
+        new NextRequest('http://localhost/api/reconciliation/orders/search?q=100&productId=9'),
       ) as Promise<Response>,
   },
   {
@@ -419,7 +424,7 @@ describe('reconciliation routes never answer with order PII', () => {
     expect(() => assertNoPiiKeys(body)).not.toThrow();
   });
 
-  it("the order search's MEMBER arm: scoped to the seeded companies on BOTH reads, and PII-free", async () => {
+  it("the order search's MEMBER arm: scoped to the seeded companies on ALL FIVE statements, and PII-free", async () => {
     // The first member-scoped reconciliation route (Part 2 B3-1, pack
     // CB3b-ii.1). Not a ROUTES row: the table has no per-row setup slot, and a
     // zero-membership member would trip its non-vacuity floor rather than prove
@@ -427,25 +432,37 @@ describe('reconciliation routes never answer with order PII', () => {
     const companyIds = ['co-1', 'co-2'];
     mockRequireApproved.mockResolvedValue({ user: { id: 7, isAdmin: false, isApproved: true } });
     db.userCompany.findMany.mockResolvedValue(companyIds.map((companyId) => ({ companyId })) as never);
+    // The leaky row is the EXACT group's answer (G1: the equality where); the
+    // starts-with and contains groups answer nothing.
+    db.externalOrder.findMany.mockImplementation(((args: { where: { orderNumber: unknown } }) =>
+      Promise.resolve(typeof args.where.orderNumber === 'string' ? [LEAKY_ORDER] : [])) as never);
 
     const res = await searchGET(
-      new NextRequest('http://localhost/api/reconciliation/orders/search?q=100'),
+      new NextRequest('http://localhost/api/reconciliation/orders/search?q=100&productId=9'),
     );
 
     expect(res.status).toBe(200);
     expect(mockRequireApproved).toHaveBeenCalledTimes(1);
-    const rowsWhere = (db.externalOrder.findMany.mock.calls[0][0] as { where: { companyId: { in: string[] } } })
-      .where;
-    const countWhere = (db.externalOrder.count.mock.calls[0][0] as { where: { companyId: { in: string[] } } })
-      .where;
-    expect(rowsWhere.companyId.in).toEqual(companyIds);
-    expect(countWhere.companyId.in).toEqual(companyIds);
+    // Pack § P2-B3-1R, R-a.1: three ranked group reads and two counts, ONE
+    // transaction, and the member scope on every one of the five.
+    const wheres = [
+      ...db.externalOrder.findMany.mock.calls,
+      ...db.externalOrder.count.mock.calls,
+    ].map((call) => (call[0] as { where: { companyId: { in: string[] } } }).where);
+    expect(wheres).toHaveLength(5);
+    for (const where of wheres) expect(where.companyId.in).toEqual(companyIds);
 
     const body = await res.json();
     // The leaky row came back through the projection — the walk is not vacuous.
     expect(body.orders).toHaveLength(1);
+    // ...and it carries the two new fields the walk must cover.
+    expect(body.orders[0].store).toBe('Acme Store');
+    expect(body.orders[0].thisProduct).toEqual({ orderedUnits: 2, uncheckedLines: 0 });
     expect(JSON.stringify(body).length).toBeGreaterThan(50);
     expect(() => assertNoPiiKeys(body)).not.toThrow();
+    // The variant string and the email on the item rows never reach the wire.
+    expect(JSON.stringify(body)).not.toContain('10 mg / 2 vials');
+    expect(JSON.stringify(body)).not.toContain('buyer@example.com');
   });
 
   it('the seeded orders really do carry every forbidden name (the harness is not vacuous)', () => {

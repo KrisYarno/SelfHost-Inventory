@@ -1043,6 +1043,11 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
     // resolver plus its Zod schema along — registered BY HAND for the same reason the four
     // above are, so the "no write token, comments included" rule covers them too.
     "lib/reconciliation/match-keys.ts",
+    // P2-B3-1R (pack R-a.1 / R-a.3): attribution.ts now imports the import-free capture
+    // sentences and `refuse` (the order search's validation) — registered BY HAND so the
+    // "no write token, comments included" rule covers them too.
+    "lib/orders/order-capture-sentences.ts",
+    "lib/validation/refuse.ts",
     "lib/reconciliation/match.ts",
     "lib/reconciliation/items.ts",
     "lib/external-orders/bundle-snapshot.ts",

@@ -125,6 +125,14 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // only, never the typed text (free text is where customer names arrive) —
   // and the removal still commits, unstamped. A database hiccup never turns a
   // deduction that succeeds today into a 500.
+  //
+  // SCOPED TO THE CALLER (pack § P2-B3-1R, R-a.5): THIS route opts in with
+  // `scope: 'caller'`, so a non-admin's number resolves only among their own
+  // companies' orders — what the dialog's member-scoped preview showed them
+  // before the save. A number held only by another company is `unmatched`;
+  // one held by theirs and another resolves to theirs. A throw from the scope
+  // read is caught below like any other, as `resolver-error`. Deduct-simple
+  // does NOT opt in, so this is no longer an exact copy of its round.
   let referenceResolution: OrderReferenceResolution | null = null;
   let resolverThrew = false;
   if (
@@ -134,7 +142,9 @@ export const POST = apiHandler(async (request: NextRequest) => {
     !shape.selectedExternalOrderId
   ) {
     try {
-      referenceResolution = await resolveOrderReference(shape.orderReference, user);
+      referenceResolution = await resolveOrderReference(shape.orderReference, user, {
+        scope: "caller",
+      });
     } catch {
       console.error(
         "[adjust] reference resolution failed (infrastructure); deduction proceeds unattributed"

@@ -294,6 +294,10 @@ export const StockInSchema = z.object({
   productId: positiveInt,
   locationId: positiveInt,
   quantity: z.number().int().positive(),
+  // Reconciliation Part 2 (pack § P2-B3-1R, R-a.4): the dialog's one optional
+  // Note, persisted on the audit event as `details.notes` (the adjust route's
+  // key and bound) and shown in the product's history to admins and its author.
+  notes: z.string().trim().max(2000).optional(),
 });
 
 // Transfer inventory between locations

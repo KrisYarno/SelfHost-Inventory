@@ -34,6 +34,7 @@ const evt = (over: Partial<RenderableAuditEvent> = {}): RenderableAuditEvent => 
   affectedCount: 1,
   restricted: false,
   actorDetail: null,
+  note: null,
   ...over,
 });
 
@@ -128,6 +129,42 @@ describe('TimelineEntryRow', () => {
     );
     expect(screen.getByText('Assistant')).toBeInTheDocument();
     expect(screen.queryByText(/approved by/)).not.toBeInTheDocument();
+  });
+
+  // Reconciliation Part 2 (pack § P2-B3-1R, R-a.2): the projection decides WHO
+  // sees a Note (admins + its author); the row renders whatever it was handed.
+  it('renders the Note as `Note: …` under the action line, wrapped (R-a.2)', () => {
+    const long = 'x'.repeat(300);
+    render(
+      <TimelineEntryRow
+        entry={eventEntry(
+          evt({
+            actionType: 'INVENTORY_ADJUSTMENT',
+            meta: actionMeta('INVENTORY_ADJUSTMENT'),
+            action: 'Adjusted inventory for "Widget" by -2',
+            note: `damaged box — ${long}`,
+          }),
+        )}
+      />,
+    );
+    const note = screen.getByText(`Note: damaged box — ${long}`);
+    expect(note.tagName).toBe('P');
+    expect(note).toHaveClass('break-words');
+    // Under the action line, not inside it.
+    const action = screen.getByText(/Adjusted inventory for "Widget" by -2/).closest('p');
+    expect(action).not.toBe(note);
+    expect(action?.compareDocumentPosition(note)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it('renders no Note line when the projection carried none (R-a.2)', () => {
+    render(
+      <TimelineEntryRow
+        entry={eventEntry(
+          evt({ actionType: 'INVENTORY_ADJUSTMENT', meta: actionMeta('INVENTORY_ADJUSTMENT'), note: null }),
+        )}
+      />,
+    );
+    expect(screen.queryByText(/^Note:/)).not.toBeInTheDocument();
   });
 
   it('puts the exact ms ISO timestamp in the title attribute', () => {

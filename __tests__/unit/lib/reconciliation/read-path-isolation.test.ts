@@ -48,6 +48,10 @@ const READ_MODULES = [
   'lib/validation/bundle-links.ts',
   // Part 2 A2 (pack CA2.3): the producer that spends the matcher's statements.
   'lib/reconciliation/match-producer.ts',
+  // P2-B3-1R (pack R-a.1 / R-a.3): reached through attribution.ts — the import-free
+  // capture sentences and the search's `refuse`.
+  'lib/orders/order-capture-sentences.ts',
+  'lib/validation/refuse.ts',
 ];
 
 /** The write module they must never reach, and the writer beside it. */

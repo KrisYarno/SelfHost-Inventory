@@ -31,6 +31,7 @@ import { attributeBatch } from '@/lib/reconciliation/attribute-batch';
 import { ATTRIBUTABLE_DEFINITION } from '@/lib/reconciliation/population';
 import { DERIVED_SENTENCES } from '@/lib/reconciliation/derive';
 import { MATCH_CLASS_KEYS, MATCH_DEFINITIONS } from '@/lib/reconciliation/match-keys';
+import { RECONCILIATION_ORDER_SELECT } from '@/lib/reconciliation/pii';
 import {
   ATTRIBUTION_CLASS_KEYS,
   __resetForTests,
@@ -500,6 +501,32 @@ describe('classification', () => {
     expect(report.rows[0].how.ruleId).toBeUndefined();
     expect(report.rows[0].source).toBe('live-deduct');
     expect(report.rows[0].actor).toEqual({ id: 7, username: 'kris' });
+  });
+
+  // Pack § P2-B3-1R, R-a.5: the adjust route now resolves a member's number
+  // within their own companies, so "matched no order" became "matched no order
+  // the operator can see" — true for both scopes (globally, "can see" is every
+  // order). Model-facing through get_order_reconciliation, and admin-facing.
+  // `not-a-member` keeps its text, for the history recorded under it.
+  it.each([
+    ['unmatched', 'the reference the operator typed matched no order the operator can see'],
+    ['not-a-member', 'the reference named an order in a company the operator is not a member of'],
+  ])('the recorded declined·%s sentence (R-a.5)', async (reason, sentence) => {
+    mockSummary([
+      summaryRow({
+        attemptId: 12,
+        attemptOutcome: 'declined',
+        attemptReason: reason,
+        attemptSource: 'live-adjust',
+        attemptActorUserId: 7,
+      }),
+    ]);
+    db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+
+    expect(report.rows[0].how.classKey).toBe(`declined·${reason}`);
+    expect(report.rows[0].how.sentence).toBe(sentence);
   });
 
   it('no attempt row derives the class and carries the ruleId + the rule sentence', async () => {
@@ -2302,82 +2329,385 @@ describe('R0 parity across the three call sites', () => {
 });
 
 // ---------------------------------------------------------------------------
-// searchOrders
+// searchOrders (pack § P2-B3-1R, R-a.1: match anywhere, ranked; supersedes the
+// prefix-only rule)
 // ---------------------------------------------------------------------------
+
+/**
+ * A tiny in-memory `external_orders` that APPLIES the producer's where — the
+ * equality, the LIKE patterns (with their escapes undone), `NOT` and the
+ * company scope — plus the order and the take. The ranking, the counts and the
+ * limit are then what the producer did with real answers, not what a fixture
+ * assumed. (Collation is not modelled: equality here is byte equality.)
+ */
+type BookRow = ReturnType<typeof orderRow> & { company: { name: string }; _count: { items: number } };
+
+function bookRow(id: string, orderNumber: string, day: number, over: Partial<BookRow> = {}): BookRow {
+  return {
+    ...orderRow({
+      id,
+      orderNumber,
+      externalCreatedAt: new Date(Date.UTC(2026, 7, day)),
+    }),
+    company: { name: 'Mine Store' },
+    _count: { items: 1 },
+    ...over,
+  } as BookRow;
+}
+
+function unescapeLike(pattern: string): string {
+  return pattern.replace(/\\([\\%_])/g, '$1');
+}
+
+function matchesOrderNumber(value: string, cond: unknown): boolean {
+  if (typeof cond === 'string') return value === cond;
+  const c = cond as { startsWith?: string; contains?: string };
+  if (c.startsWith !== undefined) return value.startsWith(unescapeLike(c.startsWith));
+  if (c.contains !== undefined) return value.includes(unescapeLike(c.contains));
+  throw new Error(`unmodelled orderNumber condition ${JSON.stringify(cond)}`);
+}
+
+function matchesWhere(row: BookRow, where: Record<string, unknown>): boolean {
+  for (const [key, cond] of Object.entries(where)) {
+    if (key === 'orderNumber' && !matchesOrderNumber(row.orderNumber, cond)) return false;
+    if (key === 'NOT' && matchesWhere(row, cond as Record<string, unknown>)) return false;
+    if (key === 'companyId' && !(cond as { in: string[] }).in.includes(row.companyId as string)) {
+      return false;
+    }
+    if (!['orderNumber', 'NOT', 'companyId'].includes(key)) throw new Error(`unmodelled key ${key}`);
+  }
+  return true;
+}
+
+function installBook(rows: BookRow[]): void {
+  db.externalOrder.findMany.mockImplementation(((args: {
+    where: Record<string, unknown>;
+    take: number;
+  }) =>
+    Promise.resolve(
+      rows
+        .filter((r) => matchesWhere(r, args.where))
+        .sort(
+          (a, b) =>
+            (b.externalCreatedAt as Date).getTime() - (a.externalCreatedAt as Date).getTime() ||
+            (b.id < a.id ? -1 : b.id > a.id ? 1 : 0),
+        )
+        .slice(0, args.take),
+    )) as never);
+  db.externalOrder.count.mockImplementation(((args: { where: Record<string, unknown> }) =>
+    Promise.resolve(rows.filter((r) => matchesWhere(r, args.where)).length)) as never);
+}
 
 describe('searchOrders', () => {
   beforeEach(() => {
     db.$transaction.mockImplementation(((ops: unknown) =>
       Promise.all(ops as Promise<unknown>[])) as never);
+    db.externalOrderItem.findMany.mockResolvedValue([] as never);
   });
 
   it('an empty query asks the database nothing', async () => {
-    expect(await searchOrders('   ', ADMIN)).toEqual({ orders: [], moreCount: 0 });
+    expect(await searchOrders('   ', ADMIN)).toEqual({ orders: [], moreCount: 0, exactCount: 0 });
     expect(db.$transaction).not.toHaveBeenCalled();
+    expect(db.externalOrder.findMany).not.toHaveBeenCalled();
   });
 
-  it('matches on orderNumber startsWith, bounded at twenty, with an EXACT moreCount', async () => {
-    db.externalOrder.count.mockResolvedValue(23 as never);
-    db.externalOrder.findMany.mockResolvedValue([
-      { ...orderRow(), _count: { items: 4 } },
-    ] as never);
-
-    const result = await searchOrders(' 100 ', ADMIN);
-
-    expect(db.externalOrder.findMany.mock.calls[0][0]).toMatchObject({
-      where: { orderNumber: { startsWith: '100' } },
-      take: 20,
+  it('a blank query validates nothing else — a bad productId or limit still gets the blank answer', async () => {
+    expect(await searchOrders('', ADMIN, { productId: -1, limit: 99 })).toEqual({
+      orders: [],
+      moreCount: 0,
+      exactCount: 0,
     });
-    expect(result.orders).toEqual([
-      {
-        id: 'ord-1',
-        orderNumber: '#1001',
-        platform: 'WOOCOMMERCE',
-        internalStatus: 'pending',
-        externalCreatedAt: '2026-08-09T00:00:00.000Z',
-        itemCount: 4,
-      },
+  });
+
+  it('ranks exact -> starts-with -> contains, newest first within each, and applies the limit AFTER the ranking', async () => {
+    installBook([
+      bookRow('c-new', '91001', 30), // contains, newest of all
+      bookRow('p-old', '10019', 2), // starts with
+      bookRow('e-1', '1001', 5), // exact
+      bookRow('p-new', '10010', 20), // starts with
+      bookRow('c-old', '21001', 1), // contains
+      bookRow('x-1', '2002', 25), // no match
     ]);
-    expect(result.moreCount).toBe(22);
+
+    const all = await searchOrders('1001', ADMIN);
+    expect(all.orders.map((o) => o.id)).toEqual(['e-1', 'p-new', 'p-old', 'c-new', 'c-old']);
+    expect(all.exactCount).toBe(1);
+    expect(all.moreCount).toBe(0);
+
+    jest.clearAllMocks();
+    const cut = await searchOrders('1001', ADMIN, { limit: 2 });
+    // The exact number first, however new the longer numbers containing it are.
+    expect(cut.orders.map((o) => o.id)).toEqual(['e-1', 'p-new']);
+    expect(cut.moreCount).toBe(3);
+    // Each group read takes `limit`; the page is cut after the concatenation.
+    for (const call of db.externalOrder.findMany.mock.calls) {
+      expect(call[0]).toMatchObject({
+        take: 2,
+        orderBy: [{ externalCreatedAt: 'desc' }, { id: 'desc' }],
+      });
+    }
   });
 
-  // QA-10: `startsWith` renders a LIKE, so a typed `%` was a wildcard and `q=%`
-  // matched EVERY order in the book — the picker's twenty-row page then looked
-  // like a search result. The wildcards are escaped, so they match themselves.
-  it('escapes the LIKE wildcards, so `%` searches for a literal per cent (QA-10)', async () => {
-    db.externalOrder.count.mockResolvedValue(0 as never);
-    db.externalOrder.findMany.mockResolvedValue([] as never);
+  it('the five statements are ONE $transaction array: G1 exact (raw), G2 starts-with not-exact, G3 contains not-starts-with, then the two counts', async () => {
+    installBook([]);
 
-    await searchOrders('%', ADMIN);
+    await searchOrders(' 100 ', ADMIN);
 
-    expect(db.externalOrder.findMany.mock.calls[0][0]).toMatchObject({
-      where: { orderNumber: { startsWith: '\\%' } },
-    });
-    // The COUNT reads the SAME where — the bound and the page are one view.
-    expect(db.externalOrder.count.mock.calls[0][0]).toMatchObject({
-      where: { orderNumber: { startsWith: '\\%' } },
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+    expect((db.$transaction.mock.calls[0][0] as unknown as unknown[]).length).toBe(5);
+    const reads = db.externalOrder.findMany.mock.calls.map((c) => (c[0] as { where: unknown }).where);
+    expect(reads).toEqual([
+      { orderNumber: '100' },
+      { orderNumber: { startsWith: '100' }, NOT: { orderNumber: '100' } },
+      { orderNumber: { contains: '100' }, NOT: { orderNumber: { startsWith: '100' } } },
+    ]);
+    const counts = db.externalOrder.count.mock.calls.map((c) => (c[0] as { where: unknown }).where);
+    expect(counts).toEqual([{ orderNumber: '100' }, { orderNumber: { contains: '100' } }]);
+    // The default page is twenty.
+    expect(db.externalOrder.findMany.mock.calls[0][0]).toMatchObject({ take: 20 });
+  });
+
+  it('exactCount counts EVERY exact match, above the limit; moreCount is the match count minus the page', async () => {
+    installBook([
+      bookRow('e-1', '555', 10),
+      bookRow('e-2', '555', 9),
+      bookRow('e-3', '555', 8),
+      bookRow('e-4', '555', 7),
+      bookRow('p-1', '5551', 6),
+    ]);
+
+    const result = await searchOrders('555', ADMIN, { limit: 2 });
+
+    expect(result.orders.map((o) => o.id)).toEqual(['e-1', 'e-2']);
+    expect(result.exactCount).toBe(4);
+    expect(result.moreCount).toBe(3);
+  });
+
+  it('limit=5 reads five per group and returns at most five', async () => {
+    installBook(Array.from({ length: 8 }, (_, i) => bookRow(`p-${i}`, `77${i}`, 10 + i)));
+
+    const result = await searchOrders('77', ADMIN, { limit: 5 });
+
+    expect(result.orders).toHaveLength(5);
+    expect(result.moreCount).toBe(3);
+    expect(db.externalOrder.findMany.mock.calls[1][0]).toMatchObject({ take: 5 });
+  });
+
+  // QA-10: `startsWith`/`contains` render a LIKE, so a typed `%` was a wildcard
+  // and `q=%` matched EVERY order in the book. The wildcards are escaped, so
+  // they match themselves; equality (G1) has no wildcards and takes the RAW text.
+  it('escapes the LIKE wildcards in G2, G3 and the match count — and G1 compares the raw text (QA-10)', async () => {
+    installBook([bookRow('w-1', 'a_b', 3), bookRow('w-2', 'axb', 4), bookRow('w-3', 'za_bz', 2)]);
+
+    const result = await searchOrders('a_b', ADMIN);
+
+    // `_` matches itself, never "any one character": `axb` is not a match.
+    expect(result.orders.map((o) => o.id)).toEqual(['w-1', 'w-3']);
+    const reads = db.externalOrder.findMany.mock.calls.map((c) => (c[0] as { where: unknown }).where);
+    expect(reads).toEqual([
+      { orderNumber: 'a_b' },
+      { orderNumber: { startsWith: 'a\\_b' }, NOT: { orderNumber: 'a_b' } },
+      { orderNumber: { contains: 'a\\_b' }, NOT: { orderNumber: { startsWith: 'a\\_b' } } },
+    ]);
+    expect((db.externalOrder.count.mock.calls[1][0] as { where: unknown }).where).toEqual({
+      orderNumber: { contains: 'a\\_b' },
     });
   });
 
-  it('escapes `_` and the escape character itself (QA-10)', async () => {
-    db.externalOrder.count.mockResolvedValue(0 as never);
-    db.externalOrder.findMany.mockResolvedValue([] as never);
+  it('escapes `%` and the escape character itself (QA-10)', async () => {
+    installBook([]);
 
-    await searchOrders('a_b\\c', ADMIN);
+    await searchOrders('%\\', ADMIN);
 
-    expect(db.externalOrder.findMany.mock.calls[0][0]).toMatchObject({
-      where: { orderNumber: { startsWith: 'a\\_b\\\\c' } },
+    expect((db.externalOrder.findMany.mock.calls[2][0] as { where: unknown }).where).toEqual({
+      orderNumber: { contains: '\\%\\\\' },
+      NOT: { orderNumber: { startsWith: '\\%\\\\' } },
     });
   });
 
-  it('a member searches only inside the membership', async () => {
-    db.externalOrder.count.mockResolvedValue(0 as never);
-    db.externalOrder.findMany.mockResolvedValue([] as never);
+  it('a member searches only inside the membership — on ALL FIVE statements', async () => {
+    installBook([]);
 
     await searchOrders('100', MEMBER);
 
-    expect(db.externalOrder.findMany.mock.calls[0][0]).toMatchObject({
-      where: { companyId: { in: ['co-mine'] } },
+    const wheres = [
+      ...db.externalOrder.findMany.mock.calls.map((c) => (c[0] as { where: unknown }).where),
+      ...db.externalOrder.count.mock.calls.map((c) => (c[0] as { where: unknown }).where),
+    ];
+    expect(wheres).toHaveLength(5);
+    for (const where of wheres) expect(where).toMatchObject({ companyId: { in: ['co-mine'] } });
+  });
+
+  it("a member's exact match held only by ANOTHER company -> exactCount 0 and nothing on the page", async () => {
+    installBook([
+      bookRow('theirs', '1001', 5, { companyId: 'co-other', company: { name: 'Other Store' } }),
+      bookRow('theirs-2', '10011', 6, { companyId: 'co-other', company: { name: 'Other Store' } }),
+    ]);
+
+    expect(await searchOrders('1001', MEMBER)).toEqual({ orders: [], moreCount: 0, exactCount: 0 });
+    // The admin, unscoped, sees both.
+    expect((await searchOrders('1001', ADMIN)).exactCount).toBe(1);
+  });
+
+  it("each row carries its STORE (the company's name) through searchOrders' OWN select; the shared select is unchanged", async () => {
+    installBook([bookRow('ord-1', '1001', 5, { company: { name: 'Acme Peptides' }, _count: { items: 4 } })]);
+
+    const result = await searchOrders('1001', ADMIN);
+
+    expect(result.orders).toEqual([
+      {
+        id: 'ord-1',
+        orderNumber: '1001',
+        platform: 'WOOCOMMERCE',
+        internalStatus: 'pending',
+        externalCreatedAt: '2026-08-05T00:00:00.000Z',
+        itemCount: 4,
+        store: 'Acme Peptides',
+      },
+    ]);
+    // No productId: no `thisProduct` key, and no item read.
+    expect('thisProduct' in result.orders[0]).toBe(false);
+    expect(db.externalOrderItem.findMany).not.toHaveBeenCalled();
+
+    // The search's own select: the shared projection plus the store and the count.
+    for (const call of db.externalOrder.findMany.mock.calls) {
+      expect((call[0] as { select: unknown }).select).toEqual({
+        id: true,
+        orderNumber: true,
+        internalStatus: true,
+        externalCreatedAt: true,
+        companyId: true,
+        integration: { select: { platform: true } },
+        company: { select: { name: true } },
+        _count: { select: { items: true } },
+      });
+    }
+    // ...and the shared one is NOT widened (every other reconciliation read's).
+    expect(RECONCILIATION_ORDER_SELECT).toEqual({
+      id: true,
+      orderNumber: true,
+      internalStatus: true,
+      externalCreatedAt: true,
+      companyId: true,
+      integration: { select: { platform: true } },
+    });
+    // The company id rides the select for the scope math and never the wire.
+    expect(JSON.stringify(result)).not.toContain('companyId');
+    expect(JSON.stringify(result)).not.toContain('co-mine');
+  });
+
+  it('thisProduct, per order: mapped, not on it, unmapped, bundle, unresolvable bundle, and no rows', async () => {
+    installBook([
+      bookRow('mapped', '3001', 9),
+      bookRow('not-on', '3002', 8),
+      bookRow('unmapped', '3003', 7),
+      bookRow('bundle', '3004', 6),
+      bookRow('broken-bundle', '3005', 5),
+      bookRow('no-rows', '3006', 4, { _count: { items: 0 } }),
+    ]);
+    db.externalOrderItem.findMany.mockResolvedValue([
+      // mapped: two lines of product 9 (2 + 3) and one of product 11.
+      itemRow({ id: 'i1', orderId: 'mapped', quantity: 2 }),
+      itemRow({ id: 'i2', orderId: 'mapped', quantity: 3 }),
+      itemRow({ id: 'i3', orderId: 'mapped', quantity: 1, productLink: { internalProductId: 11, isBundle: false, bundleComponents: [] } }),
+      // not on it: only product 11.
+      itemRow({ id: 'i4', orderId: 'not-on', quantity: 4, productLink: { internalProductId: 11, isBundle: false, bundleComponents: [] } }),
+      // unmapped: one unmapped line beside one of product 9.
+      itemRow({ id: 'i5', orderId: 'unmapped', quantity: 1 }),
+      itemRow({ id: 'i6', orderId: 'unmapped', quantity: 6, isMapped: false, productLink: null }),
+      // bundle: 2 bundles of (3 x product 9 + 1 x product 11).
+      itemRow({
+        id: 'i7',
+        orderId: 'bundle',
+        quantity: 2,
+        productLink: {
+          internalProductId: null,
+          isBundle: true,
+          bundleComponents: [
+            { internalProductId: 9, quantity: 3, sortOrder: 0 },
+            { internalProductId: 11, quantity: 1, sortOrder: 1 },
+          ],
+        },
+      }),
+      // a bundle with no components and no snapshot: unresolvable, counted.
+      itemRow({
+        id: 'i8',
+        orderId: 'broken-bundle',
+        quantity: 1,
+        productLink: { internalProductId: null, isBundle: true, bundleComponents: [] },
+      }),
+    ] as never);
+
+    const result = await searchOrders('300', ADMIN, { productId: 9 });
+
+    const byId = new Map(result.orders.map((o) => [o.id, o.thisProduct]));
+    expect(byId.get('mapped')).toEqual({ orderedUnits: 5, uncheckedLines: 0 });
+    expect(byId.get('not-on')).toEqual({ orderedUnits: 0, uncheckedLines: 0 });
+    expect(byId.get('unmapped')).toEqual({ orderedUnits: 1, uncheckedLines: 1 });
+    expect(byId.get('bundle')).toEqual({ orderedUnits: 6, uncheckedLines: 0 });
+    expect(byId.get('broken-bundle')).toEqual({ orderedUnits: 0, uncheckedLines: 1 });
+    expect(byId.get('no-rows')).toEqual({ orderedUnits: 0, uncheckedLines: 0 });
+
+    // ONE item read, AFTER the transaction, for the page's ids only.
+    expect(db.externalOrderItem.findMany).toHaveBeenCalledTimes(1);
+    expect(
+      (db.externalOrderItem.findMany.mock.calls[0][0] as { where: { orderId: { in: string[] } } }).where
+        .orderId.in.sort(),
+    ).toEqual(['broken-bundle', 'bundle', 'mapped', 'no-rows', 'not-on', 'unmapped']);
+    expect(db.externalOrderItem.findMany.mock.invocationCallOrder[0]).toBeGreaterThan(
+      db.$transaction.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('thisProduct reads only the PAGE: a limit-cut order is never read, and an empty page reads nothing', async () => {
+    installBook([bookRow('a', '4001', 9), bookRow('b', '4002', 8), bookRow('c', '4003', 7)]);
+
+    await searchOrders('400', ADMIN, { productId: 9, limit: 2 });
+    expect(
+      (db.externalOrderItem.findMany.mock.calls[0][0] as { where: { orderId: { in: string[] } } }).where
+        .orderId.in,
+    ).toEqual(['a', 'b']);
+
+    jest.clearAllMocks();
+    const empty = await searchOrders('999', ADMIN, { productId: 9 });
+    expect(empty.orders).toEqual([]);
+    expect(db.externalOrderItem.findMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a query over 40 characters', '1'.repeat(41), {}, 'search text is at most 40 characters'],
+    ['productId 0', '100', { productId: 0 }, 'productId must be a positive whole number'],
+    ['a fractional productId', '100', { productId: 1.5 }, 'productId must be a positive whole number'],
+    ['a productId above INT', '100', { productId: 2147483648 }, 'productId must be a positive whole number'],
+    ['limit 0', '100', { limit: 0 }, 'limit must be a whole number from 1 to 20'],
+    ['limit 21', '100', { limit: 21 }, 'limit must be a whole number from 1 to 20'],
+    ['a fractional limit', '100', { limit: 2.5 }, 'limit must be a whole number from 1 to 20'],
+  ])('refuses %s with its sentence, reading nothing', async (_label, q, opts, sentence) => {
+    await expect(searchOrders(q, ADMIN, opts)).rejects.toMatchObject({
+      issues: [expect.objectContaining({ message: sentence })],
+    });
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('accepts exactly 40 characters, productId 2147483647 and limits 1 and 20', async () => {
+    installBook([]);
+    await expect(searchOrders('1'.repeat(40), ADMIN)).resolves.toMatchObject({ orders: [] });
+    await expect(searchOrders('1', ADMIN, { productId: 2147483647 })).resolves.toMatchObject({
+      orders: [],
+    });
+    await expect(searchOrders('1', ADMIN, { limit: 1 })).resolves.toMatchObject({ orders: [] });
+    await expect(searchOrders('1', ADMIN, { limit: 20 })).resolves.toMatchObject({ orders: [] });
+  });
+
+  it('validates in the pack order: the text first, then productId, then limit', async () => {
+    await expect(searchOrders('1'.repeat(41), ADMIN, { productId: 0, limit: 0 })).rejects.toMatchObject({
+      issues: [expect.objectContaining({ path: ['q'] })],
+    });
+    await expect(searchOrders('1', ADMIN, { productId: 0, limit: 0 })).rejects.toMatchObject({
+      issues: [expect.objectContaining({ path: ['productId'] })],
+    });
+    await expect(searchOrders('1', ADMIN, { limit: 0 })).rejects.toMatchObject({
+      issues: [expect.objectContaining({ path: ['limit'] })],
     });
   });
 });

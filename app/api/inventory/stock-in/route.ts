@@ -67,6 +67,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
             delta: body.quantity,
             locationId: body.locationId,
             unitCostCents,
+            // Pack § P2-B3-1R, R-a.4: the operator's Note, only when there is
+            // one — trimmed at the parse, so whitespace alone is ABSENT, never
+            // an empty string. The history shows it to admins and its author.
+            ...(body.notes ? { notes: body.notes } : {}),
           },
           batchId,
         });

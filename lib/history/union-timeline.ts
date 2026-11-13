@@ -28,6 +28,12 @@
  * member of (and is not admin for) are projected to `restricted:true`: their
  * changes/snapshot/cascade/bulk are nulled and `action` becomes a truthful stub;
  * this product's ledger rows still show (global physical pool).
+ *
+ * THE ONE FREE-TEXT FIELD is an adjustment's Note (`note`, reconciliation Part 2
+ * pack § P2-B3-1R, R-a.2): the operator's own words, shown to admins and to the
+ * operator who wrote them, and to no one else. This module is the product
+ * History's projection only — no assistant, report or MCP module imports it (a
+ * grep pin), so the Note never reaches the model.
  */
 
 import { Prisma } from '@prisma/client';
@@ -82,6 +88,14 @@ export interface RenderableAuditEvent {
   batchId: string | null;
   affectedCount: number;
   restricted: boolean;
+  /**
+   * The adjustment's Note (pack § P2-B3-1R, R-a.2): non-null ONLY when (a) the
+   * event is an `INVENTORY_ADJUSTMENT` (the adjust dialog and Stock In), (b) it
+   * is not `restricted` (a belt), (c) the caller is an admin or wrote it, and
+   * (d) it carries a non-empty trimmed `details.reason` (legacy) and/or
+   * `details.notes` — those, in that order, de-duplicated, joined with ` — `.
+   */
+  note: string | null;
 }
 
 export type TimelineEntry =
@@ -178,6 +192,33 @@ function cascadeCount(details: Record<string, unknown>): number | null {
     if (typeof v === 'number' && Number.isFinite(v)) return sum + v;
     return sum + 1;
   }, 0);
+}
+
+/** The separator between a legacy reason and a note, when an event has both. */
+const NOTE_SEPARATOR = ' — ';
+
+/**
+ * The Note's audience rule (pack § P2-B3-1R, R-a.2; owner decision row 107: admins
+ * + its author). `author` is the event's joined user id (`user.id`, already in
+ * the select). The legacy free-text `reason` is under the SAME rule as `notes`.
+ */
+function noteOf(
+  actionType: string,
+  restricted: boolean,
+  author: number | null,
+  caller: { userId: number; isAdmin: boolean },
+  details: Record<string, unknown>,
+): string | null {
+  if (actionType !== 'INVENTORY_ADJUSTMENT') return null;
+  if (restricted) return null;
+  if (!caller.isAdmin && author !== caller.userId) return null;
+  const parts: string[] = [];
+  for (const raw of [details.reason, details.notes]) {
+    if (typeof raw !== 'string') continue;
+    const text = raw.trim();
+    if (text.length > 0 && !parts.includes(text)) parts.push(text);
+  }
+  return parts.length > 0 ? parts.join(NOTE_SEPARATOR) : null;
 }
 
 function bulkRowCount(details: Record<string, unknown>): number | null {
@@ -572,6 +613,7 @@ export async function getProductTimeline(opts: {
       batchId: e.batchId,
       affectedCount: e.affectedCount,
       restricted,
+      note: noteOf(e.actionType, restricted, e.user?.id ?? null, caller, details),
     };
     return {
       kind: 'event',

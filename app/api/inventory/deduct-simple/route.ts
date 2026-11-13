@@ -80,6 +80,13 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // redacted — never the typed reference, which is free text and free text is
   // where customer names arrive — and proceed unstamped exactly as if the
   // reference had not matched.
+  //
+  // GLOBAL SCOPE, deliberately (pack § P2-B3-1R, R-a.5): the resolver's
+  // opt-in `scope: 'caller'` is NOT passed here. The adjust route scopes a
+  // member's number to their own companies because its dialog previews that
+  // scoped search first; the workbench shows no preview, and a scoped resolve
+  // would stamp on evidence nobody saw. Registered until the workbench's field
+  // adopts the order number field.
   let referenceResolution = null;
   // Reconciliation lane (spec REV-7 D2): a swallowed infrastructure failure and
   // a resolver that never ran are the same `null` here, and they are NOT the

@@ -48,6 +48,7 @@
 import { Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
 import { AppError } from '@/lib/error-handling';
+import { refuse } from '@/lib/validation/refuse';
 import type { AttemptDetails, AttemptSource } from '@/lib/attribution/contracts';
 import {
   ATTRIBUTABLE_DEFINITION,
@@ -66,7 +67,8 @@ import {
   type DerivedClass,
   type DeriveAuditEvent,
 } from './derive';
-import { RECONCILIATION_ORDER_SELECT, RECONCILIATION_USER_SELECT } from './pii';
+import { deepFreeze, RECONCILIATION_ORDER_SELECT, RECONCILIATION_USER_SELECT } from './pii';
+import { readOrderItems } from './items';
 import {
   MATCH_CLASS_KEYS,
   MATCH_DEFINITIONS,
@@ -363,7 +365,7 @@ const RECORDED_SENTENCES: Readonly<Record<AttributionClassKey, string>> = Object
   'attributed·manual': 'an admin attributed this batch afterwards',
   'attributed·derived': 'computed at read time because no attempt row exists',
   'declined·unusable': 'the reference the operator typed could not be used',
-  'declined·unmatched': 'the reference the operator typed matched no order',
+  'declined·unmatched': 'the reference the operator typed matched no order the operator can see',
   'declined·ambiguous': 'the reference the operator typed matched more than one order',
   'declined·not-a-member':
     'the reference named an order in a company the operator is not a member of',
@@ -384,9 +386,13 @@ const R0_INVISIBLE_NOTE =
 
 export const NO_MEMBER_ORDER_NOTE = 'no order matching that number in your companies';
 
-/** A member with NO company: the empty answer's named reason (B3-1 FR1), not "no match". */
-export const NO_COMPANY_MEMBERSHIP_NOTE =
-  'you are not a member of any company yet, so there are no orders to search — ask an admin to add you';
+/**
+ * A member with NO company: the empty answer's named reason (B3-1 FR1), not "no match".
+ * Its home is the import-free leaf `lib/orders/order-capture-sentences.ts` (pack
+ * § P2-B3-1R, R-a.3), so the adjust dialog reads it without this module's Prisma
+ * import; re-exported here for the server callers that have always taken it from here.
+ */
+export { NO_COMPANY_MEMBERSHIP_NOTE } from '@/lib/orders/order-capture-sentences';
 
 const NO_DENOMINATOR_NOTE =
   'no attributable batch in this window, so the derived share has no denominator';
@@ -433,7 +439,10 @@ const DEFINITIONS: Readonly<Record<string, string>> = Object.freeze({
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** The picker's bound, said out loud by `searchOrders`'s `moreCount`. */
+/**
+ * The order search's page bound — its default `limit` and its largest — said out
+ * loud by `searchOrders`'s `moreCount`.
+ */
 const ORDER_SEARCH_LIMIT = 20;
 
 /**
@@ -1798,64 +1807,188 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
 /**
  * MySQL's LIKE metacharacters, escaped so a typed one matches ITSELF (QA-10).
  *
- * `startsWith` renders `LIKE '<q>%'`, so `%` and `_` in the operator's own text
- * were wildcards: `q=%` matched every order in the book and handed the picker
- * twenty of them, looking for all the world like a search result. The backslash
- * goes first — escaping it after the others would escape the escapes.
+ * `startsWith` and `contains` render `LIKE`, so `%` and `_` in the operator's
+ * own text were wildcards: `q=%` matched every order in the book and handed the
+ * picker twenty of them, looking for all the world like a search result. The
+ * backslash goes first — escaping it after the others would escape the escapes.
  */
 function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
 
+/** The longest search text the order search reads (pack § P2-B3-1R, R-a.1). */
+const ORDER_SEARCH_MAX_QUERY = 40;
+
+/** `products.id` is a signed MySQL `INT`, so no product id is larger. */
+const INT32_MAX = 2147483647;
+
 /**
- * The Attribute… picker's search: `orderNumber` STARTS WITH what was typed
- * (index-served, and the LIKE metacharacters escaped so the search is for the
- * text itself), at most twenty rows, and an EXACT count of what the bound left
- * off — the count and the page come from one read view, so "N more" can never
- * contradict the rows above it (the labeling-queue idiom).
+ * THE ORDER SEARCH'S OWN SELECT: the frozen PII projection plus the two things
+ * the search rows add — the store's name (`company.name`, never the company id
+ * on the wire) and the item count. Built BESIDE `RECONCILIATION_ORDER_SELECT`,
+ * never into it: that select is every other reconciliation read's, and the
+ * assistant gate pins it as a literal (pack R-a.1: unchanged, and pinned so).
+ */
+const ORDER_SEARCH_SELECT = deepFreeze({
+  ...RECONCILIATION_ORDER_SELECT,
+  company: { select: { name: true } },
+  _count: { select: { items: true } },
+} as const);
+
+type OrderSearchProjection = OrderProjection & {
+  company: { name: string };
+  _count: { items: number };
+};
+
+/**
+ * One search row. `thisProduct` is present only when a product was named. The
+ * client declares its own wire types (`hooks/use-order-search.ts`), so these stay
+ * module-local.
+ */
+type OrderSearchRow = {
+  id: string;
+  orderNumber: string;
+  platform: string;
+  internalStatus: string;
+  externalCreatedAt: string | null;
+  itemCount: number;
+  store: string;
+  thisProduct?: { orderedUnits: number; uncheckedLines: number };
+};
+
+type OrderSearchAnswer = {
+  orders: OrderSearchRow[];
+  moreCount: number;
+  exactCount: number;
+};
+
+/**
+ * The search's input rules after the blank short-circuit, IN THE PACK'S ORDER
+ * (R-a.1): the text's length, then `productId`, then `limit`. Each refusal is
+ * the house 400 (`refuse`, rendered `{ error, code: 'VALIDATION_ERROR' }`).
+ *
+ * The route calls it BEFORE the membership read, with the query string's
+ * numbers already read as numbers (anything that is not a run of digits arrives
+ * as `NaN` and is refused here); `searchOrders` calls it again for any caller
+ * that is not the route. One spelling of each sentence, either way.
+ */
+export function assertOrderSearchInput(
+  query: string,
+  opts: { productId?: number; limit?: number }
+): { productId: number | undefined; limit: number } {
+  if (query.length > ORDER_SEARCH_MAX_QUERY) {
+    refuse(['q'], 'search text is at most 40 characters');
+  }
+  const { productId, limit } = opts;
+  if (
+    productId !== undefined &&
+    !(Number.isInteger(productId) && productId >= 1 && productId <= INT32_MAX)
+  ) {
+    refuse(['productId'], 'productId must be a positive whole number');
+  }
+  if (limit !== undefined && !(Number.isInteger(limit) && limit >= 1 && limit <= ORDER_SEARCH_LIMIT)) {
+    refuse(['limit'], 'limit must be a whole number from 1 to 20');
+  }
+  return { productId, limit: limit ?? ORDER_SEARCH_LIMIT };
+}
+
+/**
+ * The order search behind the Attribute… picker and the adjust dialog's order
+ * number field (pack § P2-B3-1R, R-a.1; supersedes the prefix-only rule).
+ *
+ * MATCH ANYWHERE, RANKED. Three group reads, each `take: limit`, newest first:
+ *   G1 — `orderNumber` EQUALS the text (the raw text: equality has no
+ *        wildcards to escape);
+ *   G2 — it STARTS WITH the text, and is not G1;
+ *   G3 — it CONTAINS the text, and does not start with it.
+ * The page is G1, then G2, then G3, cut at `limit` — so the exact number is
+ * always first however many longer numbers contain it.
+ *
+ * TWO COUNTS, from the same read view as the page: `exactCount` (G1's where —
+ * how many orders carry exactly this number, which is what the dialog's status
+ * line speaks about, and which can exceed the limit) and the match count
+ * (CONTAINS), from which `moreCount` says how many the page left off. All five
+ * statements are ONE `$transaction` array, so "N more" can never contradict
+ * the rows above it (the labeling-queue idiom). Every one of the five carries
+ * the member scope when the viewer is a member.
+ *
+ * `thisProduct` (only when `productId` is given): what the order's lines say
+ * about that product, from the matcher's own ordered side (`readOrderItems` —
+ * the expansion rule spelled once): the units ordered, bundles expanded, and the
+ * lines that cannot be checked (unmapped, or a bundle that will not resolve).
+ * Read AFTER the transaction, for the page's ids only.
  */
 export async function searchOrders(
   q: string,
-  viewer: Viewer
-): Promise<{
-  orders: Array<{
-    id: string;
-    orderNumber: string;
-    platform: string;
-    internalStatus: string;
-    externalCreatedAt: string | null;
-    itemCount: number;
-  }>;
-  moreCount: number;
-}> {
+  viewer: Viewer,
+  opts?: { productId?: number; limit?: number }
+): Promise<OrderSearchAnswer> {
   const query = q.trim();
-  if (query.length === 0) return { orders: [], moreCount: 0 };
+  if (query.length === 0) return { orders: [], moreCount: 0, exactCount: 0 };
+  const { productId, limit } = assertOrderSearchInput(query, opts ?? {});
 
-  const where = {
-    orderNumber: { startsWith: escapeLike(query) },
-    ...(viewer.kind === 'member' ? { companyId: { in: viewer.companyIds } } : {}),
+  const scope = viewer.kind === 'member' ? { companyId: { in: viewer.companyIds } } : {};
+  const escaped = escapeLike(query);
+  const exactWhere = { orderNumber: query, ...scope };
+  const prefixWhere = {
+    orderNumber: { startsWith: escaped },
+    NOT: { orderNumber: query },
+    ...scope,
+  };
+  const containsWhere = {
+    orderNumber: { contains: escaped },
+    NOT: { orderNumber: { startsWith: escaped } },
+    ...scope,
+  };
+  const matchWhere = { orderNumber: { contains: escaped }, ...scope };
+  const group = {
+    orderBy: [{ externalCreatedAt: 'desc' as const }, { id: 'desc' as const }],
+    take: limit,
+    select: ORDER_SEARCH_SELECT,
   };
 
-  const [count, rows] = await prisma.$transaction([
-    prisma.externalOrder.count({ where }),
-    prisma.externalOrder.findMany({
-      where,
-      orderBy: [{ externalCreatedAt: 'desc' }, { id: 'desc' }],
-      take: ORDER_SEARCH_LIMIT,
-      select: { ...RECONCILIATION_ORDER_SELECT, _count: { select: { items: true } } },
-    }),
+  const [exact, prefix, contains, exactCount, matchCount] = await prisma.$transaction([
+    prisma.externalOrder.findMany({ where: exactWhere, ...group }),
+    prisma.externalOrder.findMany({ where: prefixWhere, ...group }),
+    prisma.externalOrder.findMany({ where: containsWhere, ...group }),
+    prisma.externalOrder.count({ where: exactWhere }),
+    prisma.externalOrder.count({ where: matchWhere }),
   ]);
 
-  const projected = (rows as unknown as Array<OrderProjection & { _count: { items: number } }>).map(
-    (row) => ({
+  const ranked = [...exact, ...prefix, ...contains] as unknown as OrderSearchProjection[];
+  const page = ranked.slice(0, limit);
+
+  const items =
+    productId === undefined ? null : await readOrderItems(prisma, page.map((row) => row.id));
+
+  // Field by field, never a spread: the second half of the D6 PII contract.
+  const orders = page.map((row): OrderSearchRow => {
+    const projected: OrderSearchRow = {
       id: row.id,
       orderNumber: row.orderNumber,
       platform: row.integration?.platform ?? 'unknown',
       internalStatus: row.internalStatus,
       externalCreatedAt: iso(row.externalCreatedAt),
       itemCount: row._count.items,
-    })
-  );
+      store: row.company.name,
+    };
+    if (items !== null) {
+      // `readOrderItems` answers for every id it was asked; an order with no
+      // item rows is the empty set (0 ordered, 0 unchecked).
+      const ordered = items.get(row.id);
+      projected.thisProduct = {
+        orderedUnits: (ordered?.lines ?? [])
+          .filter((line) => line.productId === productId)
+          .reduce((sum, line) => sum + line.quantity, 0),
+        uncheckedLines: (ordered?.unmappedLines ?? 0) + (ordered?.unresolvableBundleLines ?? 0),
+      };
+    }
+    return projected;
+  });
 
-  return { orders: projected, moreCount: Math.max(count - projected.length, 0) };
+  return {
+    orders,
+    moreCount: Math.max(toNumber(matchCount) - orders.length, 0),
+    exactCount: toNumber(exactCount),
+  };
 }

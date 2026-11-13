@@ -199,6 +199,168 @@ describe("membership withholds the attribution — it never rejects the deductio
 });
 
 // ---------------------------------------------------------------------------
+// THE OPT-IN CALLER SCOPE (reconciliation Part 2, pack § P2-B3-1R, R-a.5)
+//
+// With `scope: 'caller'`, a NON-admin's candidates are read inside their own
+// companies — the same `resolveCallerCompanyIds(user, null)` read the order
+// search makes — so the save agrees with the member-scoped preview. The
+// default (`'global'`) is today's behaviour, pinned by every suite above.
+//
+// The candidate read is driven by a small fake that APPLIES the `where`
+// (number and company), so "the database only answered inside the scope" is
+// what the fixture does, not what the test assumes.
+// ---------------------------------------------------------------------------
+
+describe("scope: 'caller' — a member resolves within their own companies", () => {
+  const OWN = COMPANY_ID;
+  const FOREIGN = "company-other";
+
+  /** The book of orders the fake reads from. */
+  function book(rows: Array<{ id: string; orderNumber: string; companyId: string }>): void {
+    db.externalOrder.findMany.mockImplementation((async (args: {
+      where: { orderNumber: string; companyId?: { in: string[] } };
+      take: number;
+    }) =>
+      rows
+        .filter((r) => r.orderNumber === args.where.orderNumber)
+        .filter((r) => args.where.companyId === undefined || args.where.companyId.in.includes(r.companyId))
+        .slice(0, args.take)) as any);
+  }
+
+  function memberOf(companyIds: string[]): void {
+    db.userCompany.findMany.mockResolvedValue(companyIds.map((companyId) => ({ companyId })) as any);
+  }
+
+  it("a number held ONLY by another company -> unmatched (was not-a-member globally)", async () => {
+    book([candidate(ORDER_B, "12345", FOREIGN)]);
+    memberOf([OWN]);
+
+    await expect(resolveOrderReference("12345", USER, { scope: "caller" })).resolves.toEqual({
+      outcome: "unmatched",
+      orderRecordId: null,
+    });
+    expect(db.userCompany.findMany).toHaveBeenCalledTimes(1);
+    expect(db.userCompany.findMany).toHaveBeenCalledWith({
+      where: { userId: 7 },
+      select: { companyId: true },
+    });
+    expect(db.externalOrder.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { orderNumber: "12345", companyId: { in: [OWN] } },
+        take: ORDER_REFERENCE_CANDIDATE_CAP,
+      })
+    );
+    // Nothing to probe: the scoped read found no candidate.
+    expect(requireCompanyMembership).not.toHaveBeenCalled();
+  });
+
+  it("a number held by their company AND another -> resolves to their own (was ambiguous globally)", async () => {
+    book([candidate(ORDER_A, "12345", OWN), candidate(ORDER_B, "12345", FOREIGN)]);
+    memberOf([OWN]);
+
+    await expect(resolveOrderReference("12345", USER, { scope: "caller" })).resolves.toEqual({
+      outcome: "resolved",
+      orderRecordId: ORDER_A,
+    });
+    // The membership belt still runs, on the resolved order's company.
+    expect(requireCompanyMembership).toHaveBeenCalledWith(7, OWN, false);
+
+    // The same book read globally is the ambiguity it always was.
+    jest.clearAllMocks();
+    await expect(resolveOrderReference("12345", USER)).resolves.toMatchObject({
+      outcome: "ambiguous",
+    });
+  });
+
+  it("two of their OWN companies' orders share the number -> still ambiguous", async () => {
+    book([candidate(ORDER_A, "12345", OWN), candidate(ORDER_B, "12345", "company-two")]);
+    memberOf([OWN, "company-two"]);
+
+    await expect(resolveOrderReference("12345", USER, { scope: "caller" })).resolves.toEqual({
+      outcome: "ambiguous",
+      orderRecordId: null,
+    });
+  });
+
+  it("an ADMIN is never scoped: no companyId key, and no membership read", async () => {
+    book([candidate(ORDER_B, "12345", FOREIGN)]);
+
+    await expect(
+      resolveOrderReference("12345", { id: 9, isAdmin: true }, { scope: "caller" })
+    ).resolves.toEqual({ outcome: "resolved", orderRecordId: ORDER_B });
+
+    const where = (db.externalOrder.findMany.mock.calls[0][0] as { where: object }).where;
+    expect(where).toEqual({ orderNumber: "12345" });
+    expect("companyId" in where).toBe(false);
+    expect(db.userCompany.findMany).not.toHaveBeenCalled();
+    expect(requireCompanyMembership).toHaveBeenCalledWith(9, FOREIGN, true);
+  });
+
+  it("a member of ZERO companies -> unmatched (scoped to nothing, never unscoped)", async () => {
+    book([candidate(ORDER_A, "12345", OWN)]);
+    memberOf([]);
+
+    await expect(resolveOrderReference("12345", USER, { scope: "caller" })).resolves.toEqual({
+      outcome: "unmatched",
+      orderRecordId: null,
+    });
+    expect(db.externalOrder.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { orderNumber: "12345", companyId: { in: [] } } })
+    );
+  });
+
+  it("a throw from the scope read PROPAGATES (the route records resolver-error), and nothing is read after it", async () => {
+    db.userCompany.findMany.mockRejectedValue(new Error("connection lost"));
+
+    await expect(resolveOrderReference("12345", USER, { scope: "caller" })).rejects.toThrow(
+      "connection lost"
+    );
+    expect(db.externalOrder.findMany).not.toHaveBeenCalled();
+  });
+
+  it("an unusable reference never reaches the database — not even the scope read", async () => {
+    await expect(resolveOrderReference("walk-in 88", USER, { scope: "caller" })).resolves.toEqual({
+      outcome: "unusable",
+      orderRecordId: null,
+    });
+    expect(db.userCompany.findMany).not.toHaveBeenCalled();
+    expect(db.externalOrder.findMany).not.toHaveBeenCalled();
+  });
+
+  // The race arm (R-a.5 keeps `not-a-member` reachable for a member): the scope
+  // read still listed the company, and membership was removed before the belt.
+  it("membership removed between the scope read and the belt -> not-a-member", async () => {
+    book([candidate(ORDER_A, "12345", OWN)]);
+    memberOf([OWN]);
+    (requireCompanyMembership as jest.Mock).mockRejectedValue(
+      new AppError("Resource not found", "NOT_FOUND", 404)
+    );
+
+    await expect(resolveOrderReference("12345", USER, { scope: "caller" })).resolves.toEqual({
+      outcome: "not-a-member",
+      orderRecordId: null,
+    });
+  });
+
+  it("the default and an explicit 'global' are today's read: no companyId key, no membership read", async () => {
+    for (const opts of [undefined, {}, { scope: "global" as const }]) {
+      jest.clearAllMocks();
+      (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
+      book([candidate(ORDER_B, "12345", FOREIGN)]);
+
+      await expect(resolveOrderReference("12345", USER, opts)).resolves.toEqual({
+        outcome: "resolved",
+        orderRecordId: ORDER_B,
+      });
+      expect((db.externalOrder.findMany.mock.calls[0][0] as { where: object }).where).toEqual({
+        orderNumber: "12345",
+      });
+      expect(db.userCompany.findMany).not.toHaveBeenCalled();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The duplicated rule, pinned as one rule
 // ---------------------------------------------------------------------------
 

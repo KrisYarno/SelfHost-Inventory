@@ -5,7 +5,7 @@
  *
  *   GET /api/reconciliation/attribution            -> the AttributionReport envelope
  *   GET /api/reconciliation/attribution/[batchId]  -> the BatchDetail envelope, or 404
- *   GET /api/reconciliation/orders/search          -> { orders, moreCount }
+ *   GET /api/reconciliation/orders/search          -> { orders, moreCount, exactCount }
  *
  * The REAL producer runs against a mocked Prisma, so these pins cover the HTTP
  * surface AND the seam between it and `lib/reconciliation/attribution.ts`: the
@@ -444,41 +444,84 @@ function asMember(companyIds: string[], id = 7): void {
   );
 }
 
-/** The `where` each of the search's two reads was handed. */
-function searchWheres(): { count: unknown; rows: unknown } {
-  return {
-    count: (db.externalOrder.count.mock.calls[0]?.[0] as { where?: unknown } | undefined)?.where,
-    rows: (db.externalOrder.findMany.mock.calls[0]?.[0] as { where?: unknown } | undefined)?.where,
+/** A search row as the search's OWN select returns it (pack § P2-B3-1R, R-a.1). */
+const SEARCH_ROW = { ...ORDER, company: { name: 'Acme Store' }, _count: { items: 3 } };
+
+/**
+ * What the search's five statements answer, told apart by their `where` (R-a.1):
+ * G1 is the equality, G2 the starts-with, G3 the contains; the first count is
+ * G1's where and the second the contains. The mock does not apply the where —
+ * the producer suite's in-memory book does that — so each group is handed its
+ * rows here.
+ */
+function searchAnswers(
+  answers: {
+    exact?: unknown[];
+    prefix?: unknown[];
+    contains?: unknown[];
+    exactCount?: number;
+    matchCount?: number;
+  } = {},
+): void {
+  const groupOf = (where: { orderNumber: unknown }): 'exact' | 'prefix' | 'contains' => {
+    const on = where.orderNumber as string | { startsWith?: string; contains?: string };
+    if (typeof on === 'string') return 'exact';
+    return on.startsWith !== undefined ? 'prefix' : 'contains';
   };
+  db.externalOrder.findMany.mockImplementation(((args: { where: { orderNumber: unknown } }) =>
+    Promise.resolve(answers[groupOf(args.where)] ?? [])) as never);
+  db.externalOrder.count.mockImplementation(((args: { where: { orderNumber: unknown } }) =>
+    Promise.resolve(
+      groupOf(args.where) === 'exact' ? (answers.exactCount ?? 0) : (answers.matchCount ?? 0),
+    )) as never);
+}
+
+/** The `where` of every one of the search's five statements, reads then counts. */
+function searchWheres(): unknown[] {
+  return [
+    ...db.externalOrder.findMany.mock.calls.map((c) => (c[0] as { where?: unknown }).where),
+    ...db.externalOrder.count.mock.calls.map((c) => (c[0] as { where?: unknown }).where),
+  ];
+}
+
+/** The five wheres for `q`, optionally scoped. */
+function expectedWheres(q: string, scope?: string[]): unknown[] {
+  const s = scope === undefined ? {} : { companyId: { in: scope } };
+  return [
+    { orderNumber: q, ...s },
+    { orderNumber: { startsWith: q }, NOT: { orderNumber: q }, ...s },
+    { orderNumber: { contains: q }, NOT: { orderNumber: { startsWith: q } }, ...s },
+    { orderNumber: q, ...s },
+    { orderNumber: { contains: q }, ...s },
+  ];
 }
 
 describe('GET /api/reconciliation/orders/search', () => {
+  beforeEach(() => {
+    searchAnswers();
+  });
+
   it('is dynamic and guarded by APPROVAL, not admin (Part 2 B3-1)', async () => {
     expect(searchDynamic).toBe('force-dynamic');
-    db.externalOrder.count.mockResolvedValue(0 as never);
-    db.externalOrder.findMany.mockResolvedValue([] as never);
     await searchGET(searchRequest());
     expect(mockRequireApproved).toHaveBeenCalledTimes(1);
     expect(mockRequireAdmin).not.toHaveBeenCalled();
   });
 
-  it('an admin searches EVERY order: no company scope, and no membership read', async () => {
-    db.externalOrder.count.mockResolvedValue(1 as never);
-    db.externalOrder.findMany.mockResolvedValue([{ ...ORDER, _count: { items: 3 } }] as never);
+  it('an admin searches EVERY order: no company scope on any of the five statements, and no membership read', async () => {
+    searchAnswers({ exact: [SEARCH_ROW], exactCount: 1, matchCount: 1 });
 
     const res = await searchGET(searchRequest());
     expect(res.status).toBe(200);
 
-    const { count, rows } = searchWheres();
-    expect(count).toEqual({ orderNumber: { startsWith: '100' } });
-    expect(rows).toEqual({ orderNumber: { startsWith: '100' } });
+    expect(searchWheres()).toEqual(expectedWheres('100'));
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
     expect(db.userCompany.findMany).not.toHaveBeenCalled();
   });
 
-  it("a member searches their OWN companies' orders — the scope rides BOTH the count and the rows", async () => {
+  it("a member searches their OWN companies' orders — the scope rides ALL FIVE statements", async () => {
     asMember(['co-1', 'co-2']);
-    db.externalOrder.count.mockResolvedValue(1 as never);
-    db.externalOrder.findMany.mockResolvedValue([{ ...ORDER, _count: { items: 3 } }] as never);
+    searchAnswers({ exact: [SEARCH_ROW], exactCount: 1, matchCount: 1 });
 
     const res = await searchGET(searchRequest());
     expect(res.status).toBe(200);
@@ -488,20 +531,16 @@ describe('GET /api/reconciliation/orders/search', () => {
       where: { userId: 7 },
       select: { companyId: true },
     });
-    const { count, rows } = searchWheres();
-    expect(count).toEqual({ orderNumber: { startsWith: '100' }, companyId: { in: ['co-1', 'co-2'] } });
-    expect(rows).toEqual({ orderNumber: { startsWith: '100' }, companyId: { in: ['co-1', 'co-2'] } });
+    expect(searchWheres()).toEqual(expectedWheres('100', ['co-1', 'co-2']));
 
     // A member's NON-empty answer is the plain envelope — no note.
     const body = await res.json();
-    expect(Object.keys(body).sort()).toEqual(['moreCount', 'orders']);
+    expect(Object.keys(body).sort()).toEqual(['exactCount', 'moreCount', 'orders']);
     expect(body.orders).toHaveLength(1);
   });
 
   it('an approved user with NO memberships gets an empty answer that NAMES why, never a 403 (B3-1 FR1)', async () => {
     asMember([]);
-    db.externalOrder.count.mockResolvedValue(0 as never);
-    db.externalOrder.findMany.mockResolvedValue([] as never);
 
     const res = await searchGET(searchRequest());
 
@@ -512,39 +551,34 @@ describe('GET /api/reconciliation/orders/search', () => {
     expect(await res.json()).toEqual({
       orders: [],
       moreCount: 0,
+      exactCount: 0,
       note: 'you are not a member of any company yet, so there are no orders to search — ask an admin to add you',
     });
     // Scoped to nothing — not unscoped.
-    const { count, rows } = searchWheres();
-    expect(count).toEqual({ orderNumber: { startsWith: '100' }, companyId: { in: [] } });
-    expect(rows).toEqual({ orderNumber: { startsWith: '100' }, companyId: { in: [] } });
+    expect(searchWheres()).toEqual(expectedWheres('100', []));
   });
 
   it("a member's EMPTY answer carries the house sentence (pack row 94); an admin's carries none", async () => {
     expect(NO_MEMBER_ORDER_NOTE).toBe('no order matching that number in your companies');
-    db.externalOrder.count.mockResolvedValue(0 as never);
-    db.externalOrder.findMany.mockResolvedValue([] as never);
 
     const admin = await searchGET(searchRequest());
-    expect(await admin.json()).toEqual({ orders: [], moreCount: 0 });
+    expect(await admin.json()).toEqual({ orders: [], moreCount: 0, exactCount: 0 });
 
     asMember(['co-1']);
     const member = await searchGET(searchRequest());
     expect(await member.json()).toEqual({
       orders: [],
       moreCount: 0,
+      exactCount: 0,
       note: 'no order matching that number in your companies',
     });
   });
 
   it('one or more companies and no match keep the house sentence — never the no-company reason (B3-1 FR1)', async () => {
-    db.externalOrder.count.mockResolvedValue(0 as never);
-    db.externalOrder.findMany.mockResolvedValue([] as never);
-
     for (const companies of [['co-1'], ['co-1', 'co-2']]) {
       asMember(companies);
       const body = await (await searchGET(searchRequest())).json();
-      expect(body).toEqual({ orders: [], moreCount: 0, note: NO_MEMBER_ORDER_NOTE });
+      expect(body).toEqual({ orders: [], moreCount: 0, exactCount: 0, note: NO_MEMBER_ORDER_NOTE });
       expect(body.note).not.toBe(NO_COMPANY_MEMBERSHIP_NOTE);
     }
   });
@@ -554,25 +588,27 @@ describe('GET /api/reconciliation/orders/search', () => {
 
     const blank = await searchGET(searchRequest('q=%20%20'));
 
-    expect(await blank.json()).toEqual({ orders: [], moreCount: 0 });
+    expect(await blank.json()).toEqual({ orders: [], moreCount: 0, exactCount: 0 });
     expect(db.userCompany.findMany).not.toHaveBeenCalled();
     expect(db.$transaction).not.toHaveBeenCalled();
   });
 
   it('the projection carries no customer field — for a member as for an admin', async () => {
     asMember(['co-1']);
-    db.externalOrder.count.mockResolvedValue(1 as never);
-    db.externalOrder.findMany.mockResolvedValue([
-      {
-        ...ORDER,
-        _count: { items: 3 },
-        // What a widened select WOULD hand back; the projection must drop it.
-        customerEmail: 'buyer@example.com',
-        customerName: 'A Buyer',
-        shippingAddress: { line1: '1 Test Street' },
-        rawPayload: { id: 4242 },
-      },
-    ] as never);
+    searchAnswers({
+      exact: [
+        {
+          ...SEARCH_ROW,
+          // What a widened select WOULD hand back; the projection must drop it.
+          customerEmail: 'buyer@example.com',
+          customerName: 'A Buyer',
+          shippingAddress: { line1: '1 Test Street' },
+          rawPayload: { id: 4242 },
+        },
+      ],
+      exactCount: 1,
+      matchCount: 1,
+    });
 
     const body = await (await searchGET(searchRequest())).json();
 
@@ -584,13 +620,12 @@ describe('GET /api/reconciliation/orders/search', () => {
         internalStatus: 'pending',
         externalCreatedAt: '2026-08-09T00:00:00.000Z',
         itemCount: 3,
+        store: 'Acme Store',
       },
     ]);
   });
 
   it('is rate-limited PER USER at 60 (no ttl key), after the guard, with the headers on the 200', async () => {
-    db.externalOrder.count.mockResolvedValue(0 as never);
-    db.externalOrder.findMany.mockResolvedValue([] as never);
     asMember(['co-1'], 9101);
 
     const res = await searchGET(searchRequest());
@@ -607,8 +642,6 @@ describe('GET /api/reconciliation/orders/search', () => {
   });
 
   it('the 61st search inside the window is a 429 with the limiter headers', async () => {
-    db.externalOrder.count.mockResolvedValue(0 as never);
-    db.externalOrder.findMany.mockResolvedValue([] as never);
     // A user id no other pin spends, so the in-process window is this pin's own.
     mockRequireApproved.mockResolvedValue({ user: { id: 9202, isAdmin: true, isApproved: true } });
 
@@ -623,13 +656,14 @@ describe('GET /api/reconciliation/orders/search', () => {
     expect(limited.headers.get('Retry-After')).not.toBeNull();
     expect(limited.headers.get('X-RateLimit-Limit')).toBe('60');
     expect(limited.headers.get('X-RateLimit-Remaining')).toBe('0');
-    // Refused before the database is asked.
-    expect(db.externalOrder.findMany).toHaveBeenCalledTimes(60);
+    // Refused before the database is asked: sixty searches, each ONE transaction
+    // of three group reads.
+    expect(db.$transaction).toHaveBeenCalledTimes(60);
+    expect(db.externalOrder.findMany).toHaveBeenCalledTimes(180);
   });
 
-  it('serves { orders, moreCount } and says how many it left off', async () => {
-    db.externalOrder.count.mockResolvedValue(25 as never);
-    db.externalOrder.findMany.mockResolvedValue([{ ...ORDER, _count: { items: 3 } }] as never);
+  it('serves { orders, moreCount, exactCount } and says how many it left off', async () => {
+    searchAnswers({ exact: [SEARCH_ROW], exactCount: 1, matchCount: 25 });
 
     const res = await searchGET(
       new NextRequest('http://localhost/api/reconciliation/orders/search?q=100'),
@@ -637,7 +671,7 @@ describe('GET /api/reconciliation/orders/search', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
 
-    expect(Object.keys(body).sort()).toEqual(['moreCount', 'orders']);
+    expect(Object.keys(body).sort()).toEqual(['exactCount', 'moreCount', 'orders']);
     expect(body.orders[0]).toEqual({
       id: 'ord-1',
       orderNumber: '#1001',
@@ -645,20 +679,144 @@ describe('GET /api/reconciliation/orders/search', () => {
       internalStatus: 'pending',
       externalCreatedAt: '2026-08-09T00:00:00.000Z',
       itemCount: 3,
+      store: 'Acme Store',
     });
     expect(body.moreCount).toBe(24);
+    expect(body.exactCount).toBe(1);
+  });
+
+  it('ranks the groups exact -> starts-with -> contains on the wire', async () => {
+    searchAnswers({
+      exact: [{ ...SEARCH_ROW, id: 'e', orderNumber: '100' }],
+      prefix: [{ ...SEARCH_ROW, id: 'p', orderNumber: '1001' }],
+      contains: [{ ...SEARCH_ROW, id: 'c', orderNumber: '2100' }],
+      exactCount: 1,
+      matchCount: 3,
+    });
+
+    const body = await (await searchGET(searchRequest())).json();
+
+    expect(body.orders.map((o: { id: string }) => o.id)).toEqual(['e', 'p', 'c']);
+    expect(body.moreCount).toBe(0);
+  });
+
+  it('limit=5 reaches every group read, and the page is cut after the ranking', async () => {
+    const rows = (prefix: string, n: number) =>
+      Array.from({ length: n }, (_, i) => ({ ...SEARCH_ROW, id: `${prefix}${i}` }));
+    searchAnswers({ exact: rows('e', 2), prefix: rows('p', 5), contains: rows('c', 5), exactCount: 2, matchCount: 30 });
+
+    const body = await (await searchGET(searchRequest('q=100&limit=5'))).json();
+
+    for (const call of db.externalOrder.findMany.mock.calls) {
+      expect(call[0]).toMatchObject({ take: 5 });
+    }
+    expect(body.orders.map((o: { id: string }) => o.id)).toEqual(['e0', 'e1', 'p0', 'p1', 'p2']);
+    expect(body.moreCount).toBe(25);
+    expect(body.exactCount).toBe(2);
+  });
+
+  it('an absent or empty limit is twenty', async () => {
+    await searchGET(searchRequest('q=100'));
+    await searchGET(searchRequest('q=100&limit='));
+    for (const call of db.externalOrder.findMany.mock.calls) {
+      expect(call[0]).toMatchObject({ take: 20 });
+    }
+    expect(db.externalOrder.findMany).toHaveBeenCalledTimes(6);
+  });
+
+  it('productId adds thisProduct to every row, read for the page ids only; absent or empty adds nothing', async () => {
+    searchAnswers({ exact: [SEARCH_ROW], exactCount: 1, matchCount: 1 });
+    db.externalOrderItem.findMany.mockResolvedValue([
+      {
+        id: 'item-1',
+        orderId: 'ord-1',
+        quantity: 2,
+        fulfilledQty: 0,
+        isMapped: true,
+        productLinkId: 'link-1',
+        bundleComponentSnapshot: null,
+        productLink: { internalProductId: 9, isBundle: false, bundleComponents: [] },
+      },
+      {
+        id: 'item-2',
+        orderId: 'ord-1',
+        quantity: 1,
+        fulfilledQty: 0,
+        isMapped: false,
+        productLinkId: null,
+        bundleComponentSnapshot: null,
+        productLink: null,
+      },
+    ] as never);
+
+    const withProduct = await (await searchGET(searchRequest('q=100&productId=9'))).json();
+    expect(withProduct.orders[0].thisProduct).toEqual({ orderedUnits: 2, uncheckedLines: 1 });
+    expect(
+      (db.externalOrderItem.findMany.mock.calls[0][0] as { where: unknown }).where,
+    ).toEqual({ orderId: { in: ['ord-1'] } });
+
+    db.externalOrderItem.findMany.mockClear();
+    for (const query of ['q=100', 'q=100&productId=']) {
+      const body = await (await searchGET(searchRequest(query))).json();
+      expect('thisProduct' in body.orders[0]).toBe(false);
+    }
+    expect(db.externalOrderItem.findMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a 41-character q', `q=${'1'.repeat(41)}`, 'search text is at most 40 characters'],
+    ['productId=0', 'q=100&productId=0', 'productId must be a positive whole number'],
+    ['productId=-1', 'q=100&productId=-1', 'productId must be a positive whole number'],
+    ['productId=abc', 'q=100&productId=abc', 'productId must be a positive whole number'],
+    ['productId=1.5', 'q=100&productId=1.5', 'productId must be a positive whole number'],
+    ['productId=+5', 'q=100&productId=%2B5', 'productId must be a positive whole number'],
+    ['productId=2147483648', 'q=100&productId=2147483648', 'productId must be a positive whole number'],
+    ['limit=0', 'q=100&limit=0', 'limit must be a whole number from 1 to 20'],
+    ['limit=21', 'q=100&limit=21', 'limit must be a whole number from 1 to 20'],
+    ['limit=abc', 'q=100&limit=abc', 'limit must be a whole number from 1 to 20'],
+    ['limit=2.5', 'q=100&limit=2.5', 'limit must be a whole number from 1 to 20'],
+  ])('%s -> 400 VALIDATION_ERROR with its sentence, before the membership read', async (_label, query, sentence) => {
+    asMember(['co-1']);
+
+    const res = await searchGET(searchRequest(query));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: sentence, code: 'VALIDATION_ERROR' });
+    expect(db.userCompany.findMany).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('validates in the pack order: q, then productId, then limit', async () => {
+    const first = await searchGET(searchRequest(`q=${'1'.repeat(41)}&productId=0&limit=0`));
+    expect((await first.json()).error).toBe('search text is at most 40 characters');
+    const second = await searchGET(searchRequest('q=100&productId=0&limit=0'));
+    expect((await second.json()).error).toBe('productId must be a positive whole number');
+  });
+
+  it('accepts a 40-character q (trimmed first), productId 2147483647 and limit 1', async () => {
+    const forty = await searchGET(searchRequest(`q=%20${'1'.repeat(40)}%20`));
+    expect(forty.status).toBe(200);
+    const edge = await searchGET(searchRequest('q=100&productId=2147483647&limit=1'));
+    expect(edge.status).toBe(200);
+  });
+
+  it('a blank q with a bad productId or limit is still the blank answer — nothing else is validated', async () => {
+    const res = await searchGET(searchRequest('q=%20&productId=abc&limit=99'));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ orders: [], moreCount: 0, exactCount: 0 });
+    expect(db.$transaction).not.toHaveBeenCalled();
   });
 
   it('an absent or blank q asks the database nothing', async () => {
     const res = await searchGET(
       new NextRequest('http://localhost/api/reconciliation/orders/search?q=%20%20'),
     );
-    expect(await res.json()).toEqual({ orders: [], moreCount: 0 });
+    expect(await res.json()).toEqual({ orders: [], moreCount: 0, exactCount: 0 });
 
     const bare = await searchGET(
       new NextRequest('http://localhost/api/reconciliation/orders/search'),
     );
-    expect(await bare.json()).toEqual({ orders: [], moreCount: 0 });
+    expect(await bare.json()).toEqual({ orders: [], moreCount: 0, exactCount: 0 });
     expect(db.$transaction).not.toHaveBeenCalled();
   });
 
@@ -669,8 +827,8 @@ describe('GET /api/reconciliation/orders/search', () => {
     const bare = await searchGET(searchRequest(''));
 
     expect(blank.status).toBe(200);
-    expect(await blank.json()).toEqual({ orders: [], moreCount: 0 });
-    expect(await bare.json()).toEqual({ orders: [], moreCount: 0 });
+    expect(await blank.json()).toEqual({ orders: [], moreCount: 0, exactCount: 0 });
+    expect(await bare.json()).toEqual({ orders: [], moreCount: 0, exactCount: 0 });
     // Still rate-limited, still carrying the headers.
     expect(blank.headers.get('X-RateLimit-Limit')).toBe('60');
     expect(db.userCompany.findMany).not.toHaveBeenCalled();

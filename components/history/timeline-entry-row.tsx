@@ -9,6 +9,9 @@
  * connector. An 'event' entry renders:
  *   - primary line: the core field change (`ChangeDiffList`) when changes exist;
  *   - supporting line: action label · context (muted);
+ *   - the adjustment's Note, `Note: …`, when the projection carried one (it is
+ *     null for anyone but admins and its author — reconciliation Part 2, pack
+ *     § P2-B3-1R, R-a.2) — plain text, wrapped with `break-words`;
  *   - a compact snapshot/cascade/bulk summary (`EventSummaries`);
  *   - metadata line: `ActorChip` · relative time (exact-ms ISO in `title`);
  *   - a batch chip (drill-down) when a `batchId` + `onBatchClick` are present;
@@ -171,6 +174,10 @@ export function TimelineEntryRow({
             </>
           )}
         </p>
+
+        {event.note && (
+          <p className="break-words text-sm text-foreground">Note: {event.note}</p>
+        )}
 
         {!event.restricted && (
           <EventSummaries

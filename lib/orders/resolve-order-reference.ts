@@ -1,5 +1,6 @@
 import prisma from "@/lib/prisma";
 import { requireCompanyMembership } from "@/lib/api-utils";
+import { resolveCallerCompanyIds } from "@/lib/analytics/company-scope";
 import { AppError } from "@/lib/error-handling";
 import type { DeductionIntent } from "@/lib/inventory/intent";
 import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
@@ -42,6 +43,21 @@ import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
  * rejects the payload, here it withholds the attribution. Nothing about the
  * declined order is logged, returned or recorded; an approved user of another
  * company learns nothing from having typed a number.
+ *
+ * THE SCOPE IS OPT-IN (pack § P2-B3-1R, R-a.5). By default (`'global'`) the
+ * candidates are every order with the number, and the membership check above is
+ * what declines another company's (`not-a-member`). With `scope: 'caller'` a
+ * NON-admin's candidates are read inside their OWN companies
+ * (`resolveCallerCompanyIds`, the search route's call), so the resolver sees
+ * exactly what the member's order search shows: a number held only by another
+ * company is `unmatched`, and one held by theirs AND another resolves to
+ * theirs. An admin is never scoped. ONLY the adjust route opts in — its dialog
+ * previews the member-scoped search, and the save must agree with the preview.
+ * Deduct-simple stays global: the workbench has no preview, and a scoped
+ * resolve there would stamp on evidence nobody saw (registered until the
+ * workbench adopts the order number field). The membership check still runs on
+ * the scoped path, as a belt: membership removed between the scope read and the
+ * check is still `not-a-member`.
  *
  * NOT Next-free, and cannot be, for the sibling's reason: `requireCompanyMembership`
  * lives in @/lib/api-utils, which imports `next/server`. Re-implementing the
@@ -139,16 +155,30 @@ export function isReferenceResolutionEligible(intent?: DeductionIntent | null): 
  * pad-insensitive, so the `where` clause is a CANDIDATE fetch and equality is
  * decided here on the raw strings: `12345 ` is not `12345`, and a "close enough"
  * match is precisely the false attribution this lane exists to remove.
+ *
+ * `opts.scope` (default `'global'`, today's behaviour): with `'caller'` and a
+ * NON-admin `user`, the candidate fetch adds `companyId IN (the caller's
+ * companies)`, read once through `resolveCallerCompanyIds(user, null)`. A
+ * member of no company therefore matches nothing (`unmatched`). An admin is
+ * never scoped: no `companyId` key, no membership read. The scope read happens
+ * only for a usable reference, and a throw from it propagates like any other
+ * infrastructure fault — the caller records it as a resolver error.
  */
 export async function resolveOrderReference(
   raw: string | null | undefined,
-  user: { id: number; isAdmin: boolean }
+  user: { id: number; isAdmin: boolean },
+  opts?: { scope?: "caller" | "global" }
 ): Promise<OrderReferenceResolution> {
   const reference = normalizeOrderReference(raw);
   if (reference === null) return { outcome: "unusable", orderRecordId: null };
 
+  const scoped = opts?.scope === "caller" && !user.isAdmin;
+  const companyScope = scoped
+    ? { companyId: { in: await resolveCallerCompanyIds(user, null) } }
+    : {};
+
   const candidates = await prisma.externalOrder.findMany({
-    where: { orderNumber: reference },
+    where: { orderNumber: reference, ...companyScope },
     select: { id: true, orderNumber: true, companyId: true },
     orderBy: { id: "asc" },
     take: ORDER_REFERENCE_CANDIDATE_CAP,

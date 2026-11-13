@@ -63,6 +63,17 @@ const ORDER_CUID = "cmdq7f3k80001s6h4p2n9wxyz";
 const COMPANY_ID = "company-abc";
 
 /**
+ * Reconciliation Part 2 (pack § P2-B3-1R, R-a.5): the adjust route resolves a
+ * typed number within the CALLER's companies (`scope: 'caller'`), read through
+ * `resolveCallerCompanyIds` — so every adjust arm that drives this suite's
+ * NON-admin session with a typed reference says which companies that member is
+ * in. Deduct-simple stays global and reads no membership.
+ */
+function memberOf(companyIds: string[]): void {
+  db.userCompany.findMany.mockResolvedValue(companyIds.map((companyId) => ({ companyId })) as any);
+}
+
+/**
  * The adjust route behind the REAL `apiHandler` — what an API caller actually
  * receives. The mock above makes `apiHandler` a pass-through so most pins can
  * read the thrown error; the wire pins need the 400 body the wrapper renders
@@ -730,6 +741,7 @@ describe("adjust route — the order lock rides the primitive's hook", () => {
   // number is resolved OUTSIDE the transaction; what the lock asks for is the
   // order's STORED id the resolver returned, never the text the operator typed.
   it("REFERENCE-RESOLVED: the lock SELECT is statement 1, asked with the RESOLVED stored id", async () => {
+    memberOf([COMPANY_ID]);
     db.externalOrder.findMany.mockResolvedValue([
       { id: ORDER_CUID, orderNumber: "12345", companyId: COMPANY_ID },
     ] as any);
@@ -755,14 +767,19 @@ describe("adjust route — the order lock rides the primitive's hook", () => {
     expect(rawFns.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(
       tx.inventory_logs.create.mock.invocationCallOrder[0]
     );
-    // The resolution itself was read OUTSIDE the transaction, before it opened.
+    // The resolution itself was read OUTSIDE the transaction, before it opened —
+    // and inside the caller's companies (R-a.5).
     expect(db.externalOrder.findMany.mock.invocationCallOrder[0]).toBeLessThan(
       (db.$transaction as unknown as jest.Mock).mock.invocationCallOrder[0]
+    );
+    expect(db.externalOrder.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { orderNumber: "12345", companyId: { in: [COMPANY_ID] } } })
     );
     expect((tx.inventory_logs.create.mock.calls[0][0].data as any).orderRecordId).toBe(ORDER_CUID);
   });
 
   it("ORDER_GONE: the resolved order vanished before the lock -> 409, and nothing is written", async () => {
+    memberOf([COMPANY_ID]);
     db.externalOrder.findMany.mockResolvedValue([
       { id: ORDER_CUID, orderNumber: "12345", companyId: COMPANY_ID },
     ] as any);
@@ -847,6 +864,25 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
   const REF = "12345";
   const ORDER_B = "cmdq7f3k80099s6h4p2n9zzzz";
   const FOREIGN_COMPANY = "company-other";
+  /** A second company the member IS in (R-a.5: an ambiguity they can see). */
+  const SECOND_COMPANY = "company-two";
+
+  /**
+   * The candidate read, APPLYING its `where` (number and company): under the
+   * caller scope the database only ever answers inside the member's companies,
+   * so the fixture does too rather than handing back a row no scoped read
+   * could return.
+   */
+  function book(rows: Array<{ id: string; orderNumber: string; companyId: string }>): void {
+    db.externalOrder.findMany.mockImplementation((async (args: {
+      where: { orderNumber: string; companyId?: { in: string[] } };
+    }) =>
+      rows
+        .filter((r) => r.orderNumber === args.where.orderNumber)
+        .filter(
+          (r) => args.where.companyId === undefined || args.where.companyId.in.includes(r.companyId)
+        )) as any);
+  }
 
   type ResolverCase = {
     name: string;
@@ -862,6 +898,8 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
     source: "selected" | "reference-resolved" | undefined;
     /** Whether the reference lookup may run at all. */
     looksUp: boolean;
+    /** R-a.5: the member's companies the candidate read is scoped to, when it runs. */
+    scope?: string[];
   };
 
   const CASES: ResolverCase[] = [
@@ -881,6 +919,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       name: "threw (the lookup's infrastructure failed) -> declined/resolver-error, unstamped, still 200",
       body: { intent: "order", orderReference: REF },
       arrange: () => {
+        memberOf([COMPANY_ID]);
         db.externalOrder.findMany.mockRejectedValue(new Error(`connection lost ${REF}`));
       },
       outcome: "declined",
@@ -890,14 +929,14 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       typed: REF,
       source: undefined,
       looksUp: true,
+      scope: [COMPANY_ID],
     },
     {
       name: "resolved (one order the operator may see) -> attributed/reference-resolved, stamped",
       body: { intent: "order", orderReference: REF },
       arrange: () => {
-        db.externalOrder.findMany.mockResolvedValue([
-          { id: ORDER_CUID, orderNumber: REF, companyId: COMPANY_ID },
-        ] as any);
+        memberOf([COMPANY_ID]);
+        book([{ id: ORDER_CUID, orderNumber: REF, companyId: COMPANY_ID }]);
       },
       outcome: "attributed",
       evidence: "reference-resolved",
@@ -906,6 +945,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       typed: REF,
       source: "reference-resolved",
       looksUp: true,
+      scope: [COMPANY_ID],
     },
     {
       name: "unusable (not an order number) -> declined/unusable, never reaches the database",
@@ -923,7 +963,8 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       name: "unmatched (no order has that number) -> declined/unmatched",
       body: { intent: "order", orderReference: "99999" },
       arrange: () => {
-        db.externalOrder.findMany.mockResolvedValue([] as any);
+        memberOf([COMPANY_ID]);
+        book([]);
       },
       outcome: "declined",
       evidence: null,
@@ -932,15 +973,56 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       typed: "99999",
       source: undefined,
       looksUp: true,
+      scope: [COMPANY_ID],
     },
     {
-      name: "ambiguous (two orders share the number) -> declined/ambiguous",
+      // R-a.5: was `not-a-member` before the caller scope — the scoped read
+      // cannot see another company's order, so the number matched nothing.
+      name: "unmatched (the number is held ONLY by another company: the caller scope) -> declined/unmatched",
       body: { intent: "order", orderReference: REF },
       arrange: () => {
-        db.externalOrder.findMany.mockResolvedValue([
+        memberOf([COMPANY_ID]);
+        book([{ id: ORDER_B, orderNumber: REF, companyId: FOREIGN_COMPANY }]);
+      },
+      outcome: "declined",
+      evidence: null,
+      reason: "unmatched",
+      stamp: null,
+      typed: REF,
+      source: undefined,
+      looksUp: true,
+      scope: [COMPANY_ID],
+    },
+    {
+      // R-a.5: was `ambiguous` before the caller scope — the member's own order
+      // is the only one their read can see (the dialog previewed it).
+      name: "resolved (the number is held by their company AND another: the caller scope) -> stamped to their own",
+      body: { intent: "order", orderReference: REF },
+      arrange: () => {
+        memberOf([COMPANY_ID]);
+        book([
           { id: ORDER_CUID, orderNumber: REF, companyId: COMPANY_ID },
           { id: ORDER_B, orderNumber: REF, companyId: FOREIGN_COMPANY },
-        ] as any);
+        ]);
+      },
+      outcome: "attributed",
+      evidence: "reference-resolved",
+      reason: null,
+      stamp: ORDER_CUID,
+      typed: REF,
+      source: "reference-resolved",
+      looksUp: true,
+      scope: [COMPANY_ID],
+    },
+    {
+      name: "ambiguous (two orders the operator can see share the number) -> declined/ambiguous",
+      body: { intent: "order", orderReference: REF },
+      arrange: () => {
+        memberOf([COMPANY_ID, SECOND_COMPANY]);
+        book([
+          { id: ORDER_CUID, orderNumber: REF, companyId: COMPANY_ID },
+          { id: ORDER_B, orderNumber: REF, companyId: SECOND_COMPANY },
+        ]);
       },
       outcome: "declined",
       evidence: null,
@@ -949,14 +1031,17 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       typed: REF,
       source: undefined,
       looksUp: true,
+      scope: [COMPANY_ID, SECOND_COMPANY],
     },
     {
-      name: "not-a-member (the one order is another company's) -> declined/not-a-member",
+      // R-a.5: under the caller scope `not-a-member` is the RACE — the scope
+      // read still listed the order's company, and the membership belt (asked
+      // after it) no longer does.
+      name: "not-a-member (membership removed between the scope read and the belt) -> declined/not-a-member",
       body: { intent: "order", orderReference: REF },
       arrange: () => {
-        db.externalOrder.findMany.mockResolvedValue([
-          { id: ORDER_B, orderNumber: REF, companyId: FOREIGN_COMPANY },
-        ] as any);
+        memberOf([COMPANY_ID, FOREIGN_COMPANY]);
+        book([{ id: ORDER_B, orderNumber: REF, companyId: FOREIGN_COMPANY }]);
         (requireCompanyMembership as jest.Mock).mockRejectedValue(
           new AppError("Resource not found", "NOT_FOUND", 404)
         );
@@ -968,6 +1053,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       typed: REF,
       source: undefined,
       looksUp: true,
+      scope: [COMPANY_ID, FOREIGN_COMPANY],
     },
     {
       name: "selected (a picked order) -> attributed/selected, stamped, the resolver never runs",
@@ -1065,12 +1151,29 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
     if (c.stamp === null) {
       expect(JSON.stringify(event)).not.toContain(ORDER_B);
       expect(JSON.stringify(event)).not.toContain(FOREIGN_COMPANY);
+      expect(JSON.stringify(event)).not.toContain(SECOND_COMPANY);
     }
 
     if (!c.looksUp) expect(db.externalOrder.findMany).not.toHaveBeenCalled();
+    // R-a.5: a lookup is scoped to the caller's companies, read once.
+    if (c.looksUp) {
+      expect(db.userCompany.findMany).toHaveBeenCalledTimes(1);
+      expect(db.userCompany.findMany).toHaveBeenCalledWith({
+        where: { userId: 7 },
+        select: { companyId: true },
+      });
+      expect(db.externalOrder.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { orderNumber: c.typed, companyId: { in: c.scope } },
+        })
+      );
+    } else {
+      expect(db.userCompany.findMany).not.toHaveBeenCalled();
+    }
   });
 
   it("threw: the redacted ops line names the failure class, never the typed text", async () => {
+    memberOf([COMPANY_ID]);
     db.externalOrder.findMany.mockRejectedValue(new Error(`boom ${REF} boom`));
     const tx = makeTx();
     driveTxWith(tx);
@@ -1110,6 +1213,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
   });
 
   it("a resolver THROW with SHORT STOCK -> today's 400 with its message, and nothing written (codex test gap)", async () => {
+    memberOf([COMPANY_ID]);
     db.externalOrder.findMany.mockRejectedValue(new Error("connection lost"));
     // Two on hand, three asked for: the pre-transaction availability check.
     db.product_locations.findUnique.mockResolvedValue({ quantity: 2, version: 1 } as any);
@@ -1138,6 +1242,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
   });
 
   it("not-a-member: the membership probe is asked of the RESOLVED order's company", async () => {
+    memberOf([COMPANY_ID]);
     db.externalOrder.findMany.mockResolvedValue([
       { id: ORDER_CUID, orderNumber: REF, companyId: COMPANY_ID },
     ] as any);
@@ -1154,12 +1259,122 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       })
     );
 
-    // Trimmed at the parse, looked up by the trimmed value, probed against
-    // the company the database returned — never a company the caller named.
+    // Trimmed at the parse, looked up by the trimmed value inside the caller's
+    // companies (R-a.5), probed against the company the database returned —
+    // never a company the caller named.
     expect(db.externalOrder.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { orderNumber: REF } })
+      expect.objectContaining({ where: { orderNumber: REF, companyId: { in: [COMPANY_ID] } } })
     );
     expect(requireCompanyMembership).toHaveBeenCalledWith(7, COMPANY_ID, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reconciliation Part 2 — P2-B3-1R (pack R-a.5): THE CALLER SCOPE is the adjust
+// route's opt-in. Its dialog previews the MEMBER-scoped order search, so the
+// save resolves within the same companies. Deduct-simple does not opt in: the
+// workbench shows no preview (R108-OC-1), so its resolve stays global.
+// ---------------------------------------------------------------------------
+
+describe("adjust route — the typed number resolves within the CALLER's companies (R-a.5)", () => {
+  const REF = "12345";
+
+  let consoleError: jest.SpyInstance;
+  beforeEach(() => {
+    consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleError.mockRestore();
+    // The scope-read throw below must not leak into a later arm's membership.
+    db.userCompany.findMany.mockReset();
+  });
+
+  async function adjustWithReference() {
+    const tx = makeTx();
+    driveTxWith(tx);
+    const res = await ADJUST(
+      post("http://x/api/inventory/adjust", {
+        productId: 5,
+        locationId: 2,
+        delta: -3,
+        intent: "order",
+        orderReference: REF,
+      })
+    );
+    return { res, tx };
+  }
+
+  it("a throw from the SCOPE read -> declined/resolver-error, unstamped, and the removal still commits", async () => {
+    db.userCompany.findMany.mockRejectedValue(new Error(`membership read lost ${REF}`));
+
+    const { res, tx } = await adjustWithReference();
+
+    expect(res.status).toBe(200);
+    // The scope read threw first, so the candidate read never ran.
+    expect(db.userCompany.findMany).toHaveBeenCalledTimes(1);
+    expect(db.externalOrder.findMany).not.toHaveBeenCalled();
+    expect((tx.inventory_logs.create.mock.calls[0][0].data as any).orderRecordId ?? null).toBeNull();
+    const attempt = (tx.orderAttributionAttempt.create.mock.calls[0][0] as any).data;
+    expect(attempt).toMatchObject({
+      outcome: "declined",
+      evidence: null,
+      reason: "resolver-error",
+      orderRecordId: null,
+    });
+    // The redacted ops line, never the typed text.
+    const logged = consoleError.mock.calls.map((call) => call.join(" ")).join("\n");
+    expect(logged).toContain("reference resolution");
+    expect(logged).not.toContain(REF);
+  });
+
+  it("an ADMIN's number is never scoped: no companyId key, and no membership read", async () => {
+    (requireApproved as jest.Mock).mockResolvedValue({
+      user: { id: 9, email: "a@x.com", isApproved: true, isAdmin: true },
+    });
+    db.externalOrder.findMany.mockResolvedValue([
+      { id: ORDER_CUID, orderNumber: REF, companyId: COMPANY_ID },
+    ] as any);
+
+    const { res, tx } = await adjustWithReference();
+
+    expect(res.status).toBe(200);
+    const where = (db.externalOrder.findMany.mock.calls[0][0] as { where: object }).where;
+    expect(where).toEqual({ orderNumber: REF });
+    expect(db.userCompany.findMany).not.toHaveBeenCalled();
+    expect((tx.inventory_logs.create.mock.calls[0][0].data as any).orderRecordId).toBe(ORDER_CUID);
+  });
+
+  it("a member of ZERO companies -> declined/unmatched, scoped to nothing (never unscoped)", async () => {
+    memberOf([]);
+    db.externalOrder.findMany.mockResolvedValue([] as any);
+
+    const { res, tx } = await adjustWithReference();
+
+    expect(res.status).toBe(200);
+    expect(db.externalOrder.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { orderNumber: REF, companyId: { in: [] } } })
+    );
+    expect((tx.orderAttributionAttempt.create.mock.calls[0][0] as any).data).toMatchObject({
+      outcome: "declined",
+      reason: "unmatched",
+      orderRecordId: null,
+    });
+  });
+
+  it("deduct-simple does NOT opt in: the same member's typed number is read globally, with no membership read", async () => {
+    memberOf([COMPANY_ID]);
+    db.externalOrder.findMany.mockResolvedValue([
+      { id: ORDER_CUID, orderNumber: REF, companyId: COMPANY_ID },
+    ] as any);
+
+    const { row } = await deductRow({ intent: "order", orderReference: REF });
+
+    const where = (db.externalOrder.findMany.mock.calls[0][0] as { where: object }).where;
+    expect(where).toEqual({ orderNumber: REF });
+    expect(db.userCompany.findMany).not.toHaveBeenCalled();
+    // The global resolve's membership check is what decides, as it always has.
+    expect(requireCompanyMembership).toHaveBeenCalledWith(7, COMPANY_ID, false);
+    expect(row.orderRecordId).toBe(ORDER_CUID);
   });
 });
 

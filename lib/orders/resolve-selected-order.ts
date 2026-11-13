@@ -1,6 +1,7 @@
 import prisma from "@/lib/prisma";
 import { requireCompanyMembership } from "@/lib/api-utils";
 import { AppError } from "@/lib/error-handling";
+import { SELECTED_ORDER_REJECTED_SENTENCE } from "@/lib/orders/order-capture-sentences";
 
 /**
  * Phase 0b-2 (spec REV-2 / OC-1 / G2-5): resolve a caller-supplied external
@@ -38,6 +39,10 @@ import { AppError } from "@/lib/error-handling";
  * @/lib/api-utils, which imports `next/server`. Re-implementing the predicate to
  * win a module-purity property would be exactly the duplication this extraction
  * exists to prevent, so the coupling stays and is stated instead.
+ *
+ * The refusal's sentence lives in the import-free leaf
+ * `lib/orders/order-capture-sentences.ts` (pack § P2-B3-1R, R-a.3), so the
+ * adjust dialog can recognise it without importing this module.
  */
 export async function resolveSelectedExternalOrderId(
   selectedExternalOrderId: string,
@@ -57,9 +62,5 @@ export async function resolveSelectedExternalOrderId(
     }
   }
 
-  throw new AppError(
-    "selectedExternalOrderId does not reference an order you can access",
-    "VALIDATION_ERROR",
-    400
-  );
+  throw new AppError(SELECTED_ORDER_REJECTED_SENTENCE, "VALIDATION_ERROR", 400);
 }
