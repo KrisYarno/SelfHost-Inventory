@@ -19,6 +19,10 @@
  *
  * The order field's own behaviour is pinned in `order-number-field.test.tsx`;
  * here its search answers on cue through the mocked hook.
+ *
+ * § P2-B3-2 (C2-6) — the COUNT, the switch's third button: last section below.
+ * The version read (`/locations`) answers through its own branch of the fetch
+ * mock, ahead of the product branch.
  */
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -79,6 +83,11 @@ const ORDER_2044 = {
 
 /** What the stock read answers (per product id), or a failure. */
 let stockAnswer: number | "error";
+/**
+ * What the Count's version read (`/locations`, § P2-B3-2 C2-5) answers for
+ * Office (2): its row, the location absent from the answer, or a failure.
+ */
+let versionAnswer: { quantity: number; version: number } | "absent" | "error";
 /** What the adjust route answers on the next submit. */
 let adjustAnswer: { status: number; body: Record<string, unknown> };
 /** The order search's rows (the mocked hook filters them by "contains"). */
@@ -92,6 +101,7 @@ beforeEach(() => {
   mockLocation.selectedLocationId = 2;
   mockLocation.locations = [{ id: 2, name: "Office" }];
   stockAnswer = 40;
+  versionAnswer = { quantity: 40, version: 7 };
   searchOrders = [ORDER_2044];
   useOrderSearchMock.mockImplementation((q: string) => {
     if (q === "") return { status: "pending", data: undefined, error: null };
@@ -107,6 +117,16 @@ beforeEach(() => {
     body: { success: true, log: { id: 1, orderRecordId: null }, newVersion: 2, batchId: "b-1" },
   };
   fetchMock = jest.fn(async (url: RequestInfo | URL) => {
+    // § P2-B3-2: the Count's version read, AHEAD of the product branch (whose
+    // `includes` would otherwise swallow it).
+    const versionRead = /^\/api\/inventory\/product\/(\d+)\/locations$/.exec(String(url));
+    if (versionRead) {
+      if (versionAnswer === "error") return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
+      const locations =
+        versionAnswer === "absent" ? [] : [{ locationId: 2, locationName: "Office", ...versionAnswer }];
+      const body = { productId: Number(versionRead[1]), productName: "AOD 2mg", locations };
+      return { ok: true, status: 200, json: async () => body } as unknown as Response;
+    }
     if (String(url).includes("/api/inventory/product/")) {
       if (stockAnswer === "error") return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
       return { ok: true, json: async () => ({ currentQuantity: stockAnswer }) } as unknown as Response;
@@ -1683,5 +1703,739 @@ describe("focus", () => {
     await tapDirection(user, "Remove");
     expect(orderField()).not.toHaveFocus();
     expect(screen.getByRole("button", { name: "Remove" })).toHaveFocus();
+  });
+});
+
+// ===========================================================================
+// THE COUNT — the switch's third button (§ P2-B3-2 C2-6; rows 124-125)
+// ===========================================================================
+
+const countField = () => screen.getByLabelText(/^How many are on the shelf/);
+const tapCount = (user: User) => user.click(screen.getByRole("button", { name: "Count" }));
+const versionReads = () =>
+  fetchMock.mock.calls.filter((c) => /^\/api\/inventory\/product\/\d+\/locations$/.test(String(c[0])));
+const unitsReads = () =>
+  fetchMock.mock.calls.filter(
+    (c) => String(c[0]).startsWith("/api/inventory/product/") && !String(c[0]).endsWith("/locations"),
+  );
+
+/** The host, the units read, then Count and its version read. */
+async function intoCount(user: User, props: Parameters<typeof renderHost>[0] = {}, chip = "40 units") {
+  const client = renderHost(props);
+  await stockReady();
+  await tapCount(user);
+  await stockReady(chip);
+  return client;
+}
+
+/**
+ * Holds the NEXT version read until the returned release is called; it then
+ * answers with `versionAnswer` as it stands at release. Every other request
+ * answers as usual.
+ */
+function holdNextVersionRead(): () => void {
+  const answer = fetchMock.getMockImplementation() as (url: RequestInfo | URL, init?: RequestInit) => unknown;
+  let release: () => void = () => {
+    throw new Error("no version read was held");
+  };
+  let holding = true;
+  fetchMock.mockImplementation((url: RequestInfo | URL, init?: RequestInit) => {
+    if (holding && /\/locations$/.test(String(url))) {
+      holding = false;
+      return new Promise((resolve) => {
+        release = () => resolve(answer(url, init));
+      });
+    }
+    return answer(url, init);
+  });
+  return () => release();
+}
+
+const COUNT_CHANGED = (previousQuantity: number, counted: number) => ({
+  status: 200,
+  body: {
+    success: true,
+    changed: true,
+    batchId: "b-c",
+    countedQuantity: counted,
+    previousQuantity,
+    delta: counted - previousQuantity,
+    newVersion: 8,
+    log: { id: 9, delta: counted - previousQuantity },
+  },
+});
+const COUNT_CONFIRMED = (counted: number) => ({
+  status: 200,
+  body: { success: true, changed: false, batchId: "b-c", countedQuantity: counted, previousQuantity: counted, delta: 0, newVersion: 7 },
+});
+const STALE_VERSION = {
+  status: 409,
+  body: {
+    error: "Stock changed while you counted",
+    code: "OPTIMISTIC_LOCK_ERROR",
+    currentVersion: 8,
+    expectedVersion: 7,
+  },
+};
+
+describe("the switch: Remove | Add | Count", () => {
+  it("three buttons in ONE group, in that order; Remove pressed on open", async () => {
+    renderHost();
+    await stockReady();
+    const group = screen.getByRole("group", { name: "Remove, add or count" });
+    expect(group).toHaveClass("grid", "grid-cols-3");
+    const buttons = within(group).getAllByRole("button");
+    expect(buttons.map((b) => b.textContent)).toEqual(["Remove", "Add", "Count"]);
+    expect(buttons.map((b) => b.getAttribute("aria-pressed"))).toEqual(["true", "false", "false"]);
+    expect(screen.queryByRole("group", { name: "Remove or add" })).toBeNull();
+  });
+
+  it("the 360 px budget: 44 px tall, `px-2 gap-1.5` (the Button default's `px-4 gap-2` merged away), icons only from 400 px", async () => {
+    renderHost();
+    await stockReady();
+    const group = screen.getByRole("group", { name: "Remove, add or count" });
+    for (const button of within(group).getAllByRole("button")) {
+      expect(button).toHaveClass("min-h-[44px]", "px-2", "gap-1.5");
+      expect(button).not.toHaveClass("px-4");
+      expect(button).not.toHaveClass("gap-2");
+      const icon = button.querySelector("svg");
+      expect(icon).not.toBeNull();
+      expect(icon).toHaveClass("hidden", "min-[400px]:block");
+    }
+  });
+
+  it("Count is pressed once tapped; Count hides the chip, the order field, the units field and its preview", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await ready(user);
+    await intoOrder(user);
+    expect(screen.getByTestId("quantity-preview")).toBeInTheDocument();
+
+    await tapCount(user);
+    expect(screen.getByRole("button", { name: "Count" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Remove" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByRole("radiogroup", { name: "What was this for?" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Order number" })).toBeNull();
+    expect(screen.queryByLabelText(/^Units to (remove|add)$/)).toBeNull();
+    expect(screen.queryByTestId("quantity-preview")).toBeNull();
+    expect(countField()).toBeInTheDocument();
+    // The Note stays, unchanged.
+    expect(noteField()).toHaveAccessibleDescription("Seen by admins and by you.");
+  });
+
+  it("Add → Count hides the receiving prompt", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await ready(user);
+    await tapDirection(user, "Add");
+    expect(screen.getByText(/receiving a shipment\?/i)).toBeInTheDocument();
+    await tapCount(user);
+    expect(screen.queryByText(/receiving a shipment\?/i)).toBeNull();
+  });
+});
+
+describe("the count field", () => {
+  it("EMPTY on entry with NO placeholder; its own id; numeric text of at most 6; the label names the location", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await intoCount(user);
+    expect(countField()).toHaveValue("");
+    expect(countField()).not.toHaveAttribute("placeholder");
+    expect(countField()).toHaveAttribute("id", "count");
+    expect(countField()).toHaveAttribute("type", "text");
+    expect(countField()).toHaveAttribute("inputmode", "numeric");
+    expect(countField()).toHaveAttribute("maxlength", "6");
+    expect(countField()).toHaveAccessibleName("How many are on the shelf at Office?");
+    // The record is in the stock line above, never inside the field.
+    expect(stockChip()).toHaveTextContent("40 units");
+  });
+
+  it("no location: `How many are on the shelf?`", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    mockLocation.selectedLocationId = null;
+    renderHost();
+    await tapCount(user);
+    expect(countField()).toHaveAccessibleName("How many are on the shelf?");
+  });
+
+  it("REFUSES a non-digit (value unchanged) with `Whole units only.` until blur; leading zeros stripped; a lone 0 stays", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await intoCount(user);
+    await user.type(countField(), "3");
+    await user.type(countField(), ".");
+    expect(countField()).toHaveValue("3");
+    const refusal = screen.getByTestId("count-refused");
+    expect(refusal.textContent).toBe("Whole units only.");
+    expect(refusal).toHaveAttribute("role", "status");
+    fireEvent.blur(countField());
+    expect(screen.queryByTestId("count-refused")).toBeNull();
+
+    await user.clear(countField());
+    await user.type(countField(), "007");
+    expect(countField()).toHaveValue("7");
+    await user.clear(countField());
+    await user.type(countField(), "0");
+    expect(countField()).toHaveValue("0");
+  });
+
+  it("`0` is a valid count: Save is live and the body sends 0", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await intoCount(user);
+    await user.type(countField(), "0");
+    expect(message()).toBeNull();
+    expect(actionButton()).toBeEnabled();
+    const body = await submit(user);
+    expect(body.countedQuantity).toBe(0);
+  });
+
+  it("− is dead on empty and on 0; + from empty gives 1 (never the record + 1); − steps down to 0; both 44 px", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await intoCount(user);
+    const minus = screen.getByRole("button", { name: "Decrease count" });
+    const plus = screen.getByRole("button", { name: "Increase count" });
+    expect(minus).toHaveClass("h-11", "w-11");
+    expect(plus).toHaveClass("h-11", "w-11");
+    expect(minus).toBeDisabled();
+
+    await user.click(plus);
+    expect(countField()).toHaveValue("1");
+    await user.click(minus);
+    expect(countField()).toHaveValue("0");
+    expect(minus).toBeDisabled();
+  });
+});
+
+describe("the count's body", () => {
+  it("EXACTLY `{ productId, locationId, intent, countedQuantity, expectedVersion, notes }` — expectedVersion from the version read", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    versionAnswer = { quantity: 40, version: 13 };
+    await intoCount(user);
+    await user.type(countField(), "35");
+    await user.type(noteField(), "  shelf recount  ");
+    const body = await submit(user);
+    expect(body).toEqual({
+      productId: 42,
+      locationId: 2,
+      intent: "count",
+      countedQuantity: 35,
+      expectedVersion: 13,
+      notes: "shelf recount",
+    });
+  });
+
+  it("no `delta`, no chip intent, no order keys and no `reason` — even with a units number, a chip and an order typed first", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await ready(user);
+    await intoOrder(user);
+    await typeOrder(user, "9999");
+    await tapCount(user);
+    await stockReady();
+    await user.type(countField(), "35");
+    const body = await submit(user);
+    expect(Object.keys(body).sort()).toEqual(
+      ["countedQuantity", "expectedVersion", "intent", "locationId", "productId"].sort(),
+    );
+    expect(body.intent).toBe("count");
+  });
+
+  it("a whitespace-only Note is not sent", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await intoCount(user);
+    await user.type(countField(), "35");
+    await user.type(noteField(), "   ");
+    const body = await submit(user);
+    expect("notes" in body).toBe(false);
+  });
+});
+
+describe("the count: hide, don't clear", () => {
+  it("Remove `3` → Count shows an EMPTY field → Remove shows `3` again; and the count survives too", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await ready(user);
+    await tapCount(user);
+    expect(countField()).toHaveValue("");
+    await user.type(countField(), "9");
+
+    await tapDirection(user, "Remove");
+    expect(quantityField()).toHaveValue("3");
+    await tapCount(user);
+    expect(countField()).toHaveValue("9");
+  });
+
+  it("a count typed, then Remove: the body is the removal's, and carries no `countedQuantity` and no version", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await ready(user);
+    await tapCount(user);
+    await stockReady();
+    await user.type(countField(), "35");
+
+    await tapDirection(user, "Remove");
+    const body = await submit(user);
+    expect(body).toEqual({ productId: 42, locationId: 2, delta: -3 });
+  });
+});
+
+describe("the reads", () => {
+  it("the version read is DISABLED outside Count, the units read DISABLED in it", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const client = renderHost();
+    await stockReady();
+    expect(versionReads()).toHaveLength(0);
+    expect(unitsReads()).toHaveLength(1);
+    const units = () => client.getQueryCache().find({ queryKey: ["product-location-quantity", 42, 2] });
+    const version = () => client.getQueryCache().find({ queryKey: ["product-location-version", 42, 2] });
+    expect(units()?.isDisabled()).toBe(false);
+    expect(version()?.isDisabled()).toBe(true);
+
+    await tapCount(user);
+    await stockReady();
+    expect(versionReads()).toHaveLength(1);
+    expect(String(versionReads()[0][0])).toBe("/api/inventory/product/42/locations");
+    expect(units()?.isDisabled()).toBe(true);
+    expect(version()?.isDisabled()).toBe(false);
+
+    await tapDirection(user, "Add");
+    expect(version()?.isDisabled()).toBe(true);
+    expect(units()?.isDisabled()).toBe(false);
+    expect(unitsReads()).toHaveLength(1);
+  });
+
+  it("every number in count mode is the version read's, not the units read's", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    stockAnswer = 40;
+    versionAnswer = { quantity: 12, version: 3 };
+    await intoCount(user, {}, "12 units");
+    expect(stockChip()).not.toHaveTextContent("40");
+    await user.type(countField(), "10");
+    expect(screen.getByTestId("count-preview").textContent).toBe(
+      "The record says 12 units — saving sets it to 10 (-2).",
+    );
+    expect(summary()).toBe("Set AOD 2mg at Office to 10 units (record: 12)");
+  });
+
+  it("THE TOKEN PIN: a count typed, Count → Remove → Count with the server's version moved meanwhile → ONE read, and the body sends the FIRST read's version", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    versionAnswer = { quantity: 40, version: 7 };
+    await intoCount(user);
+    await user.type(countField(), "35");
+
+    // A sale lands while the operator looks at Remove.
+    versionAnswer = { quantity: 38, version: 9 };
+    await tapDirection(user, "Remove");
+    await tapCount(user);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+
+    expect(versionReads()).toHaveLength(1);
+    expect(stockChip()).toHaveTextContent("40 units");
+    expect(countField()).toHaveValue("35");
+    const body = await submit(user);
+    expect(body.expectedVersion).toBe(7);
+    expect(versionReads()).toHaveLength(1);
+  });
+
+  it("a window focus and a reconnect re-read nothing under a typed count", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await intoCount(user);
+    await user.type(countField(), "35");
+    versionAnswer = { quantity: 38, version: 9 };
+    act(() => {
+      window.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("offline"));
+      window.dispatchEvent(new Event("online"));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(versionReads()).toHaveLength(1);
+    const body = await submit(user);
+    expect(body.expectedVersion).toBe(7);
+  });
+
+  it("a reopen reads afresh (the dialog mounts per open)", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await intoCount(user);
+    await user.click(cancelButton());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    versionAnswer = { quantity: 38, version: 9 };
+    await user.click(screen.getByRole("button", { name: "Adjust A" }));
+    await stockReady();
+    expect(screen.getByRole("button", { name: "Remove" })).toHaveAttribute("aria-pressed", "true");
+    await tapCount(user);
+    await stockReady("38 units");
+    expect(versionReads()).toHaveLength(2);
+    expect(countField()).toHaveValue("");
+  });
+});
+
+describe("the count's stock line and messages (first that applies)", () => {
+  it("no location: `No location selected.`, the destructive blocker, Save dead, no read — and no \"at null\" anywhere", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    mockLocation.selectedLocationId = null;
+    renderHost();
+    await tapCount(user);
+    expect(stockChip()).toHaveTextContent("No location selected.");
+    expect(message()).toBe("Close this and choose a location at the top of the page.");
+    expect(screen.getByTestId("adjust-message")).toHaveClass("text-destructive");
+    expect(summary()).toBe("Count AOD 2mg");
+
+    await user.type(countField(), "3");
+    expect(summary()).toBe("Count 3 units of AOD 2mg");
+    expect(actionButton()).toHaveTextContent(/^Save count$/);
+    expect(actionButton()).toBeDisabled();
+    expect(dialog().textContent).not.toContain("null");
+    expect(versionReads()).toHaveLength(0);
+  });
+
+  it("the read in flight: `Reading stock…` in the stock line and a MUTED footer wait; Save dead even with a count; no numbers", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderHost();
+    await stockReady();
+    const release = holdNextVersionRead();
+    await tapCount(user);
+    await waitFor(() => expect(versionReads()).toHaveLength(1));
+
+    expect(stockChip()).toHaveTextContent("Reading stock…");
+    expect(message()).toBe("Reading stock…");
+    expect(screen.getByTestId("adjust-message")).toHaveClass("text-muted-foreground");
+    expect(screen.getByTestId("adjust-message")).not.toHaveClass("text-destructive");
+    await user.type(countField(), "35");
+    expect(message()).toBe("Reading stock…");
+    expect(actionButton()).toBeDisabled();
+    expect(summary()).toBe("Count 35 units of AOD 2mg at Office");
+    expect(actionButton()).toHaveTextContent(/^Save count$/);
+    expect(screen.queryByTestId("count-preview")).toBeNull();
+
+    await act(async () => {
+      release();
+    });
+    await stockReady("40 units");
+    expect(message()).toBeNull();
+    expect(actionButton()).toBeEnabled();
+  });
+
+  it.each([
+    ["a failed read", "error" as const],
+    ["the location absent from the answer (`null`)", "absent" as const],
+  ])("%s: `Couldn't read current stock.` + `Try again` (44 px) → a SECOND read, then the record", async (_label, failure) => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    versionAnswer = failure;
+    renderHost();
+    await stockReady();
+    await tapCount(user);
+    await waitFor(() => expect(stockChip()).toHaveTextContent("Couldn't read current stock."));
+    expect(stockChip().textContent).not.toMatch(/\d/);
+    expect(message()).toBe("Couldn't read current stock — tap Try again.");
+    expect(screen.getByTestId("adjust-message")).toHaveClass("text-destructive");
+    await user.type(countField(), "35");
+    expect(message()).toBe("Couldn't read current stock — tap Try again.");
+    expect(actionButton()).toBeDisabled();
+
+    const retry = screen.getByTestId("count-retry");
+    expect(retry).toHaveTextContent("Try again");
+    expect(retry).toHaveClass("min-h-[44px]");
+    versionAnswer = { quantity: 40, version: 7 };
+    await user.click(retry);
+    await stockReady("40 units");
+    expect(versionReads()).toHaveLength(2);
+    expect(message()).toBeNull();
+    expect(actionButton()).toBeEnabled();
+  });
+
+  it("nothing entered: `Enter the number you counted.` (destructive), Save dead", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await intoCount(user);
+    expect(message()).toBe("Enter the number you counted.");
+    expect(screen.getByTestId("adjust-message")).toHaveClass("text-destructive");
+    expect(actionButton()).toBeDisabled();
+    await user.click(actionButton());
+    expect(adjustCalls()).toHaveLength(0);
+  });
+});
+
+describe("the count's preview, summary and label", () => {
+  it("differ (down and up), and match — the preview sentences", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await intoCount(user);
+    expect(screen.queryByTestId("count-preview")).toBeNull();
+
+    await user.type(countField(), "35");
+    expect(screen.getByTestId("count-preview").textContent).toBe(
+      "The record says 40 units — saving sets it to 35 (-5).",
+    );
+    await user.clear(countField());
+    await user.type(countField(), "42");
+    expect(screen.getByTestId("count-preview").textContent).toBe(
+      "The record says 40 units — saving sets it to 42 (+2).",
+    );
+    await user.clear(countField());
+    await user.type(countField(), "40");
+    expect(screen.getByTestId("count-preview").textContent).toBe("Matches the record — saving confirms 40 units.");
+  });
+
+  it("unit or units, by the number", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    versionAnswer = { quantity: 1, version: 2 };
+    await intoCount(user, {}, "1 unit");
+    await user.type(countField(), "0");
+    expect(screen.getByTestId("count-preview").textContent).toBe("The record says 1 unit — saving sets it to 0 (-1).");
+    expect(summary()).toBe("Set AOD 2mg at Office to 0 units (record: 1)");
+    await user.clear(countField());
+    await user.type(countField(), "1");
+    expect(screen.getByTestId("count-preview").textContent).toBe("Matches the record — saving confirms 1 unit.");
+    expect(summary()).toBe("Confirm 1 unit of AOD 2mg at Office");
+  });
+
+  it("the four summaries and the labels", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderHost();
+    await stockReady();
+    const release = holdNextVersionRead();
+    await tapCount(user);
+    // Empty.
+    expect(summary()).toBe("Count AOD 2mg at Office");
+    expect(actionButton()).toHaveTextContent(/^Save count$/);
+    // Entered, the record not known.
+    await user.type(countField(), "35");
+    expect(summary()).toBe("Count 35 units of AOD 2mg at Office");
+    expect(actionButton()).toHaveTextContent(/^Save count$/);
+    // Differ.
+    await act(async () => {
+      release();
+    });
+    await stockReady("40 units");
+    expect(summary()).toBe("Set AOD 2mg at Office to 35 units (record: 40)");
+    expect(actionButton()).toHaveTextContent(/^Set to 35$/);
+    // Match.
+    await user.clear(countField());
+    await user.type(countField(), "40");
+    expect(summary()).toBe("Confirm 40 units of AOD 2mg at Office");
+    expect(actionButton()).toHaveTextContent(/^Confirm 40$/);
+  });
+
+  it("while saving: `Saving count…`, the form frozen", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    adjustAnswer = COUNT_CHANGED(40, 35);
+    await intoCount(user);
+    await user.type(countField(), "35");
+    const release = holdNextAdjust();
+    await user.click(actionButton());
+    await waitFor(() => expect(actionButton()).toHaveTextContent(/^Saving count…$/));
+    expect(actionButton()).toBeDisabled();
+    expect(countField()).toBeDisabled();
+    release();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+});
+
+describe("the count's answers", () => {
+  it("200 changed → `Counted … — stock went from {previousQuantity FROM THE 200} to {n}.`, then close + onSuccess", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onSuccess = jest.fn();
+    const onOpenChange = jest.fn();
+    // The 200's previousQuantity (41) differs from the screen's 40 on purpose:
+    // the toast reads the ANSWER, never the screen.
+    adjustAnswer = COUNT_CHANGED(41, 35);
+    await intoCount(user, { onSuccess, onOpenChange });
+    await user.type(countField(), "35");
+    await submit(user);
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
+    expect(toastSuccess.mock.calls[0]).toEqual(["Counted 35 of AOD 2mg at Office — stock went from 41 to 35."]);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("200 unchanged → `Count confirmed — … matches the record.`", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onSuccess = jest.fn();
+    adjustAnswer = COUNT_CONFIRMED(40);
+    await intoCount(user, { onSuccess });
+    await user.type(countField(), "40");
+    await submit(user);
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
+    expect(toastSuccess.mock.calls[0]).toEqual(["Count confirmed — 40 of AOD 2mg at Office matches the record."]);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["an empty body `{}` (what an unparseable body arrives as)", {}],
+    ["`changed` not a boolean", { success: true, changed: "yes", previousQuantity: 41 }],
+    ["`changed: true` with no readable `previousQuantity`", { success: true, changed: true }],
+  ])("a 200 that can't be read (%s) → `Saved the count of …` — nothing claimed about what changed", async (_label, body) => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onOpenChange = jest.fn();
+    adjustAnswer = { status: 200, body };
+    await intoCount(user, { onOpenChange });
+    await user.type(countField(), "35");
+    await submit(user);
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
+    expect(toastSuccess.mock.calls[0]).toEqual(["Saved the count of 35 for AOD 2mg at Office."]);
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+  });
+
+  it("a 404 → the house reader's toast (`Product not found`), and the dialog stays with the count", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    adjustAnswer = { status: 404, body: { error: "Product not found", code: "NOT_FOUND" } };
+    await intoCount(user);
+    await user.type(countField(), "35");
+    await submit(user);
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith("Product not found"));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(countField()).toHaveValue("35");
+  });
+
+  it("one POST per double tap", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    adjustAnswer = COUNT_CHANGED(40, 35);
+    await intoCount(user);
+    await user.type(countField(), "35");
+    const release = holdNextAdjust();
+    act(() => {
+      fireEvent.click(actionButton());
+      fireEvent.click(actionButton());
+    });
+    await waitFor(() => expect(adjustCalls().length).toBeGreaterThanOrEqual(1));
+    release();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(adjustCalls()).toHaveLength(1);
+  });
+});
+
+describe("the count's 409 (stock moved while the operator counted)", () => {
+  it("the NOTICE with both numbers — NOT `Enter the number you counted.`; the field EMPTY; a re-read; no toast; still open", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onOpenChange = jest.fn();
+    adjustAnswer = STALE_VERSION;
+    await intoCount(user, { onOpenChange });
+    await user.type(countField(), "35");
+    // A sale landed since the read: the re-read answers it.
+    versionAnswer = { quantity: 38, version: 8 };
+
+    const body = await submit(user);
+    expect(body.expectedVersion).toBe(7);
+    await waitFor(() =>
+      expect(message()).toBe(
+        "Stock changed while you were counting — you entered 35; the record now says 38. Count again, then save.",
+      ),
+    );
+    expect(message()).not.toBe("Enter the number you counted.");
+    expect(screen.getByTestId("adjust-message")).toHaveClass("text-warning");
+    expect(countField()).toHaveValue("");
+    expect(versionReads()).toHaveLength(2);
+    expect(stockChip()).toHaveTextContent("38 units");
+    expect(actionButton()).toBeDisabled();
+    expect(toastError).not.toHaveBeenCalled();
+    expect(toastSuccess).not.toHaveBeenCalled();
+    expect(toastPlain).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("while the re-read is in flight: `Reading stock…` (muted) and NO old number — `data` still holds it, unshown", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    adjustAnswer = STALE_VERSION;
+    await intoCount(user);
+    await user.type(countField(), "35");
+    versionAnswer = { quantity: 38, version: 8 };
+    const release = holdNextVersionRead();
+
+    await submit(user);
+    await waitFor(() => expect(versionReads()).toHaveLength(2));
+    await waitFor(() => expect(stockChip()).toHaveTextContent("Reading stock…"));
+    expect(stockChip()).not.toHaveTextContent("40");
+    expect(message()).toBe("Reading stock…");
+    expect(screen.getByTestId("adjust-message")).toHaveClass("text-muted-foreground");
+    expect(summary()).toBe("Count AOD 2mg at Office");
+    expect(actionButton()).toHaveTextContent(/^Save count$/);
+    expect(actionButton()).toBeDisabled();
+
+    await act(async () => {
+      release();
+    });
+    await stockReady("38 units");
+    await waitFor(() => expect(message()).toMatch(/^Stock changed while you were counting/));
+  });
+
+  it("the next save sends the RE-READ version; the notice goes on the next edit", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    adjustAnswer = STALE_VERSION;
+    await intoCount(user);
+    await user.type(countField(), "35");
+    versionAnswer = { quantity: 38, version: 8 };
+    await submit(user);
+    await waitFor(() => expect(message()).toMatch(/^Stock changed while you were counting/));
+
+    await user.type(countField(), "3");
+    expect(message()).toBeNull();
+    adjustAnswer = COUNT_CHANGED(38, 3);
+    const second = await submit(user);
+    expect(second.expectedVersion).toBe(8);
+    expect(second.countedQuantity).toBe(3);
+  });
+
+  it("the re-read FAILING: no notice — the read's error state takes over", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    adjustAnswer = STALE_VERSION;
+    await intoCount(user);
+    await user.type(countField(), "35");
+    versionAnswer = "error";
+    await submit(user);
+    await waitFor(() => expect(versionReads()).toHaveLength(2));
+    await waitFor(() => expect(message()).toBe("Couldn't read current stock — tap Try again."));
+    expect(screen.getByTestId("count-retry")).toBeInTheDocument();
+    expect(countField()).toHaveValue("");
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("the list and the units read refresh: back on Remove the units read asks again (OC1-6)", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    adjustAnswer = STALE_VERSION;
+    const client = await intoCount(user);
+    const invalidate = jest.spyOn(client, "invalidateQueries");
+    await user.type(countField(), "35");
+    versionAnswer = { quantity: 38, version: 8 };
+    stockAnswer = 38;
+    await submit(user);
+    await waitFor(() => expect(message()).toMatch(/^Stock changed while you were counting/));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["inventory-products"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["product-location-quantity", 42] });
+    // The units read is disabled in count mode: invalidated, not re-read yet.
+    expect(unitsReads()).toHaveLength(1);
+
+    await tapDirection(user, "Remove");
+    await stockReady("38 units");
+    expect(unitsReads()).toHaveLength(2);
+  });
+});
+
+describe("the count: dismissal", () => {
+  it.each([
+    ["Escape", (user: User) => user.keyboard("{Escape}")],
+    ["a click outside", (user: User) => user.click(screen.getByRole("button", { name: "Beside the dialog", hidden: true }))],
+  ])("%s does NOT close a draft holding only a count", async (_how, dismiss) => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onOpenChange = jest.fn();
+    await intoCount(user, { onOpenChange });
+    await user.type(countField(), "35");
+    await dismiss(user);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("Cancel discards: the next open is on Remove, and its Count field is empty", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onOpenChange = jest.fn();
+    await intoCount(user, { onOpenChange });
+    await user.type(countField(), "35");
+    await user.click(cancelButton());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+    expect(adjustCalls()).toHaveLength(0);
+
+    await user.click(screen.getByRole("button", { name: "Adjust A" }));
+    await stockReady();
+    expect(screen.getByRole("button", { name: "Remove" })).toHaveAttribute("aria-pressed", "true");
+    await tapCount(user);
+    expect(countField()).toHaveValue("");
   });
 });

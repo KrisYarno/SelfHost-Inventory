@@ -56,7 +56,12 @@ async function postJSON(url: string, body: unknown, csrfToken: string | null) {
 // quick-adjust-dialog sends { productId, locationId, delta, reason, notes, intent? };
 // § P2-B3-1R (MS-1-6): the transfer dialog no longer adds stock, so no client
 // sends the server's transfer auto-add flag (its route arm stays, registered).
-export interface AdjustInput {
+//
+// § P2-B3-2 (C2-5): TWO arms. The delta arm is the interface below, unchanged;
+// the count arm is the dialog's Count (the route's only client for it).
+export type AdjustInput = AdjustDeltaInput | AdjustCountInput;
+
+interface AdjustDeltaInput {
   productId: number;
   locationId: number;
   delta: number;
@@ -73,6 +78,17 @@ export interface AdjustInput {
   // P2-B3-1: the order number typed on a Remove under `order` — never with an id; the server resolves it.
   orderReference?: string;
 }
+// The Count: how many are on the shelf, and the row version the dialog read
+// before the operator counted (a stale one is the route's 409). No `delta` —
+// the server computes it under the prelock — and no order fields.
+type AdjustCountInput = {
+  intent: "count";
+  productId: number;
+  locationId: number;
+  countedQuantity: number;
+  expectedVersion: number;
+  notes?: string;
+};
 // stock-in-dialog sends { productId, locationId, quantity, notes? } — the Note
 // (§ P2-B3-1R, MS-1-1). There is no order/reference number: the route never
 // recorded one, so the field that sent it is gone.

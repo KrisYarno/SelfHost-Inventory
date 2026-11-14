@@ -3,10 +3,15 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Plus, Minus, Package, MapPin } from "lucide-react";
+import { Plus, Minus, Package, MapPin, ClipboardCheck } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
 import { useProductLocationQuantity } from "@/hooks/use-product-location-quantity";
-import { useAdjustInventory, type ApiMutationError } from "@/hooks/use-inventory-mutations";
+import { useProductLocationVersion } from "@/hooks/use-product-location-version";
+import {
+  invalidateInventoryCaches,
+  useAdjustInventory,
+  type ApiMutationError,
+} from "@/hooks/use-inventory-mutations";
 import { useSubmitLatch } from "@/hooks/use-submit-latch";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -48,6 +53,17 @@ interface QuickAdjustDialogProps {
 // typed for one product can reach another's removal: the FR2/FR3
 // product-tagged capture is gone with the shared mount it guarded against.
 // Every sentence below is the pack's, byte for byte.
+//
+// § P2-B3-2 (C2-6): the switch is Remove | Add | Count. Under Count the
+// operator types how many are on the shelf, and the save sends that number
+// with the row VERSION the dialog read (`useProductLocationVersion`, read once
+// per open); the server books the difference, or confirms a match, only while
+// that version is still the row's — a stale one is a 409, and the dialog
+// clears the count and reads the record again. In count mode every number on
+// screen is that read's, and only while no read is in flight. The count lives
+// in its OWN state, never the units field's: a number typed as "units to
+// remove" is never a count nobody performed. Switching modes hides fields and
+// clears nothing.
 
 /** The largest quantity the field can hold (`maxLength={6}`). */
 const MAX_QUANTITY = 999_999;
@@ -96,10 +112,17 @@ export function QuickAdjustDialog({
 }: QuickAdjustDialogProps) {
   const { selectedLocationId, locations } = useLocation();
   // Default Remove (row 106): most adjustments here are stock leaving.
-  const [direction, setDirection] = useState<"remove" | "add">("remove");
+  const [mode, setMode] = useState<"remove" | "add" | "count">("remove");
   // Digits only, as typed: the field refuses anything else.
   const [quantity, setQuantity] = useState("");
   const [quantityRefused, setQuantityRefused] = useState(false);
+  // The Count's own field (C2-6): digits only, its own refusal flag, never
+  // shared with `quantity`. "" is "nothing entered"; "0" is a count of zero.
+  const [counted, setCounted] = useState("");
+  const [countRefused, setCountRefused] = useState(false);
+  // The 409 notice (stock moved while the operator counted). Cleared by the
+  // next edit, like the rejected pick's.
+  const [countNotice, setCountNotice] = useState<string | null>(null);
   // null = the operator has not tapped the chip. Deliberately NOT pre-filled
   // with "other": the request must be able to say "nothing was stated", and a
   // default selection would make every untouched adjustment look answered.
@@ -118,8 +141,14 @@ export function QuickAdjustDialog({
     focusOrderFieldRef.current = false;
   });
 
+  // The units read serves Remove and Add; the version read serves Count. Each is
+  // DISABLED outside its modes, not merely unread, so no number in count mode
+  // can come from the units read.
   const quantityQuery = useProductLocationQuantity(product.id, selectedLocationId, {
-    enabled: open,
+    enabled: open && mode !== "count",
+  });
+  const versionQuery = useProductLocationVersion(product.id, selectedLocationId, {
+    enabled: open && mode === "count",
   });
   const adjustMutation = useAdjustInventory();
   const queryClient = useQueryClient();
@@ -129,7 +158,8 @@ export function QuickAdjustDialog({
   // same fact for rendering (the frozen form, the "…ing" label).
   const { busy, run, guardOpenChange } = useSubmitLatch();
 
-  const isRemove = direction === "remove";
+  const isCount = mode === "count";
+  const isRemove = mode === "remove";
   const verb = isRemove ? "Remove" : "Add";
   const q = quantity === "" ? null : Number(quantity);
   const unitsPhrase = q === null ? "units" : `${q} ${unitWord(q)}`;
@@ -168,6 +198,7 @@ export function QuickAdjustDialog({
 
   const draftNonEmpty =
     quantity !== "" ||
+    counted !== "" ||
     capture.text !== "" ||
     capture.picked !== null ||
     notes !== "" ||
@@ -197,6 +228,71 @@ export function QuickAdjustDialog({
       ? knownStock + (isRemove ? -q : q)
       : null;
 
+  // --- Count mode (C2-6) ----------------------------------------------------
+  const n = counted === "" ? null : Number(counted);
+  // The record, as the version read says it. In flight is `fetchStatus ===
+  // "fetching"` — the first read AND a refetch, whose old answer stays in
+  // `data` and is NOT shown. A failed refetch keeps its old `data` too, so
+  // "known" needs `status === "success"`, never `data` alone.
+  const countRead: "no-location" | "reading" | "failed" | "known" =
+    selectedLocationId === null
+      ? "no-location"
+      : versionQuery.fetchStatus === "fetching"
+        ? "reading"
+        : versionQuery.status === "error" || versionQuery.data === null
+          ? "failed"
+          : versionQuery.status === "success"
+            ? "known"
+            : "reading";
+  const record = countRead === "known" ? (versionQuery.data ?? null) : null;
+  // In EVERY count string: never "at null" (B3-2-G1-5 / OC1-7).
+  const at = location !== null ? ` at ${location}` : "";
+
+  const countSummary =
+    n === null
+      ? `Count ${product.name}${at}`
+      : record === null
+        ? `Count ${n} ${unitWord(n)} of ${product.name}${at}`
+        : n !== record.quantity
+          ? `Set ${product.name}${at} to ${n} ${unitWord(n)} (record: ${record.quantity})`
+          : `Confirm ${n} ${unitWord(n)} of ${product.name}${at}`;
+  const countActionLabel = busy
+    ? "Saving count…"
+    : n === null || record === null
+      ? "Save count"
+      : n !== record.quantity
+        ? `Set to ${n}`
+        : `Confirm ${n}`;
+  const countPreview =
+    n === null || record === null
+      ? null
+      : n !== record.quantity
+        ? `The record says ${record.quantity} ${unitWord(record.quantity)} — saving sets it to ${n} (${n - record.quantity > 0 ? "+" : ""}${n - record.quantity}).`
+        : `Matches the record — saving confirms ${n} ${unitWord(n)}.`;
+  // The FIRST that applies. The 409 notice ranks ABOVE "nothing entered",
+  // because the 409 empties the field (B3-2-G1-1 / OC1-1).
+  const countMessage: { text: string; tone: "destructive" | "muted" | "warning" } | null =
+    selectedLocationId === null
+      ? { text: "Close this and choose a location at the top of the page.", tone: "destructive" }
+      : countRead === "reading"
+        ? { text: "Reading stock…", tone: "muted" }
+        : countRead === "failed"
+          ? { text: "Couldn't read current stock — tap Try again.", tone: "destructive" }
+          : countNotice !== null
+            ? { text: countNotice, tone: "warning" }
+            : n === null
+              ? { text: "Enter the number you counted.", tone: "destructive" }
+              : null;
+  // Save is dead by the CONDITIONS, whichever message is showing.
+  const countBlocked = selectedLocationId === null || record === null || n === null;
+
+  const footerMessage = isCount ? (countMessage?.text ?? null) : message;
+  const footerTone = isCount
+    ? (countMessage?.tone ?? "warning")
+    : blockers.length > 0
+      ? "destructive"
+      : "warning";
+
   // Cancel and the X discard (the host unmounts the dialog); while a save is in
   // flight the guard drops them, as it drops Escape and a click outside. It
   // reads the latch's synchronous ref (FD3-1). The request's own answer still
@@ -204,11 +300,14 @@ export function QuickAdjustDialog({
   // never this guard, which would drop it — and a failed one leaves it open.
   const handleOpenChange = guardOpenChange(onOpenChange);
 
-  /** Any edit clears the rejected pick's notice. */
-  const edited = () => setRejectedPick(null);
+  /** Any edit clears the rejected pick's notice, and the count's. */
+  const edited = () => {
+    setRejectedPick(null);
+    setCountNotice(null);
+  };
 
-  const handleDirectionChange = (next: "remove" | "add") => {
-    setDirection(next);
+  const handleModeChange = (next: "remove" | "add" | "count") => {
+    setMode(next);
     edited();
   };
 
@@ -232,6 +331,30 @@ export function QuickAdjustDialog({
   const handleDecrement = () => {
     if (q === null || q <= 1) return;
     setQuantity(String(q - 1));
+    edited();
+  };
+
+  // The count field: the units field's refusal rule, but 0 is a count.
+  const handleCountInput = (raw: string) => {
+    if (!/^[0-9]*$/.test(raw)) {
+      setCountRefused(true);
+      return;
+    }
+    const next = raw.replace(/^0+(?=[0-9])/, "");
+    setCounted(next);
+    if (next === "") setCountRefused(false);
+    edited();
+  };
+
+  // `+` from empty gives 1 — never the record + 1.
+  const handleCountIncrement = () => {
+    setCounted((prev) => String(Math.min((prev === "" ? 0 : Number(prev)) + 1, MAX_QUANTITY)));
+    edited();
+  };
+
+  const handleCountDecrement = () => {
+    if (n === null || n <= 0) return;
+    setCounted(String(n - 1));
     edited();
   };
 
@@ -345,6 +468,67 @@ export function QuickAdjustDialog({
     }
   };
 
+  const handleCountSubmit = async () => {
+    if (countBlocked || selectedLocationId === null || n === null || record === null) return;
+    const sentNotes = notes.trim();
+
+    try {
+      // One count per tap, through the same latch as the delta path.
+      const settled = await run(async () => ({
+        result: await adjustMutation.mutateAsync({
+          productId: product.id,
+          locationId: selectedLocationId,
+          intent: "count",
+          countedQuantity: n,
+          // The version on screen, read before the count was typed (C2-5).
+          expectedVersion: record.version,
+          ...(sentNotes !== "" ? { notes: sentNotes } : {}),
+        }),
+      }));
+      if (settled === undefined) return;
+      const answer = (settled.result ?? {}) as { changed?: unknown; previousQuantity?: unknown };
+
+      if (answer.changed === true && typeof answer.previousQuantity === "number") {
+        toast.success(
+          `Counted ${n} of ${product.name} at ${location} — stock went from ${answer.previousQuantity} to ${n}.`,
+        );
+      } else if (answer.changed === false) {
+        toast.success(`Count confirmed — ${n} of ${product.name} at ${location} matches the record.`);
+      } else {
+        // An answer that can't be read (an unparseable body arrives as `{}`):
+        // the count was saved, and nothing is claimed about what changed.
+        toast.success(`Saved the count of ${n} for ${product.name} at ${location}.`);
+      }
+
+      // The host's RAW callback, never the guard, as on the delta path.
+      onOpenChange(false);
+      onSuccess?.();
+    } catch (error) {
+      if (error instanceof Error && (error as ApiMutationError).code === "OPTIMISTIC_LOCK_ERROR") {
+        // Stock moved while the operator counted. No error toast and the dialog
+        // stays: the count taken against the old record is CLEARED, so a second
+        // tap cannot resubmit it; the list behind and the units read refresh;
+        // and the record is read again, the notice built from THAT answer (the
+        // returned result, never this closure's `record`).
+        setCounted("");
+        setCountRefused(false);
+        void invalidateInventoryCaches(queryClient, product.id);
+        const next = await versionQuery.refetch();
+        setCountNotice(
+          next.status === "success" && next.data !== null
+            ? `Stock changed while you were counting — you entered ${n}; the record now says ${next.data.quantity}. Count again, then save.`
+            : null,
+        );
+        return;
+      }
+      console.error("Error adjusting inventory:", error);
+      const body = error instanceof Error ? (error as ApiMutationError).data : undefined;
+      toast.error(
+        apiErrorMessage(body, error instanceof Error ? error.message : "Failed to adjust inventory"),
+      );
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
@@ -378,6 +562,28 @@ export function QuickAdjustDialog({
             )}
             {selectedLocationId === null ? (
               <span className="text-muted-foreground">No location selected.</span>
+            ) : isCount ? (
+              // Count: the version read's number, only when nothing is fetching.
+              countRead === "failed" ? (
+                <>
+                  <span className="text-destructive">Couldn&apos;t read current stock.</span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    data-testid="count-retry"
+                    className="min-h-[44px]"
+                    onClick={() => void versionQuery.refetch()}
+                  >
+                    Try again
+                  </Button>
+                </>
+              ) : record !== null ? (
+                <ValueChip tone={record.quantity > 0 ? "positive" : record.quantity < 0 ? "negative" : "neutral"}>
+                  {`${record.quantity} ${unitWord(record.quantity)}`}
+                </ValueChip>
+              ) : (
+                <span className="text-muted-foreground">Reading stock…</span>
+              )
             ) : quantityQuery.status === "error" ? (
               <span className="text-destructive">
                 Couldn&apos;t read current stock — it will be checked when you save.
@@ -396,86 +602,152 @@ export function QuickAdjustDialog({
         <fieldset disabled={busy} className="min-w-0">
           <div className="space-y-4">
             <div className="space-y-4">
-              {/* Direction: a segmented Remove | Add, Remove first. */}
+              {/* The switch: a segmented Remove | Add | Count, Remove first.
+                  The 360 px budget (B3-2-G1-6 / OC1-3): each track is about
+                  91 px, so the buttons pad tighter than the Button default and
+                  the icons show only from 400 px. */}
               <div
                 role="group"
-                aria-label="Remove or add"
-                className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted/30 p-1"
+                aria-label="Remove, add or count"
+                className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-muted/30 p-1"
               >
-                {(["remove", "add"] as const).map((value) => (
+                {(["remove", "add", "count"] as const).map((value) => (
                   <Button
                     key={value}
                     type="button"
-                    variant={direction === value ? "default" : "ghost"}
-                    aria-pressed={direction === value}
-                    className="min-h-[44px]"
-                    onClick={() => handleDirectionChange(value)}
+                    variant={mode === value ? "default" : "ghost"}
+                    aria-pressed={mode === value}
+                    className="min-h-[44px] px-2 gap-1.5"
+                    onClick={() => handleModeChange(value)}
                   >
-                    {value === "remove" ? <Minus className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-                    {value === "remove" ? "Remove" : "Add"}
+                    {value === "remove" ? (
+                      <Minus className="hidden min-[400px]:block" />
+                    ) : value === "add" ? (
+                      <Plus className="hidden min-[400px]:block" />
+                    ) : (
+                      <ClipboardCheck className="hidden min-[400px]:block" />
+                    )}
+                    {value === "remove" ? "Remove" : value === "add" ? "Add" : "Count"}
                   </Button>
                 ))}
               </div>
 
-              {/* Quantity */}
-              <div className="space-y-2">
-                <Label htmlFor="quantity" className="text-xs font-medium text-muted-foreground">
-                  {isRemove ? "Units to remove" : "Units to add"}
-                </Label>
-                <div className="flex items-center gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    className="h-11 w-11 shrink-0 rounded-md border-border"
-                    aria-label="Decrease quantity"
-                    onClick={handleDecrement}
-                    disabled={q === null || q <= 1}
-                  >
-                    <Minus className="h-4 w-4" />
-                  </Button>
-                  <Input
-                    id="quantity"
-                    type="text"
-                    inputMode="numeric"
-                    autoComplete="off"
-                    maxLength={6}
-                    value={quantity}
-                    onChange={(e) => handleQuantityInput(e.target.value)}
-                    onBlur={() => setQuantityRefused(false)}
-                    className="h-11 flex-1 text-center text-lg font-semibold tabular-nums"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    className="h-11 w-11 shrink-0 rounded-md border-border"
-                    aria-label="Increase quantity"
-                    onClick={handleIncrement}
-                  >
-                    <Plus className="h-4 w-4" />
-                  </Button>
-                </div>
-                {quantityRefused && (
-                  <p role="status" data-testid="quantity-refused" className="text-[11px] text-destructive">
-                    Whole units only.
-                  </p>
-                )}
-                {preview !== null && (
-                  <p data-testid="quantity-preview" className="text-[11px] text-muted-foreground">
-                    After this, {location} will have{" "}
-                    <span
-                      className={cn(
-                        "font-semibold",
-                        preview < 0 ? "text-destructive" : "text-positive",
-                      )}
+              {/* Count: how many are on the shelf. EMPTY on entry and NO
+                  placeholder — the record is the stock line above, never a grey
+                  number inside the field that reads as a count already taken. */}
+              {isCount && (
+                <div className="space-y-2">
+                  <Label htmlFor="count" className="text-xs font-medium text-muted-foreground">
+                    {location !== null ? `How many are on the shelf at ${location}?` : "How many are on the shelf?"}
+                  </Label>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="h-11 w-11 shrink-0 rounded-md border-border"
+                      aria-label="Decrease count"
+                      onClick={handleCountDecrement}
+                      disabled={n === null || n <= 0}
                     >
-                      {`${preview} ${unitWord(preview)}`}
-                    </span>
-                    .
-                  </p>
-                )}
-              </div>
+                      <Minus className="h-4 w-4" />
+                    </Button>
+                    <Input
+                      id="count"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      maxLength={6}
+                      value={counted}
+                      onChange={(e) => handleCountInput(e.target.value)}
+                      onBlur={() => setCountRefused(false)}
+                      className="h-11 flex-1 text-center text-lg font-semibold tabular-nums"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="h-11 w-11 shrink-0 rounded-md border-border"
+                      aria-label="Increase count"
+                      onClick={handleCountIncrement}
+                    >
+                      <Plus className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  {countRefused && (
+                    <p role="status" data-testid="count-refused" className="text-[11px] text-destructive">
+                      Whole units only.
+                    </p>
+                  )}
+                  {countPreview !== null && (
+                    <p data-testid="count-preview" className="text-[11px] text-muted-foreground">
+                      {countPreview}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Quantity — Remove and Add only. */}
+              {!isCount && (
+                <div className="space-y-2">
+                  <Label htmlFor="quantity" className="text-xs font-medium text-muted-foreground">
+                    {isRemove ? "Units to remove" : "Units to add"}
+                  </Label>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="h-11 w-11 shrink-0 rounded-md border-border"
+                      aria-label="Decrease quantity"
+                      onClick={handleDecrement}
+                      disabled={q === null || q <= 1}
+                    >
+                      <Minus className="h-4 w-4" />
+                    </Button>
+                    <Input
+                      id="quantity"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      maxLength={6}
+                      value={quantity}
+                      onChange={(e) => handleQuantityInput(e.target.value)}
+                      onBlur={() => setQuantityRefused(false)}
+                      className="h-11 flex-1 text-center text-lg font-semibold tabular-nums"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      className="h-11 w-11 shrink-0 rounded-md border-border"
+                      aria-label="Increase quantity"
+                      onClick={handleIncrement}
+                    >
+                      <Plus className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  {quantityRefused && (
+                    <p role="status" data-testid="quantity-refused" className="text-[11px] text-destructive">
+                      Whole units only.
+                    </p>
+                  )}
+                  {preview !== null && (
+                    <p data-testid="quantity-preview" className="text-[11px] text-muted-foreground">
+                      After this, {location} will have{" "}
+                      <span
+                        className={cn(
+                          "font-semibold",
+                          preview < 0 ? "text-destructive" : "text-positive",
+                        )}
+                      >
+                        {`${preview} ${unitWord(preview)}`}
+                      </span>
+                      .
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* W2-1 (T7): the intent chip — on Remove only. Skippable; it never
                   blocks the save. */}
@@ -504,7 +776,7 @@ export function QuickAdjustDialog({
               {/* T5 (pack REV-3): a POSITIVE delta here is stock arriving with no
                   receipt behind it. The prompt offers /receiving once per session
                   and never blocks — declining submits the identical adjustment. */}
-              {!isRemove && <ReceivingRedirectPrompt active={q !== null && q > 0} />}
+              {mode === "add" && <ReceivingRedirectPrompt active={q !== null && q > 0} />}
 
               {/* The Note: optional, shown in the product's history to admins and its author. */}
               <div className="space-y-2">
@@ -530,24 +802,28 @@ export function QuickAdjustDialog({
               className="sticky bottom-0 -mx-4 px-4 sm:-mx-6 sm:px-6 -mb-4 pb-4 sm:-mb-6 sm:pb-6 bg-background border-t pt-3"
             >
               <p data-testid="adjust-summary" className="break-words text-sm font-medium">
-                {summary}
+                {isCount ? countSummary : summary}
               </p>
               {orderLine !== null && (
                 <p data-testid="adjust-order-line" className="break-words text-[11px] text-muted-foreground">
                   {orderLine}
                 </p>
               )}
-              {message !== null && (
+              {footerMessage !== null && (
                 <p
                   data-testid="adjust-message"
                   role="status"
                   aria-live="polite"
                   className={cn(
                     "mt-1 break-words text-[11px]",
-                    blockers.length > 0 ? "text-destructive" : "text-warning",
+                    footerTone === "destructive"
+                      ? "text-destructive"
+                      : footerTone === "muted"
+                        ? "text-muted-foreground"
+                        : "text-warning",
                   )}
                 >
-                  {message}
+                  {footerMessage}
                 </p>
               )}
               <div className="mt-3 flex justify-end gap-2">
@@ -563,10 +839,10 @@ export function QuickAdjustDialog({
                 <Button
                   type="button"
                   className="min-h-[44px]"
-                  onClick={handleSubmit}
-                  disabled={blockers.length > 0 || busy}
+                  onClick={isCount ? handleCountSubmit : handleSubmit}
+                  disabled={(isCount ? countBlocked : blockers.length > 0) || busy}
                 >
-                  {actionLabel}
+                  {isCount ? countActionLabel : actionLabel}
                 </Button>
               </div>
             </div>
