@@ -102,12 +102,23 @@ typo'd flag must not quietly bind a different reading).
    `rowCount` + `rowsOmitted` above 500 rows. Those operations are identified separately by
    the `rowsOmitted` shape and labelled as such, so the frozen rule stays visible.
    **Phase 0b-1 adds a second branch** (`lib/mass-update.js`, both branches named per batch
-   in the `identifiedBy` column): the route now stamps `logType: COUNT`, which no other
-   writer emits, so operations from that deploy on are identified by the LEDGER — including
+   in the `identifiedBy` column): the route now stamps `logType: COUNT`, so operations from
+   that deploy on are identified by the LEDGER — including
    `>500`-row ones (a full identification, not the degraded case) and ones whose
    best-effort audit summary never landed (`recordIngestion`, P-B1), which the audit-shape
    rule cannot see at all. Batches written BEFORE the deploy carry no `COUNT` rows and are
    still identified by the frozen rule alone.
+   **P2-B3-2: mass-update is no longer the only `COUNT` writer.** The Adjust stock dialog's
+   Count books a count that differs from the record as ONE `COUNT` ledger row, filed with
+   an `INVENTORY_ADJUSTMENT` event in the same transaction. `isDialogCountBatch`
+   (`lib/mass-update.js`; `classifyMassUpdateBatch` is unchanged) reads exactly that —
+   `COUNT` rows, an `INVENTORY_ADJUSTMENT` event, no `INVENTORY_BULK_UPDATE` summary — and
+   d2 labels such a batch `single-product count (Adjust stock dialog)` (`identifiedBy` gains
+   `dialog-count`), never a mass update, and counts it in neither mass-update figure. A
+   `COUNT` batch with no audit row at all stays a mass update (the best-effort-summary
+   case). A count that MATCHES the record writes no ledger row: a confirmed count is an
+   `INVENTORY_ADJUSTMENT` event with `details.intent: 'count'` and no ledger row, so it
+   never appears in d2's ledger-batch list.
 3. **D3 framing.** `product_stock_snapshots` levels are RECONSTRUCTED from the ledger
    (`lib/analytics/rebuild-snapshots.ts`), so a divergence is evidence about the rebuild —
    not proof of an out-of-band stock write. The check runs exactly as specified; the

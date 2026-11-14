@@ -49,6 +49,7 @@ const {
 const {
   MASS_UPDATE_LABEL,
   classifyMassUpdateBatch,
+  isDialogCountBatch,
 } = require("../../../../scripts/diagnostics/inventory-accuracy/lib/mass-update");
 
 // ---------------------------------------------------------------------------
@@ -957,6 +958,151 @@ describe("classifyMassUpdateBatch — historical audit shape + the 0b-1 COUNT br
   test("the frozen label is never softened to 'baseline' (G2-7)", () => {
     expect(MASS_UPDATE_LABEL).toMatch(/overwrite\/count-event dates/);
     expect(MASS_UPDATE_LABEL).not.toMatch(/baseline/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P2-B3-2 (pack § P2-B3-2 C2-7): mass-update is no longer the only COUNT writer.
+// The Adjust stock dialog's Count books ONE COUNT row and files its
+// INVENTORY_ADJUSTMENT event in the same transaction. `classifyMassUpdateBatch`
+// is unchanged (the R0 parity pin holds); this diagnostics-only predicate tells
+// the dialog's batch apart from the action types d2 already projects.
+// ---------------------------------------------------------------------------
+describe("isDialogCountBatch — the Adjust stock dialog's single-product count", () => {
+  test.each([
+    [
+      "a dialog count: COUNT rows + its INVENTORY_ADJUSTMENT event",
+      true,
+      { logTypes: ["COUNT"], auditActionTypes: ["INVENTORY_ADJUSTMENT"] },
+    ],
+    [
+      "a mass update with its summary: COUNT rows + INVENTORY_BULK_UPDATE",
+      false,
+      { logTypes: ["COUNT"], auditActionTypes: ["INVENTORY_BULK_UPDATE"] },
+    ],
+    [
+      "COUNT rows with NO audit row (the best-effort summary that never landed)",
+      false,
+      { logTypes: ["COUNT"], auditActionTypes: [] },
+    ],
+    [
+      "an INVENTORY_ADJUSTMENT event without COUNT rows (an ordinary adjust)",
+      false,
+      { logTypes: ["ADJUSTMENT"], auditActionTypes: ["INVENTORY_ADJUSTMENT"] },
+    ],
+    [
+      "BOTH action types on COUNT rows — a bulk summary wins, never a dialog count",
+      false,
+      { logTypes: ["COUNT"], auditActionTypes: ["INVENTORY_ADJUSTMENT", "INVENTORY_BULK_UPDATE"] },
+    ],
+  ])("%s -> %s", (_label, expected, batch) => {
+    expect(isDialogCountBatch(batch)).toBe(expected);
+    // Sets work as the arrays do (d2 builds Sets).
+    expect(
+      isDialogCountBatch({
+        logTypes: new Set(batch.logTypes),
+        auditActionTypes: new Set(batch.auditActionTypes),
+      })
+    ).toBe(expected);
+  });
+
+  test("an absent field reads as empty, never as a match", () => {
+    expect(isDialogCountBatch({})).toBe(false);
+    expect(isDialogCountBatch({ logTypes: ["COUNT"] })).toBe(false);
+  });
+
+  test("the dialog's batch still matches the 0b-1 COUNT branch — d2 relabels it, the classifier is untouched", () => {
+    const batch = { logTypes: ["COUNT"], auditActionTypes: ["INVENTORY_ADJUSTMENT"] };
+    expect(classifyMassUpdateBatch(batch)).toEqual({
+      isMassUpdate: true,
+      isMassUpdateRowsOmitted: false,
+      evidence: ["count-logtype"],
+    });
+    expect(isDialogCountBatch(batch)).toBe(true);
+  });
+});
+
+// d2's WIRING of that predicate (pack C2-7), driven through `run()` with a FAKE
+// raw channel that answers each of d2's statements by its own shape — no SQL
+// runs here (that stays the restore's job); what is pinned is what d2 does with
+// the rows: the dialog's batch is labelled as a count, carries 'dialog-count',
+// and is counted in NEITHER mass-update figure, while a real mass update beside
+// it is unchanged.
+describe("d2-inbound — a dialog-count batch is relabelled, never a mass update", () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const d2 = require("../../../../scripts/diagnostics/inventory-accuracy/d2-inbound");
+  const DIALOG = "batch-dialog-count";
+  const MASS = "batch-mass-update";
+
+  function fakePrisma() {
+    return {
+      $queryRawUnsafe: jest.fn(async (sql) => {
+        if (sql.includes("COUNT(DISTINCT il.productId)")) {
+          return [
+            {
+              batchId: DIALOG, netDelta: 3, positiveUnits: 3, negativeUnits: 0, rowCount: 1,
+              productCount: 1, locationCount: 1,
+              firstChangeTime: "2026-11-20T10:00:00.000Z", lastChangeTime: "2026-11-20T10:00:00.000Z",
+            },
+            {
+              batchId: MASS, netDelta: 5, positiveUnits: 5, negativeUnits: 0, rowCount: 2,
+              productCount: 2, locationCount: 1,
+              firstChangeTime: "2026-11-19T10:00:00.000Z", lastChangeTime: "2026-11-19T10:00:00.000Z",
+            },
+          ];
+        }
+        if (sql.includes("il.batchId, il.logType, il.reasonCode")) {
+          return [
+            { batchId: DIALOG, logType: "COUNT", reasonCode: "COUNT", locationId: 1, userId: 7, rowCount: 1, netDelta: 3 },
+            { batchId: MASS, logType: "COUNT", reasonCode: "COUNT", locationId: 1, userId: 8, rowCount: 2, netDelta: 5 },
+          ];
+        }
+        if (sql.includes("FROM audit_logs a")) {
+          return [
+            { auditId: 1, batchId: DIALOG, actionType: "INVENTORY_ADJUSTMENT", userId: 7, affectedCount: 1, hasRowsShape: 0, hasRowsOmitted: 0 },
+            { auditId: 2, batchId: MASS, actionType: "INVENTORY_BULK_UPDATE", userId: 8, affectedCount: 2, hasRowsShape: 1, hasRowsOmitted: 0 },
+          ];
+        }
+        if (sql.includes("il.batchId IS NULL")) {
+          return [{ rowCount: 0, netDelta: 0, firstChangeTime: null, lastChangeTime: null }];
+        }
+        if (sql.includes("GROUP BY il.logType")) {
+          return [{ logType: "COUNT", rowCount: 3, positiveUnits: 8, negativeUnits: 0 }];
+        }
+        throw new Error(`fake raw channel: unexpected statement ${sql.slice(0, 80)}`);
+      }),
+    };
+  }
+
+  async function runD2() {
+    return d2.run({ prisma: fakePrisma(), opts: { windowDays: 90, top: 50 } });
+  }
+
+  test("the dialog's batch reads 'single-product count (Adjust stock dialog)' with identifiedBy count-logtype,dialog-count", async () => {
+    const { sections } = await runD2();
+    const rows = sections.topPositiveBatches.rows;
+    const dialog = rows.find((r) => r.batchId === DIALOG);
+    const mass = rows.find((r) => r.batchId === MASS);
+    expect(dialog.classification).toBe("single-product count (Adjust stock dialog)");
+    expect(dialog.identifiedBy).toBe("count-logtype,dialog-count");
+    // The mass update beside it is exactly what it was.
+    expect(mass.classification).toBe(MASS_UPDATE_LABEL);
+    expect(mass.identifiedBy).toBe("audit-rows-shape,count-logtype");
+  });
+
+  test("it is counted in NEITHER mass-update figure and is absent from the operation dates", async () => {
+    const { sections, meta } = await runD2();
+    expect(sections.identification.massUpdateBatches.value).toBe(1);
+    expect(sections.identification.massUpdateBatchesByCountLogType.value).toBe(1);
+    expect(meta.massUpdateBatches).toBe(1);
+    expect(sections.massUpdateOperationDates.rows.map((r) => r.batchId)).toEqual([MASS]);
+  });
+
+  test("the column definitions name the new label and branch (a value with no definition is a rumour)", async () => {
+    const { sections } = await runD2();
+    const cols = sections.topPositiveBatches.columnDefinitions;
+    expect(cols.classification).toContain("single-product count (Adjust stock dialog)");
+    expect(cols.identifiedBy).toContain("'dialog-count'");
   });
 });
 

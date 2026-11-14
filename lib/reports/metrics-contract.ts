@@ -229,7 +229,33 @@ export const SHRINKAGE_CLASSIFICATION_DEFINITION =
   "way to record a disposal as DAMAGE, so the DAMAGE bucket STEPS UP from that date " +
   "as tested-bad disposals classify for the first time. Those units were already " +
   "leaving and were already reported, under unclassifiedOutboundUnits — the step is " +
-  "reclassification, not a rise in breakage, and totals must not be compared across it.";
+  "reclassification, not a rise in breakage, and totals must not be compared across it. " +
+  "From 2026-11 the Adjust stock dialog's Count records a spot count as a ledger row of " +
+  "logType COUNT, which this tool does not read: a count below the record no longer " +
+  "appears in unclassifiedOutboundUnits (where the same event landed when operators " +
+  "recorded it as a reason-less removal), and it is not in byReason.COUNT either — that " +
+  "bucket holds ADJUSTMENT/CORRECTION rows coded COUNT (from the retired reason select, " +
+  "before 2026-08, or an API caller), which stay classified shrinkage. The step down in " +
+  "unclassifiedOutboundUnits from that month is reclassification, not fewer losses, and " +
+  "totals must not be compared across it; get_movement_series shows these counts as " +
+  "countOut/countIn. The journal still books reason-less ADJUSTMENT rows (unclassified, " +
+  "never loss).";
+
+/**
+ * The count regime change, for the tools that PARTITION outbound movement
+ * (pack § P2-B3-2 C2-3). Before the Adjust stock dialog's Count existed, an
+ * operator who found fewer units than the record removed the difference as a
+ * reason-less adjustment; the same event now books a COUNT row. The movement
+ * and mix buckets therefore shift between adjustment* and count* from that
+ * month — interpolated into get_operations' and get_movement_series'
+ * descriptions so the model reads it before it narrates a trend.
+ */
+export const COUNT_REGIME_NOTE =
+  "From 2026-11 single-product counts from the Adjust stock dialog book countOut (a count " +
+  "below the record) and countIn (above it); before that month operators recorded the " +
+  "same events as reason-less adjustments, which sat in adjustmentUnclassified / " +
+  "adjustmentIn — the shift is reclassification, and those buckets must not be compared " +
+  "across it.";
 
 /**
  * Definition string for the outbound-usage velocity rate (spec §2 D3): the units/day

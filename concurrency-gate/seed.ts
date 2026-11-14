@@ -765,6 +765,19 @@ export async function resetGateFixtures(scope: GateScope): Promise<void> {
             // rows used to survive the reset. Same derivation, same scoping:
             // every batch id here came off a ledger row this reset owns.
             { entityType: "ORDER", batchId: { in: routeBatchIds } },
+            // P2-B3-2 (pack § P2-B3-2 C2-4): the adjust route's COUNT arm. A
+            // count that MATCHES the record writes no ledger row at all, so its
+            // `INVENTORY_ADJUSTMENT` event's batch id derives from nothing this
+            // reset reads — neither `routeBatchIds` nor any clause above reaches
+            // it. Keyed on the SCOPE's products (`entityId` is the product id, a
+            // VARCHAR): no state threads through the scenario, and it also takes
+            // back the event of a leg that failed before any id was recorded.
+            // Nothing in this gate relies on such an event surviving a reset.
+            {
+              entityType: "INVENTORY",
+              actionType: "INVENTORY_ADJUSTMENT",
+              entityId: { in: scope.productIds.map(String) },
+            },
           ],
         },
       });

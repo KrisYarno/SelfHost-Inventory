@@ -100,7 +100,7 @@ export const AdjustWithIntentSchema = InventoryAdjustmentSchema.extend({
   // The order number an operator TYPED (the reference field). Free text until
   // the route's resolver decides whether it names exactly one order.
   orderReference: z.string().trim().min(1).max(40).optional(),
-  countedQuantity: z.number().int().min(0).optional(),
+  countedQuantity: z.number().int().min(0).max(999_999).optional(),
   // A ledger batch id: the reverse/move routes' own guard, never re-spelled.
   reversesBatchId: BatchIdParamSchema.optional(),
   autoAddForTransfer: z.boolean().optional(),

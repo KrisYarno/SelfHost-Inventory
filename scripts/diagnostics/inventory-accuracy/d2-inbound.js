@@ -14,7 +14,11 @@
 const { query, queryChunkedIn, int, date, bool } = require("./lib/db");
 const { figure, disclosure, table } = require("./lib/artifact");
 const { splitUnitsByLogType } = require("./lib/rollups");
-const { MASS_UPDATE_LABEL, classifyMassUpdateBatch } = require("./lib/mass-update");
+const {
+  MASS_UPDATE_LABEL,
+  classifyMassUpdateBatch,
+  isDialogCountBatch,
+} = require("./lib/mass-update");
 
 const check = "d2-inbound";
 const title = "Inbound review + overwrite/count-event dates";
@@ -27,6 +31,9 @@ const purpose =
 /** Migration 20260710150000_inventory_logs_batch_id — batchId's DB arrival. */
 const BATCH_ID_MIGRATION = "2026-07-10 (20260710150000_inventory_logs_batch_id)";
 
+/** The classification of a batch the Adjust stock dialog's Count wrote (P2-B3-2). */
+const DIALOG_COUNT_LABEL = "single-product count (Adjust stock dialog)";
+
 /** Shared definition for the per-batch `identifiedBy` column (both branches named). */
 const IDENTIFIED_BY_DEFINITION =
   "Which discriminator branch(es) matched, comma-joined. 'audit-rows-shape' = the " +
@@ -34,7 +41,10 @@ const IDENTIFIED_BY_DEFINITION =
   "'audit-rows-omitted' = the >500-row fallback shape; 'count-logtype' = Phase 0b-1's " +
   "ledger evidence (rows stamped logType COUNT). 'none' = not identified as a " +
   "mass-update operation. A pre-0b-1 batch can only ever show the audit-* branches — " +
-  "the absence of 'count-logtype' there is a DATE fact, not a weaker identification.";
+  "the absence of 'count-logtype' there is a DATE fact, not a weaker identification. " +
+  "'dialog-count' = COUNT rows filed with an INVENTORY_ADJUSTMENT event and no " +
+  "INVENTORY_BULK_UPDATE summary: the Adjust stock dialog's single-product count " +
+  "(P2-B3-2), which is NOT a mass-update operation even though 'count-logtype' matched.";
 
 async function run(ctx) {
   const { prisma, opts } = ctx;
@@ -135,17 +145,24 @@ async function run(ctx) {
   // branches, both disclosed per batch via `evidence`: the FROZEN audit-shape
   // rule for historical batches, and the Phase 0b-1 `logType: COUNT` rule for
   // batches written after that deploy.
+  //
+  // P2-B3-2: the Adjust stock dialog's single-product count also writes COUNT
+  // rows, so the 0b-1 branch matches its batches too. `isDialogCountBatch` (same
+  // module, pure) tells them apart by their in-transaction INVENTORY_ADJUSTMENT
+  // event; such a batch is labelled as what it is and is not counted as a mass
+  // update — in either figure.
   let massUpdateBatches = 0;
   let rowsOmittedBatches = 0;
   let countEvidenceBatches = 0;
   for (const b of batches.values()) {
     const verdict = classifyMassUpdateBatch(b);
-    b.isMassUpdate = verdict.isMassUpdate;
+    b.isDialogCount = isDialogCountBatch(b);
+    b.isMassUpdate = verdict.isMassUpdate && !b.isDialogCount;
     b.isMassUpdateRowsOmitted = verdict.isMassUpdateRowsOmitted;
-    b.evidence = verdict.evidence;
+    b.evidence = b.isDialogCount ? [...verdict.evidence, "dialog-count"] : verdict.evidence;
     if (b.isMassUpdate) massUpdateBatches += 1;
     if (b.isMassUpdateRowsOmitted) rowsOmittedBatches += 1;
-    if (verdict.evidence.includes("count-logtype")) countEvidenceBatches += 1;
+    if (b.isMassUpdate && verdict.evidence.includes("count-logtype")) countEvidenceBatches += 1;
   }
 
   const toRow = (b) => ({
@@ -162,11 +179,13 @@ async function run(ctx) {
     reasonCodes: Array.from(b.reasonCodes).sort().join(",") || "none",
     auditActionTypes: Array.from(b.auditActionTypes).sort().join(",") || "none",
     identifiedBy: (b.evidence || []).join(",") || "none",
-    classification: b.isMassUpdate
-      ? MASS_UPDATE_LABEL
-      : b.isMassUpdateRowsOmitted
-        ? `${MASS_UPDATE_LABEL} [rows omitted from audit details — see disclosure]`
-        : "not identified as a mass-update operation",
+    classification: b.isDialogCount
+      ? DIALOG_COUNT_LABEL
+      : b.isMassUpdate
+        ? MASS_UPDATE_LABEL
+        : b.isMassUpdateRowsOmitted
+          ? `${MASS_UPDATE_LABEL} [rows omitted from audit details — see disclosure]`
+          : "not identified as a mass-update operation",
   });
 
   const all = Array.from(batches.values());
@@ -277,8 +296,10 @@ async function run(ctx) {
       "batches_identified_by_count_logtype",
       countEvidenceBatches,
       "Batches identified by the Phase 0b-1 LEDGER evidence (logType COUNT), which " +
-        "mass-update stamps on every row it writes from that deploy on and no other " +
-        "writer emits. It is the stronger of the two branches: the audit summary is " +
+        "mass-update stamps on every row it writes from that deploy on. The Adjust stock " +
+        "dialog's single-product count (P2-B3-2) writes COUNT too; its batches are " +
+        "identified as 'dialog-count' and are NOT counted here. It is the stronger of " +
+        "the two branches: the audit summary is " +
         "best-effort (recordIngestion, P-B1), so a real mass update can exist with " +
         "ledger rows and NO audit row — invisible to the frozen audit-shape rule. " +
         "Batches written BEFORE 0b-1 carry no COUNT rows and are still identified by " +
@@ -343,8 +364,9 @@ async function run(ctx) {
         negativeUnits: "SUM(-delta) over the batch's negative rows only.",
         actorUserIds: "inventory_logs.userId values. IDs only — names/emails are never selected.",
         locationIds: "Distinct inventory_logs.locationId; 'null' means location-less rows.",
-        classification: `Either the frozen label "${MASS_UPDATE_LABEL}" or a statement that ` +
-          "the batch was not identified as a mass update.",
+        classification: `The frozen label "${MASS_UPDATE_LABEL}", the label ` +
+          `"${DIALOG_COUNT_LABEL}" for a dialog count, or a statement that the batch was ` +
+          "not identified as a mass update.",
         identifiedBy: IDENTIFIED_BY_DEFINITION,
       },
       coverageDisclosures
@@ -370,7 +392,8 @@ async function run(ctx) {
         "SALE ledger rows (deduct-simple writes the same actionType and is disambiguated " +
         "by row logType) — the only evidence pre-0b-1 batches carry. (2) Phase 0b-1's " +
         "LEDGER evidence: rows stamped logType COUNT, which mass-update writes from that " +
-        "deploy on and no other writer emits. These are DATES on which rows were " +
+        "deploy on (minus the Adjust stock dialog's single-product counts, which write " +
+        "COUNT too and are excluded as 'dialog-count'). These are DATES on which rows were " +
         "overwritten — NOT baselines, NOT proof a physical count occurred, and silent " +
         "about every row the operation did not touch.",
       {
@@ -388,7 +411,8 @@ async function run(ctx) {
       massUpdateBatches: figure(
         massUpdateBatches,
         "Batches identified as mass-update operations by EITHER branch (frozen audit " +
-          `shape OR 0b-1's logType COUNT). Labelled: "${MASS_UPDATE_LABEL}".`,
+          "shape OR 0b-1's logType COUNT), minus the Adjust stock dialog's single-product " +
+          `counts ('dialog-count'). Labelled: "${MASS_UPDATE_LABEL}".`,
         coverageDisclosures
       ),
       massUpdateBatchesByCountLogType: figure(

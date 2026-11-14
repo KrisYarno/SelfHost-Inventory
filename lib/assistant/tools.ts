@@ -78,6 +78,7 @@ import {
   type SalesRebuildState,
 } from "@/lib/assistant/sales-coverage";
 import {
+  COUNT_REGIME_NOTE,
   SHRINKAGE_CLASSIFICATION_DEFINITION,
   type WindowCoverage,
 } from "@/lib/reports/metrics-contract";
@@ -2458,7 +2459,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `breaks unitsOut30 into sale / classifiedLoss / adjustmentUnclassified / ` +
       `correctionUnclassified / countOut / stockInReversal (absolute units summing to ` +
       `unitsOut30, null exactly when unitsOut30 is null) — read it before calling any ` +
-      `of it sales, and relay it when the sale bucket is a small share. scope echoes the ` +
+      `of it sales, and relay it when the sale bucket is a small share. ` +
+      `${COUNT_REGIME_NOTE} scope echoes the ` +
       `effective { productId, windowDays } this row set was computed over. ` +
       `Outbound/velocity here count ALL negative non-transfer deltas over a ROLLING ` +
       `window ending now; get_movement_series instead partitions the ledger into ` +
@@ -2630,7 +2632,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `adjustmentIn/countIn), outbound (sale/classifiedLoss/adjustmentUnclassified/` +
       `correctionUnclassified/countOut), and transfers (transferIn/transferOut, kept ` +
       `SEPARATE because a TRANSFER is an INTERNAL relocation between locations, never a ` +
-      `real gain or loss). net === SUM of every bucket. A period ABSENT from 'points' ` +
+      `real gain or loss). ${COUNT_REGIME_NOTE} net === SUM of every bucket. A period ` +
+      `ABSENT from 'points' ` +
       `had ZERO movement (points are sparse — only active periods appear). coverage ` +
       `relays the unclassified-outbound note (unclassifiedLegacyNote — the key name is ` +
       `historical, the note is not about age: outbound adjustments without a reason code ` +

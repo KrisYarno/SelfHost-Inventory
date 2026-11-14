@@ -1396,11 +1396,10 @@ describe("adjust route — the request truth table and the guard, on the wire", 
     expect(db.product_locations.findUnique).not.toHaveBeenCalled();
   }
 
+  // P2-B3-2 (pack C2-2): the "a VALID count" row left this table when the count
+  // arm shipped — its replacement is adjust-count.test.ts's 200. Put-back is
+  // still registered (P2-B3-3), so a valid correction is still refused here.
   it.each([
-    [
-      "a VALID count",
-      { productId: 5, locationId: 2, intent: "count", countedQuantity: 7, expectedVersion: 1 },
-    ],
     [
       "a VALID correction",
       {

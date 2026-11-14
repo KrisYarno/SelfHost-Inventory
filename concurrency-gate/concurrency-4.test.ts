@@ -4261,3 +4261,361 @@ describe("scenario 18 — the adjust capture's stamp takes the ORDER LOCK on a r
     },
   );
 });
+
+// ==========================================================================
+// SCENARIO 16 — THE COUNT ARM ON A REAL ENGINE (pack § P2-B3-2 C2-4)
+//
+// P2-B3-2 gives the adjust route a COUNT arm: the operator's number is compared
+// against the record UNDER THE PRELOCK and at the row version the dialog read,
+// and the difference is ONE COUNT/COUNT ledger row — or, when the count matches,
+// an audit-only "confirmed count" event and NO ledger row. Two claims only a
+// real engine can make:
+//
+//   16-i   THE MATCHING COUNT. Alone, it answers `{ changed: false }`, mints a
+//          batch id, files the audit-only event and writes no ledger row — the
+//          one shape whose event the reset reaches only through the seed's
+//          INVENTORY_ADJUSTMENT clause (nothing on the ledger names its batch).
+//          Started against a HELD deduct-simple on the same key, it is the
+//          prelock's loser and answers 409 with `currentVersion: expected + 1`.
+//   16-ii  THE DIFFERING COUNT. Launched at a deduct-simple proven ASLEEP in its
+//          ledger hold, it is the prelock's loser by construction: 409
+//          OPTIMISTIC_LOCK_ERROR { currentVersion: expected + 1, expectedVersion },
+//          the deduct commits, the stock is exact. In the other order — the count
+//          first, held at its own COUNT row — both commit and the deduct reads the
+//          count's committed record.
+//   16-iii THE NEVER-STOCKED KEY (pack C2-1's real-engine half): the count's
+//          prelock materialises the row at `{ 0, 0 }`, so version 0 — what the
+//          dialog's location read synthesises for an absent row — passes, and the
+//          count books its whole number.
+//
+// THE NUMBERS ARE STATED (B3-G3-13): in the COUNT-FIRST order deduct-simple
+// refuses off the prelocked row unless the count left enough on the shelf, so
+// the deduct's units never exceed the differing count (asserted below). The
+// held-first runner is scenario 18's, verbatim: the same stock row (P_APPROVED
+// at location 1), the same three-second hold, the same lock-wait recorder.
+//
+// No P2034 in any leg (the deadlock section is sampled around every race and
+// must be unchanged), and after `resetAll()` no audit row of the scenario
+// survives — asserted per leg.
+// ==========================================================================
+
+/** The one stock row every leg races on — scenario 18's, so its runner applies. */
+const S16_KEY: PrelockKeyInput = S18_KEY;
+/** The record every leg starts from; `setStock` leaves the seeded version 0. */
+const S16_OPENING = 10;
+const S16_OPENING_VERSION = 0;
+/** A count that DIFFERS from the opening record (below it: a countOut). */
+const S16_COUNTED = 7;
+/** The deduct-simple's units — never more than the count leaves (count-first). */
+const S16_DEDUCT_UNITS = 2;
+
+/** The dialog's request: a count against the version the dialog read. */
+function countAt(
+  key: PrelockKeyInput,
+  countedQuantity: number,
+  expectedVersion: number,
+): Promise<RouteAnswer> {
+  return callRoute(adjustRoute, "/api/inventory/adjust", {
+    productId: key.productId,
+    locationId: key.locationId,
+    intent: "count",
+    countedQuantity,
+    expectedVersion,
+  });
+}
+
+/** An UNSTAMPED deduct-simple on the scenario's key (no order lock to take). */
+function plainDeduct(): Promise<RouteAnswer> {
+  return deductSimple(LOCATION_MAIN, [{ productId: S16_KEY.productId, quantity: S16_DEDUCT_UNITS }]);
+}
+
+/** Every INVENTORY_ADJUSTMENT event naming the product — what the new reset
+ *  clause owns, read table-wide so a leaked event cannot hide behind a batch. */
+async function adjustmentEventsFor(productId: number): Promise<number> {
+  const rows = await rawRows<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM audit_logs
+      WHERE actionType = 'INVENTORY_ADJUSTMENT' AND entityType = 'INVENTORY' AND entityId = ?`,
+    [String(productId)],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** The COUNT ledger rows for one product, by reasonCode — the pair the arm stamps. */
+async function countRowsFor(productId: number): Promise<Array<{ delta: number; reasonCode: string | null }>> {
+  const rows = await rawRows<{ delta: number; reasonCode: string | null }>(
+    "SELECT delta, reasonCode FROM inventory_logs WHERE logType = 'COUNT' AND productId = ? ORDER BY id",
+    [productId],
+  );
+  return rows.map((row) => ({ delta: Number(row.delta), reasonCode: row.reasonCode }));
+}
+
+/** A known start: the seed back, the record at the opening quantity. */
+async function startScenario16(): Promise<CountSnapshot> {
+  await dropHoldTrigger();
+  await resetAll();
+  await setStock(S16_KEY.productId, S16_OPENING);
+  expect(await locationRow(S16_KEY)).toMatchObject({
+    quantity: S16_OPENING,
+    version: S16_OPENING_VERSION,
+  });
+  expect(await adjustmentEventsFor(S16_KEY.productId)).toBe(0);
+  return countSnapshot();
+}
+
+/** The cleanup, PROVEN: the reset takes back every row the leg wrote, the
+ *  count's own audit-only event included. */
+async function resetAndProveClean(opening: CountSnapshot, countBatch: string | null): Promise<void> {
+  await resetAll();
+  expect(await countSnapshot()).toEqual(opening);
+  expect(await adjustmentEventsFor(S16_KEY.productId)).toBe(0);
+  if (countBatch !== null) expect(await auditRowsForBatch(countBatch)).toEqual([]);
+}
+
+describe("scenario 16 — the count arm on a REAL engine (pack § P2-B3-2 C2-4)", () => {
+  jest.setTimeout(120_000);
+
+  afterAll(async () => {
+    await dropHoldTrigger();
+    await resetAll();
+  });
+
+  test("the fixture states its numbers: the deduct never exceeds what the count leaves", () => {
+    expect(S16_DEDUCT_UNITS).toBeLessThanOrEqual(S16_COUNTED);
+    expect(S16_COUNTED).not.toBe(S16_OPENING);
+    expect(S16_KEY).toEqual({ productId: P_APPROVED, locationId: LOCATION_MAIN });
+  });
+
+  test("16-i alone: a MATCHING count answers changed:false, mints a batch, files the audit-only event and writes NO ledger row", async () => {
+    const opening = await startScenario16();
+
+    const answer = await countAt(S16_KEY, S16_OPENING, S16_OPENING_VERSION);
+
+    expect(answer.status).toBe(200);
+    expect(answer.body).toEqual({
+      success: true,
+      changed: false,
+      batchId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      countedQuantity: S16_OPENING,
+      previousQuantity: S16_OPENING,
+      delta: 0,
+      newVersion: S16_OPENING_VERSION,
+    });
+    const batchId = String(answer.body.batchId);
+
+    // NO ledger row — table-wide and by batch — and the record untouched.
+    expect(await ledgerRowsForBatch(batchId)).toEqual([]);
+    expect(await countRowsFor(S16_KEY.productId)).toEqual([]);
+    expect(await locationRow(S16_KEY)).toMatchObject({
+      quantity: S16_OPENING,
+      version: S16_OPENING_VERSION,
+    });
+
+    // ONE event, keyed by the product, under the minted batch; no attempt row.
+    expect(await auditRowsForBatch(batchId)).toEqual([
+      {
+        actionType: "INVENTORY_ADJUSTMENT",
+        entityType: "INVENTORY",
+        entityId: String(S16_KEY.productId),
+      },
+    ]);
+    expect(await eventDetailsForBatch(batchId)).toEqual({
+      productName: "Gate Product Approved",
+      intent: "count",
+      countedQuantity: S16_OPENING,
+      previousQuantity: S16_OPENING,
+      delta: 0,
+      locationId: S16_KEY.locationId,
+    });
+    expect(await attemptCountForBatch(batchId)).toBe(0);
+    expect(await countSnapshot()).toEqual({ ...opening, auditRows: opening.auditRows + 1 });
+
+    // THE NEW RESET CLAUSE IS WHAT TAKES IT BACK: no ledger row names this batch.
+    await resetAndProveClean(opening, batchId);
+  });
+
+  test.each([
+    ["16-i", "a MATCHING count", S16_OPENING],
+    ["16-ii", "a DIFFERING count", S16_COUNTED],
+  ])(
+    "%s held deduct first: %s launched at a deduct-simple asleep in its ledger hold is the prelock's loser — 409 with currentVersion expected + 1, nothing of the count written",
+    async (leg, _what, counted) => {
+      const opening = await startScenario16();
+      const label = `scenario ${leg} deduct-first`;
+
+      const race = await raceHeldFirst(label, plainDeduct, () =>
+        countAt(S16_KEY, counted, S16_OPENING_VERSION),
+      );
+      const [deducted, counter] = race.answers;
+      console.log(
+        `[${label}] deduct asleep in its ledger hold: ${race.firstAsleep}; ` +
+          `the count's lock waits: ${race.waits.map(describeWait).join(" | ") || "(none observed)"}; ` +
+          `deduct -> ${deducted.status}, count -> ${counter.status}`,
+      );
+
+      // THE RACE REALLY HAPPENED, and no deadlock of any shape fired.
+      expect(race.firstAsleep).toBe(true);
+      expect(race.deadlock.fresh).toBe(false);
+
+      // The deduct commits; the count is refused with the ONE 409 envelope.
+      expect(deducted.status).toBe(200);
+      expect(counter.status).toBe(409);
+      expect(counter.body).toEqual({
+        error: "Stock changed while you counted",
+        code: "OPTIMISTIC_LOCK_ERROR",
+        currentVersion: S16_OPENING_VERSION + 1,
+        expectedVersion: S16_OPENING_VERSION,
+      });
+
+      // THE PRELOCK'S LOSER, off the engine: the count queued on the stock row.
+      expect(Array.from(new Set(race.waits.map((wait) => wait.objectName)))).toEqual([
+        "product_locations",
+      ]);
+
+      // The stock is EXACT: the deduct's units off, one version, no count row,
+      // no count event.
+      expect(await locationRow(S16_KEY)).toMatchObject({
+        quantity: S16_OPENING - S16_DEDUCT_UNITS,
+        version: S16_OPENING_VERSION + 1,
+      });
+      expect(await countRowsFor(S16_KEY.productId)).toEqual([]);
+      expect(await adjustmentEventsFor(S16_KEY.productId)).toBe(0);
+      const deductBatch = String(deducted.body.batchId);
+      expect(await ledgerRowsForBatch(deductBatch)).toEqual([
+        {
+          productId: S16_KEY.productId,
+          delta: -S16_DEDUCT_UNITS,
+          logType: "SALE",
+          locationId: S16_KEY.locationId,
+          orderRecordId: null,
+        },
+      ]);
+
+      await resetAndProveClean(opening, null);
+    },
+  );
+
+  test("16-ii count first: a DIFFERING count held at its own COUNT row, then a deduct-simple — both commit and the deduct reads the count's record", async () => {
+    const opening = await startScenario16();
+    const label = "scenario 16-ii count-first";
+
+    const race = await raceHeldFirst(
+      label,
+      () => countAt(S16_KEY, S16_COUNTED, S16_OPENING_VERSION),
+      plainDeduct,
+    );
+    const [counter, deducted] = race.answers;
+    console.log(
+      `[${label}] count asleep in its ledger hold: ${race.firstAsleep}; ` +
+        `the deduct's lock waits: ${race.waits.map(describeWait).join(" | ") || "(none observed)"}; ` +
+        `count -> ${counter.status}, deduct -> ${deducted.status}`,
+    );
+
+    // The count held the stock row inside its own transaction (asleep at its
+    // COUNT row's INSERT) before the deduct was launched at it.
+    expect(race.firstAsleep).toBe(true);
+    // BOTH COMMIT, no fresh deadlock of any shape (two covered writers).
+    assertCoveredRaceEnvelope(label, race.answers, race.deadlock);
+    expect([counter.status, deducted.status]).toEqual([200, 200]);
+    // The deduct queued on the stock row the count held.
+    expect(Array.from(new Set(race.waits.map((wait) => wait.objectName)))).toEqual([
+      "product_locations",
+    ]);
+
+    // The count's 200: the record it measured, the signed difference, the bump.
+    expect(counter.body).toMatchObject({
+      success: true,
+      changed: true,
+      countedQuantity: S16_COUNTED,
+      previousQuantity: S16_OPENING,
+      delta: S16_COUNTED - S16_OPENING,
+      newVersion: S16_OPENING_VERSION + 1,
+    });
+    const countBatch = String(counter.body.batchId);
+    const deductBatch = String(deducted.body.batchId);
+
+    // ONE COUNT/COUNT row under the count's batch, and its ONE event.
+    expect(await ledgerRowsForBatch(countBatch)).toEqual([
+      {
+        productId: S16_KEY.productId,
+        delta: S16_COUNTED - S16_OPENING,
+        logType: "COUNT",
+        locationId: S16_KEY.locationId,
+        orderRecordId: null,
+      },
+    ]);
+    expect(await countRowsFor(S16_KEY.productId)).toEqual([
+      { delta: S16_COUNTED - S16_OPENING, reasonCode: "COUNT" },
+    ]);
+    expect(await auditRowsForBatch(countBatch)).toEqual([
+      {
+        actionType: "INVENTORY_ADJUSTMENT",
+        entityType: "INVENTORY",
+        entityId: String(S16_KEY.productId),
+      },
+    ]);
+    expect(await eventDetailsForBatch(countBatch)).toEqual({
+      productName: "Gate Product Approved",
+      intent: "count",
+      countedQuantity: S16_COUNTED,
+      previousQuantity: S16_OPENING,
+      delta: S16_COUNTED - S16_OPENING,
+      locationId: S16_KEY.locationId,
+    });
+    expect(await attemptCountForBatch(countBatch)).toBe(0);
+
+    // WHO WON, from the ledger: the count committed first.
+    expect(await firstLedgerIdOf(countBatch)).toBeLessThan(await firstLedgerIdOf(deductBatch));
+
+    // THE STOCK ORACLE, EXACT: the count SET the record, the deduct took its
+    // units off what the count left — never off the stale opening number.
+    expect(await locationRow(S16_KEY)).toMatchObject({
+      quantity: S16_COUNTED - S16_DEDUCT_UNITS,
+      version: S16_OPENING_VERSION + 2,
+    });
+
+    await resetAndProveClean(opening, countBatch);
+  });
+
+  test("16-iii a NEVER-STOCKED key: the count's prelock materialises { 0, 0 }, version 0 passes, and the count books its whole number", async () => {
+    await dropHoldTrigger();
+    await resetAll();
+    const opening = await countSnapshot();
+    await withRaw((conn) =>
+      conn.query("DELETE FROM product_locations WHERE productId = ? AND locationId = ?", [
+        NEVER_STOCKED_KEY.productId,
+        NEVER_STOCKED_KEY.locationId,
+      ]),
+    );
+    expect(await locationRow(NEVER_STOCKED_KEY)).toBeNull();
+
+    const answer = await countAt(NEVER_STOCKED_KEY, 3, 0);
+
+    expect(answer.status).toBe(200);
+    expect(answer.body).toMatchObject({
+      success: true,
+      changed: true,
+      countedQuantity: 3,
+      previousQuantity: 0,
+      delta: 3,
+      newVersion: 1,
+    });
+    const batchId = String(answer.body.batchId);
+    expect(await ledgerRowsForBatch(batchId)).toEqual([
+      {
+        productId: NEVER_STOCKED_KEY.productId,
+        delta: 3,
+        logType: "COUNT",
+        locationId: NEVER_STOCKED_KEY.locationId,
+        orderRecordId: null,
+      },
+    ]);
+    expect(await locationRow(NEVER_STOCKED_KEY)).toMatchObject({ quantity: 3, version: 1 });
+
+    // The reset rebuilds the scoped row from the seed snapshot and takes the
+    // count's row and event back.
+    await resetAll();
+    expect(await countSnapshot()).toEqual(opening);
+    expect(await auditRowsForBatch(batchId)).toEqual([]);
+    expect(await locationRow(NEVER_STOCKED_KEY)).not.toBeNull();
+  });
+});

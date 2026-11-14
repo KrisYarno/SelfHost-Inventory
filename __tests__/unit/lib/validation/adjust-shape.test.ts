@@ -300,6 +300,24 @@ describe('BEFORE the table: zod answers first', () => {
     expect(AdjustWithIntentSchema.safeParse({ ...COUNT, countedQuantity: -1 }).success).toBe(false);
     expect(AdjustWithIntentSchema.safeParse({ ...COUNT, countedQuantity: 1.5 }).success).toBe(false);
   });
+
+  // P2-B3-2 (pack C2-2): an API-sent `3e9` would otherwise reach the Int column
+  // as a bare 500; the dialog caps the field at six digits. Zod's own message,
+  // at the field's path, before the table runs.
+  it('countedQuantity is bounded at 999,999 — the largest six-digit count passes, a million is refused', () => {
+    expect(shapeOf({ ...COUNT, countedQuantity: 999_999 })).toMatchObject({
+      kind: 'count',
+      countedQuantity: 999_999,
+    });
+    expect(refusalOf({ ...COUNT, countedQuantity: 1_000_000 })).toEqual({
+      path: ['countedQuantity'],
+      message: 'Number must be less than or equal to 999999',
+    });
+    expect(refusalOf({ ...COUNT, countedQuantity: 3e9 })).toEqual({
+      path: ['countedQuantity'],
+      message: 'Number must be less than or equal to 999999',
+    });
+  });
 });
 
 describe('one body, several broken cells: the leftmost column\'s sentence wins', () => {

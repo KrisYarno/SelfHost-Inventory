@@ -27,6 +27,8 @@ import {
   REORDER_DEMAND_DEFINITION,
   OUTBOUND_USAGE_DEFINITION,
   SHRINKAGE_CLASS_REASONS,
+  SHRINKAGE_CLASSIFICATION_DEFINITION,
+  COUNT_REGIME_NOTE,
 } from "@/lib/reports/metrics-contract";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
@@ -195,5 +197,65 @@ describe("FD2-5 REORDER_DEMAND_WHERE carries its collation + not-a-classifier an
 
   it("keeps the export the contract pack references", () => {
     expect(src).toContain("export const REORDER_DEMAND_WHERE");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P2-B3-2 (pack § P2-B3-2 C2-3) — the COUNT regime disclosures.
+//
+// The Adjust stock dialog's Count books a spot count as a COUNT ledger row,
+// which get_shrinkage does not read (its domain is ADJUSTMENT/CORRECTION) and
+// which the movement partition buckets as countOut / countIn. Before it, the
+// same event was a reason-less removal — so get_shrinkage's
+// unclassifiedOutboundUnits steps DOWN and the movement/mix buckets shift from
+// that month. Both strings are model-facing definitions; they are pinned as
+// LITERALS, byte for byte, so a one-word drift fails here and not in a chat.
+// ---------------------------------------------------------------------------
+
+describe("P2-B3-2 — the COUNT regime disclosures (pack C2-3)", () => {
+  const SHRINKAGE_COUNT_SENTENCE =
+    "From 2026-11 the Adjust stock dialog's Count records a spot count as a ledger row of " +
+    "logType COUNT, which this tool does not read: a count below the record no longer " +
+    "appears in unclassifiedOutboundUnits (where the same event landed when operators " +
+    "recorded it as a reason-less removal), and it is not in byReason.COUNT either — that " +
+    "bucket holds ADJUSTMENT/CORRECTION rows coded COUNT (from the retired reason select, " +
+    "before 2026-08, or an API caller), which stay classified shrinkage. The step down in " +
+    "unclassifiedOutboundUnits from that month is reclassification, not fewer losses, and " +
+    "totals must not be compared across it; get_movement_series shows these counts as " +
+    "countOut/countIn. The journal still books reason-less ADJUSTMENT rows (unclassified, " +
+    "never loss).";
+
+  const REGIME_NOTE =
+    "From 2026-11 single-product counts from the Adjust stock dialog book countOut (a count " +
+    "below the record) and countIn (above it); before that month operators recorded the " +
+    "same events as reason-less adjustments, which sat in adjustmentUnclassified / " +
+    "adjustmentIn — the shift is reclassification, and those buckets must not be compared " +
+    "across it.";
+
+  it("SHRINKAGE_CLASSIFICATION_DEFINITION carries the count sentence, AFTER the measurement-regime clause", () => {
+    expect(SHRINKAGE_CLASSIFICATION_DEFINITION).toContain(SHRINKAGE_COUNT_SENTENCE);
+    const regime = SHRINKAGE_CLASSIFICATION_DEFINITION.indexOf("MEASUREMENT-REGIME CHANGE");
+    expect(regime).toBeGreaterThanOrEqual(0);
+    expect(SHRINKAGE_CLASSIFICATION_DEFINITION.indexOf(SHRINKAGE_COUNT_SENTENCE)).toBeGreaterThan(
+      regime,
+    );
+    // Appended, not substituted: the clause it follows is still whole.
+    expect(SHRINKAGE_CLASSIFICATION_DEFINITION).toContain(
+      "the step is reclassification, not a rise in breakage, and totals must not be compared " +
+        "across it. " +
+        SHRINKAGE_COUNT_SENTENCE,
+    );
+  });
+
+  it("COUNT_REGIME_NOTE is the movement/mix tools' note, exactly", () => {
+    expect(COUNT_REGIME_NOTE).toBe(REGIME_NOTE);
+  });
+
+  it("neither names an internal wave or design reference (model-facing, A2 pack C10)", () => {
+    for (const text of [SHRINKAGE_COUNT_SENTENCE, COUNT_REGIME_NOTE]) {
+      expect(text).not.toMatch(/\b(pre-|post-)?lane\b/i);
+      expect(text).not.toMatch(/\(D\d+\)/);
+      expect(text).not.toMatch(/\bB3\b|P2-|wave/i);
+    }
   });
 });

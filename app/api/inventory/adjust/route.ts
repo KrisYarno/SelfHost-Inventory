@@ -21,6 +21,7 @@ import { AppError } from "@/lib/error-handling";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 import { recordAttributionAttempt } from "@/lib/attribution/attempts";
 import { classifyAdjust, type AdjustLocals } from "@/lib/attribution/classify";
+import { countResponse } from "@/app/api/inventory/adjust/count";
 
 export const dynamic = "force-dynamic";
 
@@ -59,10 +60,13 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // its frozen sentence, before anything is read or written. From here on the
   // route reads `shape`, never `body`.
   const shape = parseAdjustShape(body);
-  // `count` and `correction` PARSE through the full table and stop here: this
-  // route does not implement them yet. A valid request of either kind gets one
-  // honest 400 rather than a quiet ADJUSTMENT row.
-  if (shape.kind !== "delta") refuse(["intent"], "this intent is not available yet");
+  // `correction` PARSES through the full table and stops here: this route does
+  // not implement it yet. A valid correction gets one honest 400 rather than a
+  // quiet ADJUSTMENT row.
+  if (shape.kind === "correction") refuse(["intent"], "this intent is not available yet");
+  // P2-B3-2 (pack C2-2): a count has its own arm — compared against the
+  // record under the prelock, booked as COUNT or confirmed with no row.
+  if (shape.kind === "count") return countResponse(shape, user, rateLimitHeaders);
 
   // CR-3: the auto-add flag is PARSED now, not read off the raw body. It carries
   // two consequences an approved caller must not be able to assert freely — the

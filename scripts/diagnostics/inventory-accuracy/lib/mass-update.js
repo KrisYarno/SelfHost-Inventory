@@ -25,8 +25,11 @@ const toSet = (v) => (v instanceof Set ? v : new Set(v || []));
  * This branch is KEPT: it is the only evidence historical batches carry.
  *
  * THE FORWARD-COMPAT BRANCH (Phase 0b-1): from that deploy on, mass-update
- * stamps `logType: COUNT` on every ledger row it writes, and no other writer in
- * the repo writes COUNT. A batch carrying COUNT rows is therefore a count
+ * stamps `logType: COUNT` on every ledger row it writes. Until P2-B3-2 it was the
+ * only writer of COUNT; from then on the Adjust stock dialog's single-product
+ * count writes COUNT too (one row, filed with an INVENTORY_ADJUSTMENT event in
+ * the same transaction) — `isDialogCountBatch` below tells that batch apart, and
+ * this function is unchanged. A batch carrying COUNT rows is therefore a count
  * operation on the LEDGER's own evidence — which is strictly stronger than the
  * audit shape, because the audit summary is best-effort (recordIngestion, P-B1:
  * a failed summary must not fail the operation), so a real mass update can exist
@@ -67,4 +70,30 @@ function classifyMassUpdateBatch(batch) {
   };
 }
 
-module.exports = { MASS_UPDATE_LABEL, classifyMassUpdateBatch };
+/**
+ * Is this batch the Adjust stock dialog's single-product COUNT (P2-B3-2), not a
+ * mass update?
+ *
+ * The dialog books a count that differs from the record as ONE `COUNT` ledger
+ * row and files its `INVENTORY_ADJUSTMENT` event IN THE SAME TRANSACTION, so the
+ * event is always there; mass-update's summary is an `INVENTORY_BULK_UPDATE`
+ * filed best-effort afterwards. The d2 query projects `actionType` but no
+ * `details` value, so the rule reads the action types only: COUNT rows, the
+ * dialog's event, and no bulk summary. A COUNT batch with NO audit row at all
+ * stays a mass update — the best-effort-summary case `classifyMassUpdateBatch`
+ * exists to catch.
+ *
+ * @param {{auditActionTypes?: Set<string>|string[], logTypes?: Set<string>|string[]}} batch
+ * @returns {boolean}
+ */
+function isDialogCountBatch(batch) {
+  const auditActionTypes = toSet(batch.auditActionTypes);
+  const logTypes = toSet(batch.logTypes);
+  return (
+    logTypes.has("COUNT") &&
+    auditActionTypes.has("INVENTORY_ADJUSTMENT") &&
+    !auditActionTypes.has("INVENTORY_BULK_UPDATE")
+  );
+}
+
+module.exports = { MASS_UPDATE_LABEL, classifyMassUpdateBatch, isDialogCountBatch };

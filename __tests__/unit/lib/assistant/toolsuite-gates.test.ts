@@ -134,6 +134,10 @@ import { TOOL_PRESENTATION } from "@/lib/assistant/tool-presentation";
 import { MATCH_DEFINITIONS } from "@/lib/reconciliation/match-keys";
 import { resolveAssistantProduct } from "@/lib/assistant/resolve-product";
 import { STATIC_WRITE_ALLOWLIST } from "./static-write-allowlist";
+import {
+  COUNT_REGIME_NOTE,
+  SHRINKAGE_CLASSIFICATION_DEFINITION,
+} from "@/lib/reports/metrics-contract";
 import { ORDER_PIPELINE_SELECT, ORDER_ITEM_UNITS_SELECT } from "@/lib/reports/order-pipeline";
 // Reconciliation lane (pack C5.2): the lane's own frozen order projection + its
 // forbidden-name set. The gate keeps its OWN literals below and pins the relationship
@@ -490,6 +494,37 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(ops).toMatch(/contradiction/i);
     expect(mv).toContain("get_operations");
     expect(mv).toMatch(/contradiction/i);
+  });
+
+  // P2-B3-2 (pack C2-3): the Adjust stock dialog's Count moves a spot count out of
+  // the reason-less adjustment buckets and into countOut / countIn. The two tools that
+  // PARTITION outbound movement carry the regime note right after their bucket names,
+  // and get_shrinkage — which does not read COUNT rows at all — carries the step-down
+  // disclosure in its definition. (The literals are metrics-contract.test.ts's.)
+  it("get_operations and get_movement_series carry COUNT_REGIME_NOTE after their bucket list", () => {
+    const ops = desc("get_operations");
+    const mv = desc("get_movement_series");
+    expect(COUNT_REGIME_NOTE.length).toBeGreaterThan(0);
+    expect(ops).toContain(
+      `relay it when the sale bucket is a small share. ${COUNT_REGIME_NOTE} scope echoes the`,
+    );
+    expect(mv).toContain(
+      `never a real gain or loss). ${COUNT_REGIME_NOTE} net === SUM of every bucket.`,
+    );
+    // Exactly once each — a second interpolation would be a drafting slip.
+    expect(ops.split(COUNT_REGIME_NOTE)).toHaveLength(2);
+    expect(mv.split(COUNT_REGIME_NOTE)).toHaveLength(2);
+  });
+
+  it("get_shrinkage carries the COUNT step-down disclosure (its read never sees COUNT rows)", () => {
+    const d = desc("get_shrinkage");
+    expect(d).toContain(SHRINKAGE_CLASSIFICATION_DEFINITION);
+    expect(d).toContain(
+      "From 2026-11 the Adjust stock dialog's Count records a spot count as a ledger row of " +
+        "logType COUNT, which this tool does not read",
+    );
+    expect(d).toContain("reclassification, not fewer losses");
+    expect(d).toContain("get_movement_series shows these counts as countOut/countIn.");
   });
 
   it("get_movement_series names the receipts:true detail affordance (W2-RCPT)", () => {
