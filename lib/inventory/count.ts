@@ -8,10 +8,13 @@
  * logType COUNT (reasonCode COUNT) — or, when the count matches the record,
  * nothing is booked at all and the caller files an audit-only "confirmed count".
  *
- * THE VERSION IS THE GUARD. A count is an absolute statement about the shelf,
- * so a count taken before a sale must never overwrite the stock that sale left:
- * a row whose version moved since the operator's read answers the ONE 409
- * envelope (`OptimisticLockError` → `apiHandler`), and nothing is written.
+ * THE VERSION IS THE GUARD — from the dialog's read onward. A count is an
+ * absolute statement about the shelf, so a sale recorded after the operator's
+ * screen read the record must never be overwritten by it: a row whose version
+ * moved since that read answers the ONE 409 envelope (`OptimisticLockError` →
+ * `apiHandler`), and nothing is written. What the token cannot see is a sale
+ * recorded between the physical count and the read: the version the count is
+ * checked against was read after it, so that sale is not caught.
  *
  * The core takes the ROUTE's transaction and never opens one; it never records
  * the change itself either — `onRecord` is the route's (it owns the product and

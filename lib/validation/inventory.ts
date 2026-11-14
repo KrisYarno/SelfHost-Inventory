@@ -17,10 +17,11 @@ const positiveInt = z.number().int().positive();
  * intents `count` and `correction` — lib/inventory/intent.ts
  * `ADJUST_REQUEST_INTENTS`, so the wire cannot drift from that module. Its one
  * consumer is AdjustWithIntentSchema below; the workbench's schema reads
- * WORKBENCH_INTENTS. Accepting `count` / `correction` HERE means only that they
- * parse: `parseAdjustShape` runs their rows of the truth table and the route
- * then refuses them as not available yet. `recount` / `receiving` are NOT here
- * and never were — see that module.
+ * WORKBENCH_INTENTS. Accepting `count` / `correction` HERE means that they
+ * parse: `parseAdjustShape` runs their rows of the truth table; the route then
+ * dispatches `count` to its count arm (app/api/inventory/adjust/count.ts) and
+ * still refuses `correction` as not available yet. `recount` / `receiving` are
+ * NOT here and never were — see that module.
  */
 export const AdjustRequestIntentSchema = z.enum(ADJUST_REQUEST_INTENTS);
 

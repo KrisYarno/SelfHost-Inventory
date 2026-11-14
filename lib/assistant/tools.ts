@@ -79,6 +79,7 @@ import {
 } from "@/lib/assistant/sales-coverage";
 import {
   COUNT_REGIME_NOTE,
+  COUNT_REGIME_OUTBOUND_NOTE,
   SHRINKAGE_CLASSIFICATION_DEFINITION,
   type WindowCoverage,
 } from "@/lib/reports/metrics-contract";
@@ -2460,7 +2461,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `correctionUnclassified / countOut / stockInReversal (absolute units summing to ` +
       `unitsOut30, null exactly when unitsOut30 is null) — read it before calling any ` +
       `of it sales, and relay it when the sale bucket is a small share. ` +
-      `${COUNT_REGIME_NOTE} scope echoes the ` +
+      `${COUNT_REGIME_OUTBOUND_NOTE} scope echoes the ` +
       `effective { productId, windowDays } this row set was computed over. ` +
       `Outbound/velocity here count ALL negative non-transfer deltas over a ROLLING ` +
       `window ending now; get_movement_series instead partitions the ledger into ` +
@@ -2971,7 +2972,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `plus demandUnits (the raw numerator behind avgDailyDemand) and demandMix, its ` +
       `six-bucket composition (sale / classifiedLoss / adjustmentUnclassified / ` +
       `correctionUnclassified / countOut / stockInReversal, absolute units summing to ` +
-      `demandUnits). A demand that is entirely adjustmentUnclassified is depletion you ` +
+      `demandUnits). ${COUNT_REGIME_OUTBOUND_NOTE} ` +
+      `A demand that is entirely adjustmentUnclassified is depletion you ` +
       `must replace, NOT units sold — relay the mix rather than the bare rate. ` +
       `demandMix excludes CORRECTION-reasoned rows by predicate while get_operations' ` +
       `outboundMix30 includes them, and mixes use a ROLLING window ending now with ` +

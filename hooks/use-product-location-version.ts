@@ -22,9 +22,14 @@ import type { ProductLocationQuantity } from "@/types/inventory";
 //   `refetchOnReconnect: false` (the app default is ON — the load-bearing one):
 //   a re-read the operator did not ask for would let a count taken before a
 //   sale be checked against the version after it, and overwrite the sale.
-// - The ONLY re-reads are an explicit `refetch()`: the dialog's `Try again`
-//   and its 409 path. "In flight" is `fetchStatus === "fetching"` (the first
-//   read AND a refetch), never `status === "pending"` alone.
+// - The ONLY re-reads asked for are an explicit `refetch()`: the dialog's
+//   `Try again` and its 409 path. "In flight" is `fetchStatus === "fetching"`
+//   (the first read AND a refetch), never `status === "pending"` alone.
+// - ONE re-read nobody asks for: re-entering Count after a FAILED first read
+//   reads again, because a query with no data is always stale (`staleTime`
+//   cannot keep fresh an answer that never came). Harmless: the dialog's count
+//   field is disabled until a read is known, so nothing can have been typed
+//   against the failed one.
 // - NOT a root of `invalidateInventoryCaches`: a per-open read gains nothing
 //   from it, and a refetch path is exactly what the token must not have.
 //

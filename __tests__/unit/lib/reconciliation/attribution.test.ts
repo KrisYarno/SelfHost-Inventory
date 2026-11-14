@@ -979,6 +979,25 @@ describe('coverage', () => {
     expect(typeof report.definitions.moreCount).toBe('string');
     expect(typeof report.definitions.derived).toBe('string');
   });
+
+  // The spot count (FR1, row 128 (6)): a count from the Adjust stock dialog is
+  // a COUNT batch — outside the population, so a non-attributable batch — where
+  // the same event used to be a reason-less removal INSIDE it. The definition
+  // says so, in model-facing words (no wave ids); the read path is unchanged.
+  it('nonAttributable ends with the count-regime sentence, the definition before it unchanged', async () => {
+    const report = await getAttributionReport(INPUT, ADMIN);
+    const regime =
+      'From 2026-11 spot counts from the Adjust stock dialog are count sessions here; before, operators ' +
+      'recorded them as reason-less removals inside the population, so the attributable batches and ' +
+      'their unattributed share step down at that month by reclassification, not by better attribution.';
+    expect(report.definitions.nonAttributable).toBe(
+      'batches with at least one ledger row in the window and no population row at all: transfer legs, ' +
+        'count sessions, correction reversals and positive-only adjusts. ' +
+        regime,
+    );
+    expect(report.definitions.nonAttributable.endsWith(` ${regime}`)).toBe(true);
+    expect(report.definitions.nonAttributable).not.toMatch(/\bB3\b|P2-|wave|\bFR\d|\bC2-\d|\brow \d/i);
+  });
 });
 
 // ---------------------------------------------------------------------------

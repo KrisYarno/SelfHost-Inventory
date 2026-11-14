@@ -1,8 +1,11 @@
 //
 // Phase 0a / D2 — inbound review + overwrite-event dates.
 //
-// The counts-too-high symptom implicates INBOUND as much as outbound: all
-// receiving is generic ADJUSTMENT today (STOCK_IN/COUNT are never written). This
+// The counts-too-high symptom implicates INBOUND as much as outbound. When this
+// check was written all receiving was generic ADJUSTMENT and nothing wrote
+// STOCK_IN or COUNT; today Stock In and supply-order receiving write STOCK_IN,
+// and COUNT is written by the admin mass update and by the Adjust stock
+// dialog's Count (told apart below by `isDialogCountBatch`). This
 // check ranks the largest positive-adjustment batches in a trailing window,
 // names their actor/location/batch, and labels the mass-update operations for
 // what they actually are — overwrite/count-event DATES, touched rows only.

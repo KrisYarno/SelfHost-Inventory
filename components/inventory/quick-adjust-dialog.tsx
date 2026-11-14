@@ -63,7 +63,9 @@ interface QuickAdjustDialogProps {
 // screen is that read's, and only while no read is in flight. The count lives
 // in its OWN state, never the units field's: a number typed as "units to
 // remove" is never a count nobody performed. Switching modes hides fields and
-// clears nothing.
+// clears nothing. FR1 (row 128): the count field opens only on a KNOWN record
+// (never while reading, offline or failed), and a read paused offline is
+// shown as offline, never as the record it last held.
 
 /** The largest quantity the field can hold (`maxLength={6}`). */
 const MAX_QUANTITY = 999_999;
@@ -232,19 +234,29 @@ export function QuickAdjustDialog({
   const n = counted === "" ? null : Number(counted);
   // The record, as the version read says it. In flight is `fetchStatus ===
   // "fetching"` — the first read AND a refetch, whose old answer stays in
-  // `data` and is NOT shown. A failed refetch keeps its old `data` too, so
-  // "known" needs `status === "success"`, never `data` alone.
-  const countRead: "no-location" | "reading" | "failed" | "known" =
+  // `data` and is NOT shown. A read the device is too offline to start or
+  // finish is `fetchStatus === "paused"` (FR1, row 128 (1)): its old answer is
+  // not shown either — after a 409 it is the record the server just refuted —
+  // and the read resumes by itself on reconnect (a paused fetch continues
+  // whatever `refetchOnReconnect` says). A failed refetch keeps its old `data`
+  // too, so "known" needs `status === "success"`, never `data` alone.
+  const countRead: "no-location" | "reading" | "offline" | "failed" | "known" =
     selectedLocationId === null
       ? "no-location"
       : versionQuery.fetchStatus === "fetching"
         ? "reading"
-        : versionQuery.status === "error" || versionQuery.data === null
-          ? "failed"
-          : versionQuery.status === "success"
-            ? "known"
-            : "reading";
+        : versionQuery.fetchStatus === "paused"
+          ? "offline"
+          : versionQuery.status === "error" || versionQuery.data === null
+            ? "failed"
+            : versionQuery.status === "success"
+              ? "known"
+              : "reading";
   const record = countRead === "known" ? (versionQuery.data ?? null) : null;
+  // FR1, row 128 (2): the field and its steppers take a count only once the
+  // record is KNOWN, so no count is ever typed before the version it will be
+  // checked against is on screen.
+  const countFieldDisabled = countRead !== "known";
   // In EVERY count string: never "at null" (B3-2-G1-5 / OC1-7).
   const at = location !== null ? ` at ${location}` : "";
 
@@ -270,19 +282,23 @@ export function QuickAdjustDialog({
         ? `The record says ${record.quantity} ${unitWord(record.quantity)} — saving sets it to ${n} (${n - record.quantity > 0 ? "+" : ""}${n - record.quantity}).`
         : `Matches the record — saving confirms ${n} ${unitWord(n)}.`;
   // The FIRST that applies. The 409 notice ranks ABOVE "nothing entered",
-  // because the 409 empties the field (B3-2-G1-1 / OC1-1).
+  // because the 409 empties the field (B3-2-G1-1 / OC1-1), and BELOW the read
+  // states, so a notice set while the re-read failed shows once it recovers.
+  // Offline is a wait, not an error: MUTED, like the read in flight.
   const countMessage: { text: string; tone: "destructive" | "muted" | "warning" } | null =
     selectedLocationId === null
       ? { text: "Close this and choose a location at the top of the page.", tone: "destructive" }
       : countRead === "reading"
         ? { text: "Reading stock…", tone: "muted" }
-        : countRead === "failed"
-          ? { text: "Couldn't read current stock — tap Try again.", tone: "destructive" }
-          : countNotice !== null
-            ? { text: countNotice, tone: "warning" }
-            : n === null
-              ? { text: "Enter the number you counted.", tone: "destructive" }
-              : null;
+        : countRead === "offline"
+          ? { text: "You're offline — stock will be read when you reconnect.", tone: "muted" }
+          : countRead === "failed"
+            ? { text: "Couldn't read current stock — tap Try again.", tone: "destructive" }
+            : countNotice !== null
+              ? { text: countNotice, tone: "warning" }
+              : n === null
+                ? { text: "Enter the number you counted.", tone: "destructive" }
+                : null;
   // Save is dead by the CONDITIONS, whichever message is showing.
   const countBlocked = selectedLocationId === null || record === null || n === null;
 
@@ -516,8 +532,16 @@ export function QuickAdjustDialog({
         const next = await versionQuery.refetch();
         setCountNotice(
           next.status === "success" && next.data !== null
-            ? `Stock changed while you were counting — you entered ${n}; the record now says ${next.data.quantity}. Count again, then save.`
-            : null,
+            ? next.data.quantity === n
+              ? // FR1, row 128 (3): the record already IS the count — most
+                // likely this count's own earlier tap committed and its reply
+                // was lost, so this 409 is the token refusing a second write.
+                `The record already says ${n} — your count may already have been saved. Check the product's history, or count again.`
+              : `Stock changed while you were counting — you entered ${n}; the record now says ${next.data.quantity}. Count again, then save.`
+            : // FR1, row 128 (4): the re-read failed. The notice is still set —
+              // it ranks below the read states, so it shows once the read
+              // recovers, and the operator's number is never dropped unexplained.
+              `Stock changed while you were counting — you entered ${n}. Count again, then save.`,
         );
         return;
       }
@@ -564,7 +588,11 @@ export function QuickAdjustDialog({
               <span className="text-muted-foreground">No location selected.</span>
             ) : isCount ? (
               // Count: the version read's number, only when nothing is fetching.
-              countRead === "failed" ? (
+              countRead === "offline" ? (
+                <span className="text-muted-foreground">
+                  You&apos;re offline — stock will be read when you reconnect.
+                </span>
+              ) : countRead === "failed" ? (
                 <>
                   <span className="text-destructive">Couldn&apos;t read current stock.</span>
                   <Button
@@ -648,7 +676,7 @@ export function QuickAdjustDialog({
                       className="h-11 w-11 shrink-0 rounded-md border-border"
                       aria-label="Decrease count"
                       onClick={handleCountDecrement}
-                      disabled={n === null || n <= 0}
+                      disabled={countFieldDisabled || n === null || n <= 0}
                     >
                       <Minus className="h-4 w-4" />
                     </Button>
@@ -661,6 +689,7 @@ export function QuickAdjustDialog({
                       value={counted}
                       onChange={(e) => handleCountInput(e.target.value)}
                       onBlur={() => setCountRefused(false)}
+                      disabled={countFieldDisabled}
                       className="h-11 flex-1 text-center text-lg font-semibold tabular-nums"
                     />
                     <Button
@@ -670,6 +699,7 @@ export function QuickAdjustDialog({
                       className="h-11 w-11 shrink-0 rounded-md border-border"
                       aria-label="Increase count"
                       onClick={handleCountIncrement}
+                      disabled={countFieldDisabled}
                     >
                       <Plus className="h-4 w-4" />
                     </Button>

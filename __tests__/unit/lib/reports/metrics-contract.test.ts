@@ -29,6 +29,7 @@ import {
   SHRINKAGE_CLASS_REASONS,
   SHRINKAGE_CLASSIFICATION_DEFINITION,
   COUNT_REGIME_NOTE,
+  COUNT_REGIME_OUTBOUND_NOTE,
 } from "@/lib/reports/metrics-contract";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
@@ -210,6 +211,12 @@ describe("FD2-5 REORDER_DEMAND_WHERE carries its collation + not-a-classifier an
 // unclassifiedOutboundUnits steps DOWN and the movement/mix buckets shift from
 // that month. Both strings are model-facing definitions; they are pinned as
 // LITERALS, byte for byte, so a one-word drift fails here and not in a chat.
+//
+// FR1 (row 128 (6)): the movement note names BOTH earlier regimes (reason-less
+// adjustments, and before 2026-08 adjustments coded COUNT) and the mass update
+// that already booked countOut; the OUTBOUND-only mixes (get_operations'
+// outboundMix30, reorder_report's demandMix) get their own note, which names
+// only the shortfall side — those mixes have no countIn.
 // ---------------------------------------------------------------------------
 
 describe("P2-B3-2 — the COUNT regime disclosures (pack C2-3)", () => {
@@ -227,10 +234,18 @@ describe("P2-B3-2 — the COUNT regime disclosures (pack C2-3)", () => {
 
   const REGIME_NOTE =
     "From 2026-11 single-product counts from the Adjust stock dialog book countOut (a count " +
-    "below the record) and countIn (above it); before that month operators recorded the " +
-    "same events as reason-less adjustments, which sat in adjustmentUnclassified / " +
-    "adjustmentIn — the shift is reclassification, and those buckets must not be compared " +
-    "across it.";
+    "below the record) and countIn (above it); bulk counts from the admin mass update were " +
+    "already there. Before that month operators recorded the same single-product events as " +
+    "reason-less adjustments (adjustmentUnclassified / adjustmentIn) or, before 2026-08, as " +
+    "adjustments coded COUNT (classifiedLoss) — the shift is reclassification, and those " +
+    "buckets must not be compared across it.";
+
+  const REGIME_OUTBOUND_NOTE =
+    "From 2026-11 single-product counts from the Adjust stock dialog that find fewer units " +
+    "than the record book countOut; bulk counts from the admin mass update were already " +
+    "there. Before that month operators recorded the same shortfalls as reason-less removals " +
+    "(adjustmentUnclassified) or, before 2026-08, as removals coded COUNT (classifiedLoss) — " +
+    "the shift is reclassification, and those buckets must not be compared across it.";
 
   it("SHRINKAGE_CLASSIFICATION_DEFINITION carries the count sentence, AFTER the measurement-regime clause", () => {
     expect(SHRINKAGE_CLASSIFICATION_DEFINITION).toContain(SHRINKAGE_COUNT_SENTENCE);
@@ -247,15 +262,23 @@ describe("P2-B3-2 — the COUNT regime disclosures (pack C2-3)", () => {
     );
   });
 
-  it("COUNT_REGIME_NOTE is the movement/mix tools' note, exactly", () => {
+  it("COUNT_REGIME_NOTE is the movement tool's note, exactly", () => {
     expect(COUNT_REGIME_NOTE).toBe(REGIME_NOTE);
   });
 
-  it("neither names an internal wave or design reference (model-facing, A2 pack C10)", () => {
-    for (const text of [SHRINKAGE_COUNT_SENTENCE, COUNT_REGIME_NOTE]) {
+  it("COUNT_REGIME_OUTBOUND_NOTE is the outbound-only mixes' note, exactly (row 128 (6))", () => {
+    expect(COUNT_REGIME_OUTBOUND_NOTE).toBe(REGIME_OUTBOUND_NOTE);
+    // The outbound mixes have no inbound bucket to name.
+    expect(COUNT_REGIME_OUTBOUND_NOTE).not.toContain("countIn");
+    expect(COUNT_REGIME_OUTBOUND_NOTE).not.toContain("adjustmentIn");
+  });
+
+  it("none names an internal wave or design reference (model-facing, A2 pack C10)", () => {
+    for (const text of [SHRINKAGE_COUNT_SENTENCE, COUNT_REGIME_NOTE, COUNT_REGIME_OUTBOUND_NOTE]) {
       expect(text).not.toMatch(/\b(pre-|post-)?lane\b/i);
       expect(text).not.toMatch(/\(D\d+\)/);
       expect(text).not.toMatch(/\bB3\b|P2-|wave/i);
+      expect(text).not.toMatch(/\bFR\d|\bC2-\d|\brow \d/i);
     }
   });
 });

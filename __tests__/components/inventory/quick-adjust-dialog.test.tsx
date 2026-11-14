@@ -22,11 +22,12 @@
  *
  * § P2-B3-2 (C2-6) — the COUNT, the switch's third button: last section below.
  * The version read (`/locations`) answers through its own branch of the fetch
- * mock, ahead of the product branch.
+ * mock, ahead of the product branch. Its FR1 pins (row 128: the offline read,
+ * the field gate, the two new 409 notices) close that section.
  */
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
 import * as React from "react";
 
 jest.mock("@/hooks/use-csrf", () => ({
@@ -1712,6 +1713,26 @@ describe("focus", () => {
 
 const countField = () => screen.getByLabelText(/^How many are on the shelf/);
 const tapCount = (user: User) => user.click(screen.getByRole("button", { name: "Count" }));
+const countMinus = () => screen.getByRole("button", { name: "Decrease count" });
+const countPlus = () => screen.getByRole("button", { name: "Increase count" });
+const OFFLINE = "You're offline — stock will be read when you reconnect.";
+
+/**
+ * The location context is mocked as a plain object, so a change to it shows
+ * only on the dialog's next render: one keystroke in the Note gives it one.
+ */
+async function rerenderWith(user: User, change: () => void) {
+  change();
+  await user.type(noteField(), "x");
+}
+
+// FR1 (row 128 (1)): a pin that takes the device offline must never leave the
+// next test offline — react-query's onlineManager is a module singleton.
+afterEach(() => {
+  act(() => {
+    onlineManager.setOnline(true);
+  });
+});
 const versionReads = () =>
   fetchMock.mock.calls.filter((c) => /^\/api\/inventory\/product\/\d+\/locations$/.test(String(c[0])));
 const unitsReads = () =>
@@ -1951,6 +1972,8 @@ describe("the count: hide, don't clear", () => {
     await ready(user);
     await tapCount(user);
     expect(countField()).toHaveValue("");
+    // The field takes a count only once the record is known (row 128 (2)).
+    await stockReady();
     await user.type(countField(), "9");
 
     await tapDirection(user, "Remove");
@@ -2032,11 +2055,19 @@ describe("the reads", () => {
     expect(versionReads()).toHaveLength(1);
   });
 
-  it("a window focus and a reconnect re-read nothing under a typed count", async () => {
+  it("a window focus and a reconnect re-read nothing under a typed count — even with the cached answer marked stale", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    await intoCount(user);
+    const client = await intoCount(user);
     await user.type(countField(), "35");
     versionAnswer = { quantity: 38, version: 9 };
+    // FR1 (row 128 (9)): `staleTime: Infinity` alone would keep a fresh answer
+    // from re-reading on focus or reconnect, so the pin would hold with either
+    // option removed. Stale by invalidation (no refetch from the invalidation
+    // itself): only `refetchOnWindowFocus: false` and `refetchOnReconnect: false`
+    // now stand between those events and a re-read.
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["product-location-version"], refetchType: "none" });
+    });
     act(() => {
       window.dispatchEvent(new Event("visibilitychange"));
       window.dispatchEvent(new Event("offline"));
@@ -2077,16 +2108,45 @@ describe("the count's stock line and messages (first that applies)", () => {
     expect(message()).toBe("Close this and choose a location at the top of the page.");
     expect(screen.getByTestId("adjust-message")).toHaveClass("text-destructive");
     expect(summary()).toBe("Count AOD 2mg");
-
-    await user.type(countField(), "3");
-    expect(summary()).toBe("Count 3 units of AOD 2mg");
+    // Row 128 (2): no record can be known with no location, so nothing can be typed.
+    expect(countField()).toBeDisabled();
+    expect(countPlus()).toBeDisabled();
+    expect(countMinus()).toBeDisabled();
     expect(actionButton()).toHaveTextContent(/^Save count$/);
     expect(actionButton()).toBeDisabled();
     expect(dialog().textContent).not.toContain("null");
     expect(versionReads()).toHaveLength(0);
   });
 
-  it("the read in flight: `Reading stock…` in the stock line and a MUTED footer wait; Save dead even with a count; no numbers", async () => {
+  it("a count typed, then the location gone: `Count 3 units of AOD 2mg` — no \"at null\" anywhere, Save dead", async () => {
+    // Since row 128 (2) the field is dead with no location, so a typed count
+    // with none is reached the only way left: typed against a known record,
+    // then the location dropped under it.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await intoCount(user);
+    await user.type(countField(), "3");
+    await rerenderWith(user, () => {
+      mockLocation.selectedLocationId = null;
+    });
+    expect(stockChip()).toHaveTextContent("No location selected.");
+    expect(message()).toBe("Close this and choose a location at the top of the page.");
+    expect(summary()).toBe("Count 3 units of AOD 2mg");
+    expect(actionButton()).toHaveTextContent(/^Save count$/);
+    expect(actionButton()).toBeDisabled();
+    expect(dialog().textContent).not.toContain("null");
+    // Row 128 (2): with no location the field and both steppers are dead, the count kept.
+    expect(countField()).toHaveValue("3");
+    expect(countField()).toBeDisabled();
+    expect(countPlus()).toBeDisabled();
+    expect(countMinus()).toBeDisabled();
+  });
+
+  // REPLACED by row 128 (2) — a decided behaviour change, not a weakened pin.
+  // Row 127's pin here was "a count typed during Reading stock… becomes
+  // savable"; the field is now DISABLED while the read is reading, offline or
+  // failed, and enabled once the record is known, so no count can be typed
+  // before the version it will be checked against is on screen.
+  it("the read in flight: `Reading stock…` in the stock line and a MUTED footer wait; the field and its steppers DISABLED, Save dead, no numbers — then known: the field live", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     renderHost();
     await stockReady();
@@ -2098,10 +2158,14 @@ describe("the count's stock line and messages (first that applies)", () => {
     expect(message()).toBe("Reading stock…");
     expect(screen.getByTestId("adjust-message")).toHaveClass("text-muted-foreground");
     expect(screen.getByTestId("adjust-message")).not.toHaveClass("text-destructive");
+    expect(countField()).toBeDisabled();
+    expect(countPlus()).toBeDisabled();
+    expect(countMinus()).toBeDisabled();
     await user.type(countField(), "35");
+    expect(countField()).toHaveValue("");
     expect(message()).toBe("Reading stock…");
     expect(actionButton()).toBeDisabled();
-    expect(summary()).toBe("Count 35 units of AOD 2mg at Office");
+    expect(summary()).toBe("Count AOD 2mg at Office");
     expect(actionButton()).toHaveTextContent(/^Save count$/);
     expect(screen.queryByTestId("count-preview")).toBeNull();
 
@@ -2109,6 +2173,10 @@ describe("the count's stock line and messages (first that applies)", () => {
       release();
     });
     await stockReady("40 units");
+    expect(countField()).toBeEnabled();
+    expect(countPlus()).toBeEnabled();
+    expect(message()).toBe("Enter the number you counted.");
+    await user.type(countField(), "35");
     expect(message()).toBeNull();
     expect(actionButton()).toBeEnabled();
   });
@@ -2126,7 +2194,11 @@ describe("the count's stock line and messages (first that applies)", () => {
     expect(stockChip().textContent).not.toMatch(/\d/);
     expect(message()).toBe("Couldn't read current stock — tap Try again.");
     expect(screen.getByTestId("adjust-message")).toHaveClass("text-destructive");
+    // Row 128 (2): nothing can be typed against a failed read.
+    expect(countField()).toBeDisabled();
+    expect(countPlus()).toBeDisabled();
     await user.type(countField(), "35");
+    expect(countField()).toHaveValue("");
     expect(message()).toBe("Couldn't read current stock — tap Try again.");
     expect(actionButton()).toBeDisabled();
 
@@ -2137,6 +2209,8 @@ describe("the count's stock line and messages (first that applies)", () => {
     await user.click(retry);
     await stockReady("40 units");
     expect(versionReads()).toHaveLength(2);
+    expect(countField()).toBeEnabled();
+    await user.type(countField(), "35");
     expect(message()).toBeNull();
     expect(actionButton()).toBeEnabled();
   });
@@ -2187,6 +2261,10 @@ describe("the count's preview, summary and label", () => {
 
   it("the four summaries and the labels", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
+    mockLocation.locations = [
+      { id: 2, name: "Office" },
+      { id: 3, name: "Warehouse" },
+    ];
     renderHost();
     await stockReady();
     const release = holdNextVersionRead();
@@ -2194,15 +2272,12 @@ describe("the count's preview, summary and label", () => {
     // Empty.
     expect(summary()).toBe("Count AOD 2mg at Office");
     expect(actionButton()).toHaveTextContent(/^Save count$/);
-    // Entered, the record not known.
-    await user.type(countField(), "35");
-    expect(summary()).toBe("Count 35 units of AOD 2mg at Office");
-    expect(actionButton()).toHaveTextContent(/^Save count$/);
     // Differ.
     await act(async () => {
       release();
     });
     await stockReady("40 units");
+    await user.type(countField(), "35");
     expect(summary()).toBe("Set AOD 2mg at Office to 35 units (record: 40)");
     expect(actionButton()).toHaveTextContent(/^Set to 35$/);
     // Match.
@@ -2210,6 +2285,26 @@ describe("the count's preview, summary and label", () => {
     await user.type(countField(), "40");
     expect(summary()).toBe("Confirm 40 units of AOD 2mg at Office");
     expect(actionButton()).toHaveTextContent(/^Confirm 40$/);
+    // Entered, the record not known. Since row 128 (2) nothing can be typed
+    // before the record is known, so this is reached the one way left: a count
+    // typed against a known record, then the location switched under it — the
+    // count stays, and the new location's record is being read.
+    const releaseWarehouse = holdNextVersionRead();
+    await rerenderWith(user, () => {
+      mockLocation.selectedLocationId = 3;
+    });
+    await waitFor(() => expect(stockChip()).toHaveTextContent("Reading stock…"));
+    expect(summary()).toBe("Count 40 units of AOD 2mg at Warehouse");
+    expect(actionButton()).toHaveTextContent(/^Save count$/);
+    // Row 128 (2), with a count in the field: the field and BOTH steppers are
+    // dead while the new location's record is read (`−` is otherwise live on 40).
+    expect(countField()).toHaveValue("40");
+    expect(countField()).toBeDisabled();
+    expect(countPlus()).toBeDisabled();
+    expect(countMinus()).toBeDisabled();
+    await act(async () => {
+      releaseWarehouse();
+    });
   });
 
   it("while saving: `Saving count…`, the form frozen", async () => {
@@ -2373,7 +2468,7 @@ describe("the count's 409 (stock moved while the operator counted)", () => {
     expect(second.countedQuantity).toBe(3);
   });
 
-  it("the re-read FAILING: no notice — the read's error state takes over", async () => {
+  it("the re-read FAILING: the read's error state shows first; once `Try again` reads the record, the notice still echoes the count (row 128 (4))", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     adjustAnswer = STALE_VERSION;
     await intoCount(user);
@@ -2384,6 +2479,19 @@ describe("the count's 409 (stock moved while the operator counted)", () => {
     await waitFor(() => expect(message()).toBe("Couldn't read current stock — tap Try again."));
     expect(screen.getByTestId("count-retry")).toBeInTheDocument();
     expect(countField()).toHaveValue("");
+    expect(toastError).not.toHaveBeenCalled();
+
+    // The read recovers: the operator's number is never dropped unexplained.
+    versionAnswer = { quantity: 38, version: 8 };
+    await user.click(screen.getByTestId("count-retry"));
+    await stockReady("38 units");
+    expect(versionReads()).toHaveLength(3);
+    expect(message()).toBe("Stock changed while you were counting — you entered 35. Count again, then save.");
+    expect(message()).not.toBe("Enter the number you counted.");
+    expect(screen.getByTestId("adjust-message")).toHaveClass("text-warning");
+    expect(countField()).toHaveValue("");
+    expect(countField()).toBeEnabled();
+    expect(actionButton()).toBeDisabled();
     expect(toastError).not.toHaveBeenCalled();
   });
 
@@ -2405,6 +2513,181 @@ describe("the count's 409 (stock moved while the operator counted)", () => {
     await tapDirection(user, "Remove");
     await stockReady("38 units");
     expect(unitsReads()).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR1 (row 128): the offline read, the field gate, and the 409 that finds the
+// count already saved.
+// ---------------------------------------------------------------------------
+
+describe("FR1 — the count's read states and the 409 notices (row 128)", () => {
+  it("(1) a refetch PAUSED offline after a 409: `You're offline — …` in the stock line AND the footer, MUTED; the refuted record unshown; the field and Save dead — on reconnect the read completes and the field enables", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    adjustAnswer = STALE_VERSION;
+    await intoCount(user);
+    await user.type(countField(), "35");
+    versionAnswer = { quantity: 38, version: 8 };
+    const release = holdNextAdjust();
+    await user.click(actionButton());
+    await waitFor(() => expect(adjustCalls()).toHaveLength(1));
+    // The connection drops while the 409 is on its way back: the re-read
+    // cannot start, and react-query PAUSES it (`fetchStatus: "paused"`) with
+    // the refuted record still in `data`.
+    act(() => {
+      onlineManager.setOnline(false);
+    });
+    await act(async () => {
+      release();
+    });
+
+    await waitFor(() => expect(message()).toBe(OFFLINE));
+    expect(screen.getByTestId("adjust-message")).toHaveClass("text-muted-foreground");
+    expect(screen.getByTestId("adjust-message")).not.toHaveClass("text-destructive");
+    expect(stockChip()).toHaveTextContent(OFFLINE);
+    expect(stockChip()).not.toHaveTextContent("40");
+    expect(screen.queryByTestId("count-preview")).toBeNull();
+    expect(summary()).toBe("Count AOD 2mg at Office");
+    expect(versionReads()).toHaveLength(1);
+    expect(countField()).toHaveValue("");
+    expect(countField()).toBeDisabled();
+    expect(countPlus()).toBeDisabled();
+    expect(actionButton()).toBeDisabled();
+    expect(toastError).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // A paused read resumes on reconnect whatever `refetchOnReconnect` says.
+    act(() => {
+      onlineManager.setOnline(true);
+    });
+    await stockReady("38 units");
+    expect(versionReads()).toHaveLength(2);
+    await waitFor(() =>
+      expect(message()).toBe(
+        "Stock changed while you were counting — you entered 35; the record now says 38. Count again, then save.",
+      ),
+    );
+    expect(countField()).toBeEnabled();
+  });
+
+  it("(1) a FIRST read started offline shows the same, MUTED, with no read sent — on reconnect it completes and the field enables", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderHost();
+    await stockReady();
+    act(() => {
+      onlineManager.setOnline(false);
+    });
+    await tapCount(user);
+
+    await waitFor(() => expect(stockChip()).toHaveTextContent(OFFLINE));
+    expect(message()).toBe(OFFLINE);
+    expect(screen.getByTestId("adjust-message")).toHaveClass("text-muted-foreground");
+    expect(screen.getByTestId("adjust-message")).not.toHaveClass("text-destructive");
+    expect(stockChip().textContent).not.toMatch(/\d/);
+    expect(versionReads()).toHaveLength(0);
+    expect(countField()).toBeDisabled();
+    expect(actionButton()).toBeDisabled();
+
+    act(() => {
+      onlineManager.setOnline(true);
+    });
+    await stockReady("40 units");
+    expect(versionReads()).toHaveLength(1);
+    expect(countField()).toBeEnabled();
+    expect(message()).toBe("Enter the number you counted.");
+  });
+
+  // (2) THE FIELD GATE — the replacement for row 127's "a count typed during
+  // Reading stock… becomes savable" (no location: the no-location pin above).
+  it.each([
+    [
+      "reading",
+      "Reading stock…",
+      () => holdNextVersionRead(),
+      async (_user: User, release: () => void) => {
+        await act(async () => {
+          release();
+        });
+      },
+    ],
+    [
+      "offline",
+      OFFLINE,
+      () => {
+        act(() => {
+          onlineManager.setOnline(false);
+        });
+        return () => {};
+      },
+      async () => {
+        act(() => {
+          onlineManager.setOnline(true);
+        });
+      },
+    ],
+    [
+      "failed",
+      "Couldn't read current stock.",
+      () => {
+        versionAnswer = "error";
+        return () => {};
+      },
+      async (user: User) => {
+        versionAnswer = { quantity: 40, version: 7 };
+        await user.click(screen.getByTestId("count-retry"));
+      },
+    ],
+  ])("(2) the field and its steppers are DISABLED while the read is %s, and live once the record is known", async (_state, line, enter, recover) => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderHost();
+    await stockReady();
+    const release = enter();
+    await tapCount(user);
+    await waitFor(() => expect(stockChip()).toHaveTextContent(line));
+
+    expect(countField()).toBeDisabled();
+    expect(countPlus()).toBeDisabled();
+    expect(countMinus()).toBeDisabled();
+    await user.type(countField(), "35");
+    expect(countField()).toHaveValue("");
+    expect(actionButton()).toBeDisabled();
+
+    await recover(user, release);
+    await stockReady("40 units");
+    expect(countField()).toBeEnabled();
+    expect(countPlus()).toBeEnabled();
+    // `−` keeps its own rule (dead on empty), and lives once there is a count.
+    expect(countMinus()).toBeDisabled();
+    await user.type(countField(), "2");
+    expect(countField()).toHaveValue("2");
+    expect(countMinus()).toBeEnabled();
+    expect(actionButton()).toBeEnabled();
+  });
+
+  it("(3) a 409 whose re-read ALREADY says the sent count: `The record already says 35 — …` (a reply lost after the commit)", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onOpenChange = jest.fn();
+    adjustAnswer = STALE_VERSION;
+    await intoCount(user, { onOpenChange });
+    await user.type(countField(), "35");
+    // The first tap committed; its reply was lost. The record now IS the count.
+    versionAnswer = { quantity: 35, version: 8 };
+
+    const body = await submit(user);
+    expect(body.expectedVersion).toBe(7);
+    await waitFor(() =>
+      expect(message()).toBe(
+        "The record already says 35 — your count may already have been saved. Check the product's history, or count again.",
+      ),
+    );
+    expect(screen.getByTestId("adjust-message")).toHaveClass("text-warning");
+    expect(stockChip()).toHaveTextContent("35 units");
+    expect(versionReads()).toHaveLength(2);
+    expect(countField()).toHaveValue("");
+    expect(actionButton()).toBeDisabled();
+    expect(toastError).not.toHaveBeenCalled();
+    expect(toastSuccess).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
   });
 });
 

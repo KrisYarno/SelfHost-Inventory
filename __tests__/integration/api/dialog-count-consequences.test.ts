@@ -106,6 +106,73 @@ function asReasonlessRemoval(row: LedgerRow): LedgerRow {
   return { ...row, logType: "ADJUSTMENT", reasonCode: null };
 }
 
+type Where = Record<string, unknown>;
+
+/**
+ * Does a ledger row satisfy a Prisma `where`, as the database would? FR1 (row
+ * 128 (10)): the movement read's mock answers through this, so a SQL-side
+ * filter added to that read (a COUNT exclusion, say) reaches the pins below
+ * instead of being ignored by a mock that hands every row back. The shapes:
+ * a column equal to a scalar, or a filter of equals / in / notIn / not / lt /
+ * lte / gt / gte, combined with AND / OR / NOT. Anything else THROWS — a mock
+ * that admitted a filter it does not understand would pass for the wrong reason.
+ */
+function admits(row: Record<string, unknown>, where: Where | undefined): boolean {
+  if (where === undefined) return true;
+  return Object.entries(where).every(([key, cond]) => {
+    if (cond === undefined) return true;
+    const list = (c: unknown) => (Array.isArray(c) ? c : [c]) as Where[];
+    if (key === "AND") return list(cond).every((w) => admits(row, w));
+    if (key === "OR") return list(cond).some((w) => admits(row, w));
+    if (key === "NOT") return !list(cond).some((w) => admits(row, w));
+    if (!(key in row)) throw new Error(`the ledger mock has no column "${key}"`);
+    return fieldAdmits(row[key], cond);
+  });
+}
+
+function same(a: unknown, b: unknown): boolean {
+  return a instanceof Date && b instanceof Date ? a.getTime() === b.getTime() : a === b;
+}
+
+function order(a: unknown, b: unknown): number {
+  const n = (v: unknown) => (v instanceof Date ? v.getTime() : Number(v));
+  return n(a) - n(b);
+}
+
+function fieldAdmits(value: unknown, cond: unknown): boolean {
+  if (cond === null || typeof cond !== "object" || cond instanceof Date) return same(value, cond);
+  return Object.entries(cond as Record<string, unknown>).every(([op, arg]) => {
+    // SQL's NULL: a NULL column satisfies an IS NULL test and nothing else.
+    if (value === null) return op === "equals" && arg === null;
+    switch (op) {
+      case "equals":
+        return same(value, arg);
+      case "in":
+        return (arg as unknown[]).some((a) => same(value, a));
+      case "notIn":
+        return !(arg as unknown[]).some((a) => same(value, a));
+      case "not":
+        return !fieldAdmits(value, arg);
+      case "lt":
+        return order(value, arg) < 0;
+      case "lte":
+        return order(value, arg) <= 0;
+      case "gt":
+        return order(value, arg) > 0;
+      case "gte":
+        return order(value, arg) >= 0;
+      default:
+        throw new Error(`the ledger mock does not understand the filter "${op}"`);
+    }
+  });
+}
+
+/** The row as the read's `select` projects it. */
+function project(row: Record<string, unknown>, select: Record<string, boolean> | undefined) {
+  if (select === undefined) return row;
+  return Object.fromEntries(Object.keys(select).filter((k) => select[k]).map((k) => [k, row[k]]));
+}
+
 beforeEach(() => {
   mockReset(db);
   (requireApproved as jest.Mock).mockResolvedValue({
@@ -167,18 +234,42 @@ describe("consequence — the count leaves the attribution population", () => {
 describe("consequence — the movement partition buckets the count as countOut / countIn", () => {
   const WINDOW: ResolvedWindow = { from: "2026-11-01", to: "2026-11-30", days: 30, source: "explicit" };
 
+  /** The movement read, answered QUERY-FAITHFULLY over a one-row ledger (as
+   *  the shrinkage pin's read is): the row comes back only when the read's
+   *  own `where` admits it, projected by its `select`. */
   async function seriesTotalsOf(row: LedgerRow) {
-    db.inventory_logs.findMany.mockResolvedValue([
+    const ledger = [
       {
+        productId: PRODUCT_ID,
+        locationId: LOCATION_ID,
         delta: row.delta,
         changeTime: new Date("2026-11-20T12:00:00.000Z"),
         logType: row.logType,
         reasonCode: row.reasonCode,
+        batchId: row.batchId,
       },
-    ] as never);
+    ];
+    db.inventory_logs.findMany.mockImplementation((async (args: {
+      where?: Where;
+      select?: Record<string, boolean>;
+    }) => ledger.filter((r) => admits(r, args.where)).map((r) => project(r, args.select))) as never);
     const result = await getMovementSeries({ window: WINDOW, grain: "day", approvedIds: [PRODUCT_ID] });
     return result;
   }
+
+  it("the mock is faithful: it honours a COUNT exclusion and refuses a filter it cannot read", async () => {
+    const row = { ...(await countedRow(10, 4)), productId: PRODUCT_ID, changeTime: new Date() };
+    expect(admits(row, { logType: { not: "COUNT" } })).toBe(false);
+    expect(admits(row, { logType: { notIn: ["COUNT", "TRANSFER"] } })).toBe(false);
+    expect(admits(row, { NOT: { logType: "COUNT" } })).toBe(false);
+    expect(admits(row, { logType: { in: ["SALE", "ADJUSTMENT"] } })).toBe(false);
+    expect(admits(row, { logType: "COUNT", productId: { in: [PRODUCT_ID] } })).toBe(true);
+    expect(() => admits(row, { logType: { contains: "COU" } })).toThrow(/does not understand/);
+    // A NULL reason satisfies only IS NULL, as in SQL.
+    const before = { ...row, ...asReasonlessRemoval(row) };
+    expect(admits(before, { reasonCode: { not: "CORRECTION" } })).toBe(false);
+    expect(admits(before, { reasonCode: null })).toBe(true);
+  });
 
   it("a negative count row -> countOut, and NOT adjustmentUnclassified / classifiedLoss", async () => {
     const row = await countedRow(10, 4);

@@ -406,7 +406,7 @@ const DEFINITIONS: Readonly<Record<string, string>> = Object.freeze({
   attributable:
     'batches in the window that passed R0 — everything this report is allowed to speak about',
   nonAttributable:
-    'batches with at least one ledger row in the window and no population row at all: transfer legs, count sessions, correction reversals and positive-only adjusts',
+    'batches with at least one ledger row in the window and no population row at all: transfer legs, count sessions, correction reversals and positive-only adjusts. From 2026-11 spot counts from the Adjust stock dialog are count sessions here; before, operators recorded them as reason-less removals inside the population, so the attributable batches and their unattributed share step down at that month by reclassification, not by better attribution.',
   noBatchRows:
     'outbound rows in the window carrying no batch id (before 2026-07-10) — they cannot be grouped, so they are outside this report',
   historicalMassUpdate:

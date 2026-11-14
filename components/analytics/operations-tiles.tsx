@@ -61,9 +61,11 @@ export function OperationsTiles({ data }: { data: OperationsTilesData }) {
   const blendedTurns =
     turnsVals.length > 0 ? turnsVals.reduce((a, b) => a + b, 0) / turnsVals.length : null;
 
-  // Classified loss only (Lane 6 / B1): damage, theft, expiry, count. Unclassified
-  // outbound (the negative ADJUSTMENTs this business ships with) is a coverage note,
-  // never bucketed as shrinkage.
+  // Classified loss only (Lane 6 / B1): damage, theft, expiry and older coded counts
+  // (ADJUSTMENT/CORRECTION rows coded COUNT). Unclassified outbound (the negative
+  // ADJUSTMENTs this business ships with) is a coverage note, never bucketed as
+  // shrinkage. A count from Adjust stock books a COUNT ledger row, which this read
+  // never sees — the caption says so (FR1, row 128 (5)).
   const shrinkUnits = shrinkage90.totalUnits;
   const shrinkValue = shrinkage90.totalValueAtCurrentCostCents;
   const unclassified = shrinkage90.coverage.unclassifiedOutboundUnits;
@@ -99,9 +101,10 @@ export function OperationsTiles({ data }: { data: OperationsTilesData }) {
           unclassified > 0
             ? `${money(shrinkValue)} · classified loss only. ${numberFmt.format(
                 unclassified,
-              )} outbound units carry no reason code and are not counted as loss.`
-            : `${money(shrinkValue)} · damage, theft, expiry, count`
+              )} outbound units carry no reason code and are not counted as loss. Counts from Adjust stock are not counted here.`
+            : `${money(shrinkValue)} · damage, theft, expiry and older coded counts. Counts from Adjust stock are not counted here.`
         }
+        captionTitle="A shortfall found with Adjust stock's Count is recorded as a count movement, not as loss, so it is not in this figure."
       />
       <Tile
         label="Aging outliers"

@@ -136,6 +136,7 @@ import { resolveAssistantProduct } from "@/lib/assistant/resolve-product";
 import { STATIC_WRITE_ALLOWLIST } from "./static-write-allowlist";
 import {
   COUNT_REGIME_NOTE,
+  COUNT_REGIME_OUTBOUND_NOTE,
   SHRINKAGE_CLASSIFICATION_DEFINITION,
 } from "@/lib/reports/metrics-contract";
 import { ORDER_PIPELINE_SELECT, ORDER_ITEM_UNITS_SELECT } from "@/lib/reports/order-pipeline";
@@ -497,23 +498,43 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
   });
 
   // P2-B3-2 (pack C2-3): the Adjust stock dialog's Count moves a spot count out of
-  // the reason-less adjustment buckets and into countOut / countIn. The two tools that
-  // PARTITION outbound movement carry the regime note right after their bucket names,
+  // the reason-less adjustment buckets and into countOut / countIn. The tools that
+  // PARTITION outbound movement carry a regime note right after their bucket names,
   // and get_shrinkage — which does not read COUNT rows at all — carries the step-down
   // disclosure in its definition. (The literals are metrics-contract.test.ts's.)
-  it("get_operations and get_movement_series carry COUNT_REGIME_NOTE after their bucket list", () => {
-    const ops = desc("get_operations");
+  //
+  // FR1 (row 128 (6)): the movement series (both directions) keeps COUNT_REGIME_NOTE;
+  // the OUTBOUND-only mixes — get_operations' outboundMix30 and reorder_report's
+  // demandMix — carry COUNT_REGIME_OUTBOUND_NOTE instead, each exactly once.
+  it("get_movement_series carries COUNT_REGIME_NOTE after its bucket list, exactly once", () => {
     const mv = desc("get_movement_series");
     expect(COUNT_REGIME_NOTE.length).toBeGreaterThan(0);
-    expect(ops).toContain(
-      `relay it when the sale bucket is a small share. ${COUNT_REGIME_NOTE} scope echoes the`,
-    );
     expect(mv).toContain(
       `never a real gain or loss). ${COUNT_REGIME_NOTE} net === SUM of every bucket.`,
     );
-    // Exactly once each — a second interpolation would be a drafting slip.
-    expect(ops.split(COUNT_REGIME_NOTE)).toHaveLength(2);
+    // Exactly once — a second interpolation would be a drafting slip.
     expect(mv.split(COUNT_REGIME_NOTE)).toHaveLength(2);
+    expect(mv).not.toContain(COUNT_REGIME_OUTBOUND_NOTE);
+  });
+
+  it("get_operations carries COUNT_REGIME_OUTBOUND_NOTE after its outboundMix30 sentence, exactly once — and no longer COUNT_REGIME_NOTE", () => {
+    const ops = desc("get_operations");
+    expect(COUNT_REGIME_OUTBOUND_NOTE.length).toBeGreaterThan(0);
+    expect(ops).toContain(
+      `relay it when the sale bucket is a small share. ${COUNT_REGIME_OUTBOUND_NOTE} scope echoes the`,
+    );
+    expect(ops.split(COUNT_REGIME_OUTBOUND_NOTE)).toHaveLength(2);
+    expect(ops).not.toContain(COUNT_REGIME_NOTE);
+  });
+
+  it("reorder_report carries COUNT_REGIME_OUTBOUND_NOTE after its demandMix six-bucket composition sentence, exactly once", () => {
+    const rr = desc("reorder_report");
+    expect(rr).toContain(
+      `correctionUnclassified / countOut / stockInReversal, absolute units summing to ` +
+        `demandUnits). ${COUNT_REGIME_OUTBOUND_NOTE} A demand that is entirely adjustmentUnclassified`,
+    );
+    expect(rr.split(COUNT_REGIME_OUTBOUND_NOTE)).toHaveLength(2);
+    expect(rr).not.toContain(COUNT_REGIME_NOTE);
   });
 
   it("get_shrinkage carries the COUNT step-down disclosure (its read never sees COUNT rows)", () => {

@@ -242,20 +242,35 @@ export const SHRINKAGE_CLASSIFICATION_DEFINITION =
   "never loss).";
 
 /**
- * The count regime change, for the tools that PARTITION outbound movement
- * (pack § P2-B3-2 C2-3). Before the Adjust stock dialog's Count existed, an
- * operator who found fewer units than the record removed the difference as a
- * reason-less adjustment; the same event now books a COUNT row. The movement
- * and mix buckets therefore shift between adjustment* and count* from that
- * month — interpolated into get_operations' and get_movement_series'
- * descriptions so the model reads it before it narrates a trend.
+ * The count regime change, for the movement series, which PARTITIONS the ledger
+ * in both directions (pack § P2-B3-2 C2-3; FR1, row 128 (6)). Before the Adjust
+ * stock dialog's Count existed, an operator who counted one product recorded the
+ * difference as a reason-less adjustment — or, before the 2026-08 intent chip
+ * retired the reason select, as an adjustment coded COUNT; the same event now
+ * books a COUNT row. Bulk counts from the admin mass update were COUNT rows all
+ * along. The buckets therefore shift into count* from that month —
+ * interpolated into get_movement_series' description so the model reads it
+ * before it narrates a trend.
  */
 export const COUNT_REGIME_NOTE =
   "From 2026-11 single-product counts from the Adjust stock dialog book countOut (a count " +
-  "below the record) and countIn (above it); before that month operators recorded the " +
-  "same events as reason-less adjustments, which sat in adjustmentUnclassified / " +
-  "adjustmentIn — the shift is reclassification, and those buckets must not be compared " +
-  "across it.";
+  "below the record) and countIn (above it); bulk counts from the admin mass update were " +
+  "already there. Before that month operators recorded the same single-product events as " +
+  "reason-less adjustments (adjustmentUnclassified / adjustmentIn) or, before 2026-08, as " +
+  "adjustments coded COUNT (classifiedLoss) — the shift is reclassification, and those " +
+  "buckets must not be compared across it.";
+
+/**
+ * The same regime change for the OUTBOUND-only mixes (FR1, row 128 (6)):
+ * get_operations' outboundMix30 and reorder_report's demandMix have no inbound
+ * bucket, so their note names only the shortfall side of a count.
+ */
+export const COUNT_REGIME_OUTBOUND_NOTE =
+  "From 2026-11 single-product counts from the Adjust stock dialog that find fewer units " +
+  "than the record book countOut; bulk counts from the admin mass update were already " +
+  "there. Before that month operators recorded the same shortfalls as reason-less removals " +
+  "(adjustmentUnclassified) or, before 2026-08, as removals coded COUNT (classifiedLoss) — " +
+  "the shift is reclassification, and those buckets must not be compared across it.";
 
 /**
  * Definition string for the outbound-usage velocity rate (spec §2 D3): the units/day

@@ -190,6 +190,49 @@ describe("count — the route reaches the core with the shape and a minted batch
     expect((db.$transaction as unknown as jest.Mock).mock.calls[0][1]).toBe(STOCK_TX_OPTIONS);
   });
 
+  // FR1 (row 128 (8)): counting the wrapper's calls does not prove the retry
+  // can WORK — a `$transaction` promise built once and handed to the wrapper
+  // would be awaited three times and fail three times. Drive a real retry: the
+  // FIRST transaction runs the core and then rejects deadlock-shaped (P2034,
+  // the engine choosing it as the victim), the second commits.
+  it("a deadlock-shaped rejection of the FIRST transaction is retried through the thunk: two transactions, two core calls, a 200", async () => {
+    const seen = coreAnswers(MATCH);
+    let attempt = 0;
+    (db.$transaction as unknown as jest.Mock).mockImplementation(async (cb: any) => {
+      attempt += 1;
+      const result = await cb(ROUTE_TX);
+      if (attempt === 1) {
+        throw Object.assign(
+          new Error("Transaction failed due to a write conflict or a deadlock. Please retry your transaction"),
+          { code: "P2034" }
+        );
+      }
+      return result;
+    });
+
+    const res = await ADJUST(post(COUNT_BODY));
+
+    expect(res.status).toBe(200);
+    expect(db.$transaction).toHaveBeenCalledTimes(2);
+    expect(seen.calls).toHaveLength(2);
+    expect(withDeadlockRetry).toHaveBeenCalledTimes(1);
+    for (const call of (db.$transaction as unknown as jest.Mock).mock.calls) {
+      expect(call[1]).toBe(STOCK_TX_OPTIONS);
+    }
+    // The batch is minted ONCE, before the retry (C2-2 step 3 precedes step 4):
+    // the rolled-back attempt left nothing under it.
+    expect(seen.calls[1].input.batchId).toBe(seen.calls[0].input.batchId);
+    expect(await res.json()).toEqual({
+      success: true,
+      changed: false,
+      batchId: seen.calls[1].input.batchId,
+      countedQuantity: 7,
+      previousQuantity: 7,
+      delta: 0,
+      newVersion: 3,
+    });
+  });
+
   it("each request mints its own batch id", async () => {
     const seen = coreAnswers(MATCH);
 
