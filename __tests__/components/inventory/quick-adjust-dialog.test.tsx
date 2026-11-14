@@ -2807,6 +2807,26 @@ describe("FR2 — the 409 notice stays until the count is edited (row 130)", () 
     expect(message()).toBe(NOTICE_MOVED);
   });
 
+  // B3-2-FD2-2: the notice keeps the draft in EVERY mode, not only in Count —
+  // switching away and dismissing must not drop the counted number unexplained.
+  it.each([
+    ["Escape", ESCAPE_KEY],
+    ["a click outside", TAP_OUTSIDE],
+  ])("(3) after switching to Remove, %s still does NOT close the dialog while the notice stands; back in Count it is still there", async (_how, dismiss) => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onOpenChange = jest.fn();
+    await staleWithNotice(user, { onOpenChange });
+
+    await tapDirection(user, "Remove");
+    await dismiss(user);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    await tapCount(user);
+    await stockReady("38 units");
+    expect(message()).toBe(NOTICE_MOVED);
+  });
+
   it("(3) Cancel still discards: the dialog closes, and the next open has no count and no notice", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     const onOpenChange = jest.fn();
