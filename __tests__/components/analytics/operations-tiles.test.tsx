@@ -8,6 +8,10 @@
  * as a COUNT ledger row, so it never lands in that figure — the caption must
  * not name "count" as a loss class on its own, and it says where those counts
  * are NOT. Both branches are pinned byte for byte, with the caption's title.
+ *
+ * FR2 (row 130 (4)): an API caller can still write ADJUSTMENT rows coded COUNT
+ * through `batch-adjust`, so the no-unclassified branch no longer calls them
+ * "older" — it names them as adjustments coded as counts.
  */
 
 import * as React from "react";
@@ -58,17 +62,18 @@ describe("the Shrinkage (90 days) tile's caption (row 128 (5))", () => {
     );
   });
 
-  it("with none: damage, theft, expiry and OLDER CODED counts, and the Adjust stock counts excluded — byte for byte", () => {
+  it("with none: damage, theft, expiry and ADJUSTMENTS CODED AS COUNTS (never \"older\"), and the Adjust stock counts excluded — byte for byte (row 130 (4))", () => {
     render(<OperationsTiles data={data({ unclassified: 0 })} />);
     expect(shrinkageCaption().textContent).toBe(
-      "$45.00 · damage, theft, expiry and older coded counts. Counts from Adjust stock are not counted here.",
+      "$45.00 · damage, theft, expiry and adjustments coded as counts. Counts from Adjust stock are not counted here.",
     );
+    expect(shrinkageCaption().textContent).not.toMatch(/\bolder\b/);
   });
 
   it("no cost on file keeps the money truthful in both branches (`No cost data`, never $0.00)", () => {
     render(<OperationsTiles data={data({ unclassified: 0, valueCents: null })} />);
     expect(shrinkageCaption().textContent).toBe(
-      "No cost data · damage, theft, expiry and older coded counts. Counts from Adjust stock are not counted here.",
+      "No cost data · damage, theft, expiry and adjustments coded as counts. Counts from Adjust stock are not counted here.",
     );
   });
 

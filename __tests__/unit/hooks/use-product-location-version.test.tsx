@@ -17,12 +17,15 @@
  *   - `refetch()` issues a GET; unmount then remount → a new GET (`gcTime: 0`);
  *   - `fetchStatus` is "fetching" during a refetch while `data` still holds the
  *     old answer (why "in flight" is never `status === "pending"`);
- *   - `null` for a location absent from the answer; a non-2xx → "error".
+ *   - `null` for a location absent from the answer; a non-2xx → "error";
+ *   - NO automatic retry (FR2, row 130 (3)): under the APP's own `retry: 1`
+ *     default a failing read is ONE GET and settles at once as "error".
  */
 import * as React from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
 import { useProductLocationVersion } from "@/hooks/use-product-location-version";
+import { queryClient as appQueryClient } from "@/lib/query-client";
 
 const URL_42 = "/api/inventory/product/42/locations";
 
@@ -101,6 +104,20 @@ describe("useProductLocationVersion", () => {
     answerOk = false;
     const { result } = renderVersion({ locationId: 2, enabled: true });
     await waitFor(() => expect(result.current.status).toBe("error"));
+    expect(result.current.data).toBeUndefined();
+  });
+
+  it("NO automatic retry: under the APP's `retry: 1` default a failing read is ONE GET and settles at once as \"error\" (row 130 (3))", async () => {
+    // The pin's premise: the app's query client retries once by default.
+    expect(appQueryClient.getDefaultOptions().queries?.retry).toBe(1);
+    client = new QueryClient({ defaultOptions: { queries: { ...appQueryClient.getDefaultOptions().queries } } });
+    answerOk = false;
+    const { result } = renderVersion({ locationId: 2, enabled: true });
+    // Long enough for the default's retry (one second) to have landed, were it on.
+    await waitFor(() => expect(result.current.status).toBe("error"), { timeout: 3000 });
+    expect(gets()).toBe(1);
+    expect(result.current.failureCount).toBe(1);
+    expect(result.current.fetchStatus).toBe("idle");
     expect(result.current.data).toBeUndefined();
   });
 

@@ -216,7 +216,9 @@ describe("FD2-5 REORDER_DEMAND_WHERE carries its collation + not-a-classifier an
 // adjustments, and before 2026-08 adjustments coded COUNT) and the mass update
 // that already booked countOut; the OUTBOUND-only mixes (get_operations'
 // outboundMix30, reorder_report's demandMix) get their own note, which names
-// only the shortfall side — those mixes have no countIn.
+// only the shortfall side — those mixes have no countIn. FR2 (row 130 (2)): the
+// movement note says where an older coded count landed in EACH direction
+// (classifiedLoss below the record, adjustmentIn above it).
 // ---------------------------------------------------------------------------
 
 describe("P2-B3-2 — the COUNT regime disclosures (pack C2-3)", () => {
@@ -237,8 +239,8 @@ describe("P2-B3-2 — the COUNT regime disclosures (pack C2-3)", () => {
     "below the record) and countIn (above it); bulk counts from the admin mass update were " +
     "already there. Before that month operators recorded the same single-product events as " +
     "reason-less adjustments (adjustmentUnclassified / adjustmentIn) or, before 2026-08, as " +
-    "adjustments coded COUNT (classifiedLoss) — the shift is reclassification, and those " +
-    "buckets must not be compared across it.";
+    "adjustments coded COUNT (classifiedLoss below the record, adjustmentIn above it) — the " +
+    "shift is reclassification, and those buckets must not be compared across it.";
 
   const REGIME_OUTBOUND_NOTE =
     "From 2026-11 single-product counts from the Adjust stock dialog that find fewer units " +
@@ -264,6 +266,15 @@ describe("P2-B3-2 — the COUNT regime disclosures (pack C2-3)", () => {
 
   it("COUNT_REGIME_NOTE is the movement tool's note, exactly", () => {
     expect(COUNT_REGIME_NOTE).toBe(REGIME_NOTE);
+  });
+
+  it("COUNT_REGIME_NOTE files an over-count coded COUNT before 2026-08 under adjustmentIn, never classifiedLoss (row 130 (2))", () => {
+    // A positive ADJUSTMENT is adjustmentIn whatever its reason code (movement.ts'
+    // classify): only the count below the record was ever classifiedLoss.
+    expect(COUNT_REGIME_NOTE).toContain(
+      "as adjustments coded COUNT (classifiedLoss below the record, adjustmentIn above it) — ",
+    );
+    expect(COUNT_REGIME_NOTE).not.toContain("coded COUNT (classifiedLoss) —");
   });
 
   it("COUNT_REGIME_OUTBOUND_NOTE is the outbound-only mixes' note, exactly (row 128 (6))", () => {

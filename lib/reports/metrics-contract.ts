@@ -250,15 +250,17 @@ export const SHRINKAGE_CLASSIFICATION_DEFINITION =
  * books a COUNT row. Bulk counts from the admin mass update were COUNT rows all
  * along. The buckets therefore shift into count* from that month —
  * interpolated into get_movement_series' description so the model reads it
- * before it narrates a trend.
+ * before it narrates a trend. An older coded count landed by its sign (FR2, row
+ * 130 (2)): classifiedLoss below the record, adjustmentIn above it (a positive
+ * ADJUSTMENT is adjustmentIn whatever its reason code, `movement.ts` classify).
  */
 export const COUNT_REGIME_NOTE =
   "From 2026-11 single-product counts from the Adjust stock dialog book countOut (a count " +
   "below the record) and countIn (above it); bulk counts from the admin mass update were " +
   "already there. Before that month operators recorded the same single-product events as " +
   "reason-less adjustments (adjustmentUnclassified / adjustmentIn) or, before 2026-08, as " +
-  "adjustments coded COUNT (classifiedLoss) — the shift is reclassification, and those " +
-  "buckets must not be compared across it.";
+  "adjustments coded COUNT (classifiedLoss below the record, adjustmentIn above it) — the " +
+  "shift is reclassification, and those buckets must not be compared across it.";
 
 /**
  * The same regime change for the OUTBOUND-only mixes (FR1, row 128 (6)):

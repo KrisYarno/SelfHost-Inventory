@@ -25,6 +25,11 @@ import type { ProductLocationQuantity } from "@/types/inventory";
 // - The ONLY re-reads asked for are an explicit `refetch()`: the dialog's
 //   `Try again` and its 409 path. "In flight" is `fetchStatus === "fetching"`
 //   (the first read AND a refetch), never `status === "pending"` alone.
+// - NO AUTOMATIC RETRY. `retry: false` — a failed read goes straight to
+//   "failed" with `Try again` (FR2, row 130 (3)). The app default (`retry: 1`,
+//   `lib/query-client.ts`) would wait a second and retry, and react-query
+//   PAUSES a retry it cannot continue in a hidden tab — which the dialog shows
+//   as "You're offline" while the device is online.
 // - ONE re-read nobody asks for: re-entering Count after a FAILED first read
 //   reads again, because a query with no data is always stale (`staleTime`
 //   cannot keep fresh an answer that never came). Harmless: the dialog's count
@@ -65,6 +70,7 @@ export function useProductLocationVersion(
       return row === undefined ? null : { quantity: row.quantity, version: row.version };
     },
     enabled: opts.enabled && locationId !== null,
+    retry: false,
     staleTime: Infinity,
     gcTime: 0,
     refetchOnWindowFocus: false,

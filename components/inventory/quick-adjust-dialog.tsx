@@ -65,7 +65,10 @@ interface QuickAdjustDialogProps {
 // remove" is never a count nobody performed. Switching modes hides fields and
 // clears nothing. FR1 (row 128): the count field opens only on a KNOWN record
 // (never while reading, offline or failed), and a read paused offline is
-// shown as offline, never as the record it last held.
+// shown as offline, never as the record it last held. FR2 (row 130 (1)): after
+// a 409 the operator's number never vanishes unexplained — the notice is set
+// before the re-read is awaited, outlives a Note edit and a mode toggle, and
+// keeps the draft from a stray Escape or tap outside until the count is edited.
 
 /** The largest quantity the field can hold (`maxLength={6}`). */
 const MAX_QUANTITY = 999_999;
@@ -122,8 +125,9 @@ export function QuickAdjustDialog({
   // shared with `quantity`. "" is "nothing entered"; "0" is a count of zero.
   const [counted, setCounted] = useState("");
   const [countRefused, setCountRefused] = useState(false);
-  // The 409 notice (stock moved while the operator counted). Cleared by the
-  // next edit, like the rejected pick's.
+  // The 409 notice (stock moved while the operator counted). Cleared ONLY by
+  // the count field's own edits (its input and its two steppers): a mode change
+  // or a Note edit keeps it (FR2, row 130 (1)).
   const [countNotice, setCountNotice] = useState<string | null>(null);
   // null = the operator has not tapped the chip. Deliberately NOT pre-filled
   // with "other": the request must be able to say "nothing was stated", and a
@@ -198,9 +202,12 @@ export function QuickAdjustDialog({
   // REV 118 (QA-10): 21–40 digits are ill-shaped too, so the sentence names the bar.
   if (captureIllShaped) blockers.push("Order number: 1–20 digits only — fix it or clear it.");
 
+  // A standing 409 notice is draft too: the 409 empties the count field, and
+  // the notice is then the operator's only record of the number (row 130 (1)).
   const draftNonEmpty =
     quantity !== "" ||
     counted !== "" ||
+    countNotice !== null ||
     capture.text !== "" ||
     capture.picked !== null ||
     notes !== "" ||
@@ -316,10 +323,12 @@ export function QuickAdjustDialog({
   // never this guard, which would drop it — and a failed one leaves it open.
   const handleOpenChange = guardOpenChange(onOpenChange);
 
-  /** Any edit clears the rejected pick's notice, and the count's. */
+  /**
+   * Any edit clears the rejected pick's notice. The count's notice is NOT
+   * cleared here: only the count field's own edits clear it (row 130 (1)).
+   */
   const edited = () => {
     setRejectedPick(null);
-    setCountNotice(null);
   };
 
   const handleModeChange = (next: "remove" | "add" | "count") => {
@@ -359,18 +368,21 @@ export function QuickAdjustDialog({
     const next = raw.replace(/^0+(?=[0-9])/, "");
     setCounted(next);
     if (next === "") setCountRefused(false);
+    setCountNotice(null);
     edited();
   };
 
   // `+` from empty gives 1 — never the record + 1.
   const handleCountIncrement = () => {
     setCounted((prev) => String(Math.min((prev === "" ? 0 : Number(prev)) + 1, MAX_QUANTITY)));
+    setCountNotice(null);
     edited();
   };
 
   const handleCountDecrement = () => {
     if (n === null || n <= 0) return;
     setCounted(String(n - 1));
+    setCountNotice(null);
     edited();
   };
 
@@ -528,21 +540,24 @@ export function QuickAdjustDialog({
         // returned result, never this closure's `record`).
         setCounted("");
         setCountRefused(false);
+        // FR2, row 130 (1): the notice is set BEFORE the re-read is awaited — a
+        // re-read paused offline does not return until the connection does, and
+        // the operator's number must stand (and keep the draft) meanwhile. It
+        // ranks below the read states, so it shows once the read is known; a
+        // re-read that FAILS leaves it as it is (FR1, row 128 (4)).
+        setCountNotice(`Stock changed while you were counting — you entered ${n}. Count again, then save.`);
         void invalidateInventoryCaches(queryClient, product.id);
         const next = await versionQuery.refetch();
-        setCountNotice(
-          next.status === "success" && next.data !== null
-            ? next.data.quantity === n
+        if (next.status === "success" && next.data !== null) {
+          setCountNotice(
+            next.data.quantity === n
               ? // FR1, row 128 (3): the record already IS the count — most
                 // likely this count's own earlier tap committed and its reply
                 // was lost, so this 409 is the token refusing a second write.
                 `The record already says ${n} — your count may already have been saved. Check the product's history, or count again.`
-              : `Stock changed while you were counting — you entered ${n}; the record now says ${next.data.quantity}. Count again, then save.`
-            : // FR1, row 128 (4): the re-read failed. The notice is still set —
-              // it ranks below the read states, so it shows once the read
-              // recovers, and the operator's number is never dropped unexplained.
-              `Stock changed while you were counting — you entered ${n}. Count again, then save.`,
-        );
+              : `Stock changed while you were counting — you entered ${n}; the record now says ${next.data.quantity}. Count again, then save.`,
+          );
+        }
         return;
       }
       console.error("Error adjusting inventory:", error);

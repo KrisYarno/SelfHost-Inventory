@@ -23,11 +23,13 @@
  * § P2-B3-2 (C2-6) — the COUNT, the switch's third button: last section below.
  * The version read (`/locations`) answers through its own branch of the fetch
  * mock, ahead of the product branch. Its FR1 pins (row 128: the offline read,
- * the field gate, the two new 409 notices) close that section.
+ * the field gate, the two new 409 notices) and its FR2 pins (row 130: the 409
+ * notice kept until the count is edited, the draft it keeps open, the version
+ * read that never retries on its own) close that section.
  */
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, focusManager, onlineManager } from "@tanstack/react-query";
 import * as React from "react";
 
 jest.mock("@/hooks/use-csrf", () => ({
@@ -62,6 +64,7 @@ jest.mock("sonner", () => ({
 }));
 
 import { QuickAdjustDialog } from "@/components/inventory/quick-adjust-dialog";
+import { queryClient as appQueryClient } from "@/lib/query-client";
 import { SELECTED_ORDER_REJECTED_SENTENCE } from "@/lib/orders/order-capture-sentences";
 import type { DialogProduct } from "@/types/inventory";
 
@@ -2688,6 +2691,214 @@ describe("FR1 — the count's read states and the 409 notices (row 128)", () => 
     expect(toastError).not.toHaveBeenCalled();
     expect(toastSuccess).not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR2 (row 130): after a 409 the operator's number never vanishes unexplained.
+// The notice is set BEFORE the re-read is awaited, is replaced by the re-read's
+// own sentence when that read succeeds, and is cleared ONLY by the count
+// field's own edits — a Note edit or a mode toggle keeps it. While it stands
+// the draft is not empty, so Escape and a tap outside do not throw it away.
+// And the version read never retries on its own (row 130 (3)).
+// ---------------------------------------------------------------------------
+
+const NOTICE_REREAD_FAILED = "Stock changed while you were counting — you entered 35. Count again, then save.";
+const NOTICE_MOVED = "Stock changed while you were counting — you entered 35; the record now says 38. Count again, then save.";
+const NOTICE_ALREADY =
+  "The record already says 35 — your count may already have been saved. Check the product's history, or count again.";
+const ESCAPE_KEY = (user: User) => user.keyboard("{Escape}");
+const TAP_OUTSIDE = (user: User) =>
+  user.click(screen.getByRole("button", { name: "Beside the dialog", hidden: true }));
+
+/** Count, a count of 35, and the save answering 409 (the re-read answers `versionAnswer`). */
+async function countedThenStale(user: User, props: Parameters<typeof renderHost>[0] = {}) {
+  adjustAnswer = STALE_VERSION;
+  await intoCount(user, props);
+  await user.type(countField(), "35");
+}
+
+/** As above, with the re-read answering 38 units: the notice with both numbers. */
+async function staleWithNotice(user: User, props: Parameters<typeof renderHost>[0] = {}) {
+  await countedThenStale(user, props);
+  versionAnswer = { quantity: 38, version: 8 };
+  await submit(user);
+  await waitFor(() => expect(message()).toBe(NOTICE_MOVED));
+  expect(countField()).toHaveValue("");
+}
+
+describe("FR2 — the 409 notice stays until the count is edited (row 130)", () => {
+  // A pin below hides the tab — react-query's focusManager is a module singleton.
+  afterEach(() => {
+    act(() => {
+      focusManager.setFocused(undefined);
+    });
+  });
+
+  it("(1) the re-read FAILS; the operator edits the Note, toggles Remove → Count, then taps Try again: the footer still echoes the count", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await countedThenStale(user);
+    versionAnswer = "error";
+    await submit(user);
+    await waitFor(() => expect(message()).toBe("Couldn't read current stock — tap Try again."));
+
+    await user.type(noteField(), "checked the back shelf");
+    await tapDirection(user, "Remove");
+    await tapCount(user);
+    await waitFor(() => expect(message()).toBe("Couldn't read current stock — tap Try again."));
+
+    versionAnswer = { quantity: 38, version: 8 };
+    await user.click(screen.getByTestId("count-retry"));
+    await stockReady("38 units");
+    expect(message()).toBe(NOTICE_REREAD_FAILED);
+    expect(message()).not.toBe("Enter the number you counted.");
+    expect(screen.getByTestId("adjust-message")).toHaveClass("text-warning");
+    expect(countField()).toHaveValue("");
+    expect(actionButton()).toBeDisabled();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("(2) the re-read SUCCEEDS: a Note edit keeps the notice, and so does a mode toggle (no read asked for)", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await staleWithNotice(user);
+
+    await user.type(noteField(), "x");
+    expect(message()).toBe(NOTICE_MOVED);
+
+    await tapDirection(user, "Remove");
+    expect(message()).not.toBe(NOTICE_MOVED);
+    await tapDirection(user, "Add");
+    await tapCount(user);
+    await stockReady("38 units");
+    expect(message()).toBe(NOTICE_MOVED);
+    expect(screen.getByTestId("adjust-message")).toHaveClass("text-warning");
+    expect(versionReads()).toHaveLength(2);
+  });
+
+  it.each([
+    ["own input", (user: User) => user.type(countField(), "3"), "3"],
+    ["`+` stepper", (user: User) => user.click(countPlus()), "1"],
+  ])("(2) the count field's %s clears the notice", async (_how, edit, value) => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await staleWithNotice(user);
+    // The field is EMPTY after every 409, so `−` is dead while a notice stands:
+    // the only count edits that can meet a notice are the input and `+`.
+    expect(countMinus()).toBeDisabled();
+
+    await edit(user);
+    expect(countField()).toHaveValue(value);
+    expect(message()).toBeNull();
+    expect(actionButton()).toBeEnabled();
+  });
+
+  it.each([
+    ["Escape", ESCAPE_KEY],
+    ["a click outside", TAP_OUTSIDE],
+  ])("(3) %s does NOT close the dialog while the notice stands and the field is empty", async (_how, dismiss) => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onOpenChange = jest.fn();
+    await staleWithNotice(user, { onOpenChange });
+    // Nothing else is in the draft: the notice alone keeps it.
+    expect(noteField()).toHaveValue("");
+
+    await dismiss(user);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(message()).toBe(NOTICE_MOVED);
+  });
+
+  it("(3) Cancel still discards: the dialog closes, and the next open has no count and no notice", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onOpenChange = jest.fn();
+    await staleWithNotice(user, { onOpenChange });
+
+    await user.click(cancelButton());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+    expect(adjustCalls()).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: "Adjust A" }));
+    await stockReady();
+    expect(screen.getByRole("button", { name: "Remove" })).toHaveAttribute("aria-pressed", "true");
+    await tapCount(user);
+    await stockReady("38 units");
+    expect(countField()).toHaveValue("");
+    expect(message()).toBe("Enter the number you counted.");
+  });
+
+  it.each([
+    ["the record moved", { quantity: 38, version: 8 }, "38 units", NOTICE_MOVED],
+    ["the record already says the count", { quantity: 35, version: 8 }, "35 units", NOTICE_ALREADY],
+  ])("(4) the re-read PAUSED offline after a 409 (%s): Escape is blocked while it waits; on reconnect the result's notice shows", async (_label, reread, line, notice) => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onOpenChange = jest.fn();
+    await countedThenStale(user, { onOpenChange });
+    versionAnswer = reread;
+    const release = holdNextAdjust();
+    await user.click(actionButton());
+    await waitFor(() => expect(adjustCalls()).toHaveLength(1));
+    // Offline before the 409 lands: the re-read is PAUSED, and the handler's
+    // `await` on it does not return until the connection does.
+    act(() => {
+      onlineManager.setOnline(false);
+    });
+    await act(async () => {
+      release();
+    });
+    await waitFor(() => expect(message()).toBe(OFFLINE));
+    expect(countField()).toHaveValue("");
+    expect(versionReads()).toHaveLength(1);
+
+    await ESCAPE_KEY(user);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    act(() => {
+      onlineManager.setOnline(true);
+    });
+    await stockReady(line);
+    await waitFor(() => expect(message()).toBe(notice));
+    expect(versionReads()).toHaveLength(2);
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("(row 130 (3)) a failing read under the APP's `retry: 1` default, in a hidden tab: ONE read, then `Couldn't read current stock.` — never `You're offline` in between", async () => {
+    // The pin's premise: the app's query client retries once by default.
+    expect(appQueryClient.getDefaultOptions().queries?.retry).toBe(1);
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const client = new QueryClient({
+      defaultOptions: { queries: { ...appQueryClient.getDefaultOptions().queries }, mutations: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <PerOpenHost />
+      </QueryClientProvider>,
+    );
+    await stockReady();
+    versionAnswer = "error";
+    // Every state the stock line and the footer pass through, as they render.
+    const seen = new Set<string>();
+    const observer = new MutationObserver(() => {
+      seen.add(screen.queryByTestId("adjust-stock")?.textContent ?? "");
+      seen.add(message() ?? "");
+    });
+    observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+    // A hidden tab: react-query PAUSES a retry it cannot continue unfocused.
+    act(() => {
+      focusManager.setFocused(false);
+    });
+    try {
+      await tapCount(user);
+      await waitFor(() => expect(stockChip()).toHaveTextContent("Couldn't read current stock."), {
+        timeout: 3000,
+      });
+    } finally {
+      observer.disconnect();
+    }
+    expect(message()).toBe("Couldn't read current stock — tap Try again.");
+    expect(screen.getByTestId("count-retry")).toBeInTheDocument();
+    expect(versionReads()).toHaveLength(1);
+    expect(Array.from(seen).filter((text) => text.includes("You're offline"))).toEqual([]);
   });
 });
 
