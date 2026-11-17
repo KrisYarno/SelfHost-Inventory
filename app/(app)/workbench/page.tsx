@@ -36,6 +36,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { SearchInput } from "@/components/ui/search-input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ProductWithQuantity } from "@/types/product";
+import type { ExternalOrder } from "@/types/external-orders";
 import { RotateCcw, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 import { useLocation } from "@/contexts/location-context";
@@ -104,11 +105,26 @@ export default function WorkbenchPage() {
   const lowStockDefault = useLowStockDefault();
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
-  const { data: products = [], isLoading: loading, refetch: refetchProducts } = useInventoryProducts({
+  const {
+    data: products = [],
+    isLoading: loading,
+    isPlaceholderData,
+    isSuccess: productsLoaded,
+    refetch: refetchProducts,
+  } = useInventoryProducts({
     locationId: selectedLocationId,
     sortBy: "baseNameNumeric",
     sortOrder: "asc",
   });
+  /**
+   * Facelift F0-1 (e), OC1-1: "in stock here" must mean the location the stock
+   * will leave from. While the products are loading, or are still the PREVIOUS
+   * location's rows shown as placeholder data, a store order cannot be built
+   * truthfully: selection waits, and a location-change rebuild waits for
+   * `stockArrived`.
+   */
+  const stockLoading = loading || isPlaceholderData;
+  const stockArrived = productsLoaded && !isPlaceholderData;
 
   const {
     orderItems,
@@ -642,24 +658,99 @@ export default function WorkbenchPage() {
   // order and re-select it so the cart picks up the newly mapped item. Mapping
   // links an EXISTING product, so the current `products` snapshot is sufficient
   // — we only need fresh order data to pick up the new productLink.
-  const refetchExternalOrder = useCallback(async () => {
-    if (!selectedExternalOrder?.id) return;
-    try {
-      const res = await fetch(
-        `/api/orders/external/${selectedExternalOrder.id}`,
-        { cache: "no-store" }
-      );
-      if (!res.ok) {
-        toast.error("Could not refresh order after mapping. Please reselect.");
+  // F0-1 (e): it also rebuilds the order after a location change, so it answers
+  // whether the order was actually rebuilt. Its failure toasts speak about
+  // MAPPING, so that caller passes `quiet` and words its own failure.
+  const refetchExternalOrder = useCallback(
+    async ({ quiet = false }: { quiet?: boolean } = {}): Promise<boolean> => {
+      if (!selectedExternalOrder?.id) return false;
+      try {
+        const res = await fetch(
+          `/api/orders/external/${selectedExternalOrder.id}`,
+          { cache: "no-store" }
+        );
+        if (!res.ok) {
+          if (!quiet) toast.error("Could not refresh order after mapping. Please reselect.");
+          return false;
+        }
+        const freshOrder = await res.json();
+        selectExternalOrder(freshOrder, products);
+        return true;
+      } catch (err) {
+        console.error("Refetch external order error:", err);
+        if (!quiet) toast.error("Could not refresh order after mapping.");
+        return false;
+      }
+    },
+    [selectedExternalOrder?.id, selectExternalOrder, products]
+  );
+
+  /**
+   * F0-1 (e), OC1-1: THE LOCATION-CHANGE REBUILD. A selected store order's cart
+   * and its out-of-stock lines were built from the stock of the location chosen
+   * when it was selected. When the shell's location changes under it, the order
+   * is rebuilt once the NEW location's products have arrived (never from the
+   * old location's placeholder rows), and the operator is told — including that
+   * lines added by hand went with the old cart (the rebuild replaces it).
+   * A rebuild that FAILS clears the order (orchestrator ruling on F0a): a cart
+   * built from the previous location's stock must never stand under the new
+   * location's name.
+   *
+   * The first effect only notices the change; the second waits for the stock.
+   * `rebuildForLocationId` is the pending rebuild, null when there is none, so
+   * the rebuild runs exactly once per change.
+   */
+  const lastLocationIdRef = useRef(selectedLocationId);
+  const [rebuildForLocationId, setRebuildForLocationId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (lastLocationIdRef.current === selectedLocationId) return;
+    lastLocationIdRef.current = selectedLocationId;
+    setRebuildForLocationId(selectedExternalOrder ? selectedLocationId : null);
+  }, [selectedLocationId, selectedExternalOrder]);
+
+  useEffect(() => {
+    if (rebuildForLocationId === null) return;
+    if (!selectedExternalOrder) {
+      // The order was cleared while the stock was on its way.
+      setRebuildForLocationId(null);
+      return;
+    }
+    if (!stockArrived) return;
+    setRebuildForLocationId(null);
+    // Manual lines are the ones the fulfil leg does not carry (the dialog's split).
+    const handAdded = orderItems.some((item) => !item.fulfillmentItemId);
+    const locationName = selectedLocation?.name ?? "the selected location";
+    const { orderNumber } = selectedExternalOrder;
+    void refetchExternalOrder({ quiet: true }).then((rebuilt) => {
+      if (!rebuilt) {
+        clearExternalOrder();
+        toast.error(
+          `Location changed to ${locationName} — order ${orderNumber} couldn't be reloaded, so it was cleared. Select it again.`
+        );
         return;
       }
-      const freshOrder = await res.json();
-      selectExternalOrder(freshOrder, products);
-    } catch (err) {
-      console.error("Refetch external order error:", err);
-      toast.error("Could not refresh order after mapping.");
-    }
-  }, [selectedExternalOrder?.id, selectExternalOrder, products]);
+      toast.info(
+        `Location changed to ${locationName} — order ${orderNumber} was rebuilt with this location's stock.` +
+          (handAdded ? " Items you added by hand were removed." : "")
+      );
+    });
+  }, [
+    rebuildForLocationId,
+    selectedExternalOrder,
+    stockArrived,
+    orderItems,
+    selectedLocation,
+    refetchExternalOrder,
+    clearExternalOrder,
+  ]);
+
+  // F0-1 (e): the selection gate. The rows are disabled while stock is loading;
+  // the page refuses as well, so no path builds an order from the wrong rows.
+  const handleOrderSelected = (order: ExternalOrder) => {
+    if (stockLoading) return;
+    selectExternalOrder(order, products);
+  };
 
   const handleProductClick = (product: ProductWithQuantity) => {
     if (product.currentQuantity > 0) {
@@ -775,9 +866,10 @@ export default function WorkbenchPage() {
                   {orderSource === 'wc-order' && (
                     <TabsContent value="wc-order" className="mt-2">
                       <WCOrderSelector
-                        onOrderSelected={(order) => selectExternalOrder(order, products)}
+                        onOrderSelected={handleOrderSelected}
                         selectedOrder={selectedExternalOrder}
                         onClear={clearExternalOrder}
+                        stockLoading={stockLoading}
                       />
                       {unmappedExternalItems.length > 0 && (
                         <div className="mt-2">
@@ -996,9 +1088,10 @@ export default function WorkbenchPage() {
                 {/* From Order tab: WC order selector */}
                 <TabsContent value="wc-order">
                   <WCOrderSelector
-                    onOrderSelected={(order) => selectExternalOrder(order, products)}
+                    onOrderSelected={handleOrderSelected}
                     selectedOrder={selectedExternalOrder}
                     onClear={clearExternalOrder}
+                    stockLoading={stockLoading}
                   />
                   {unmappedExternalItems.length > 0 && (
                     <div className="mt-2">
@@ -1060,9 +1153,14 @@ export default function WorkbenchPage() {
         onConfirm={handleQuantityConfirm}
       />
 
-      {/* Mobile FAB */}
+      {/* Mobile FAB — F0-1 (d): it also shows for a store order whose lines
+          are all skipped, the phone's only way into the sheet that lists them. */}
       {isMobile && (
-        <FloatingCartButton itemCount={getTotalItems()} onClick={() => setMobileCartOpen(true)} />
+        <FloatingCartButton
+          itemCount={getTotalItems()}
+          skippedCount={isWCOrder ? unmappedExternalItems.length : 0}
+          onClick={() => setMobileCartOpen(true)}
+        />
       )}
 
       {/* Mobile Cart Sheet */}
@@ -1078,6 +1176,7 @@ export default function WorkbenchPage() {
           onCompleteOrder={handleCompleteOrder}
           canComplete={orderItems.length > 0 && !!orderReference.trim()}
           queuePosition={getQueuePosition()}
+          onItemMapped={refetchExternalOrder}
         />
       )}
 

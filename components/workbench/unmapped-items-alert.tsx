@@ -45,9 +45,18 @@ interface UnmappedItemsAlertProps {
     externalProductId?: string;
     externalVariantId?: string;
     isBundle?: boolean;
+    // The class the hook stamped (OC1-7): `out-of-stock` exists ONLY as a
+    // recorded class, so the type has to let it through to the classifier.
+    class?: SkippedLineClass;
   }>;
   integrationId?: string;
   onItemMapped?: () => void;
+  /**
+   * Facelift F0-1: whether the list starts open. Omitted, the as-built rule
+   * holds (open for {@link AUTO_COLLAPSE_THRESHOLD} lines or fewer); the phone's
+   * cart sheet passes `false` so the alert does not push the cart out of view.
+   */
+  defaultExpanded?: boolean;
 }
 
 type AlertItem = UnmappedItemsAlertProps["items"][number];
@@ -72,12 +81,13 @@ export function UnmappedItemsAlert({
   items,
   integrationId,
   onItemMapped,
+  defaultExpanded,
 }: UnmappedItemsAlertProps) {
   const { data: session } = useSession();
   const isAdmin = session?.user?.isAdmin ?? false;
 
   const [isExpanded, setIsExpanded] = useState(
-    items.length <= AUTO_COLLAPSE_THRESHOLD
+    defaultExpanded ?? items.length <= AUTO_COLLAPSE_THRESHOLD
   );
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
   const [mapDialogItem, setMapDialogItem] = useState<MapDialogItem | null>(null);
@@ -156,13 +166,11 @@ export function UnmappedItemsAlert({
         </button>
 
         {/* Item list, grouped by class — the same grouping and the same per-line
-            copy the complete-order dialog prints. */}
-        <div
-          className={cn(
-            "overflow-hidden transition-all duration-300 ease-in-out",
-            isExpanded ? "max-h-[600px]" : "max-h-0"
-          )}
-        >
+            copy the complete-order dialog prints. Facelift F0-1: never clipped
+            (the old max-h-[600px] hid every line past roughly the twelfth, and
+            the phone's sheet scrolls this list with the cart), and not rendered
+            at all while collapsed, so nothing hidden stays in the DOM. */}
+        {isExpanded && (
           <div className="px-3 pb-2.5 space-y-2.5">
             {grouped.map(({ lineClass, lines }) => (
               <div
@@ -240,7 +248,7 @@ export function UnmappedItemsAlert({
               </div>
             ))}
           </div>
-        </div>
+        )}
       </div>
 
       {/* ProductMapDialog for inline mapping (admin only). Guarded on

@@ -8,6 +8,12 @@ export interface OrderItem {
   quantity: number;
   fulfillmentItemId?: string;  // ExternalOrderItem.id for fulfillment API
   source?: 'manual' | 'wc-order';  // Track origin for separate handling
+  // Facelift F0-1: what the store-order line still NEEDS (its remaining
+  // quantity), stamped on every store-order cart line. `quantity` is what this
+  // cart will deduct, capped at the stock here; the row says when the two
+  // differ. Display only: the fulfil and deduct bodies are built field by
+  // field and never carry it.
+  neededQuantity?: number;
 }
 
 // Metadata stored when a WC order is selected
@@ -32,7 +38,8 @@ export interface SelectedExternalOrder {
 // warning that suggests no mapping exists.
 //
 // class (W2-1 ride-along, registered at W0.5-a): the STRUCTURAL truth — which of
-// `selectExternalOrder`'s three push branches produced this line. Until now that
+// `selectExternalOrder`'s push branches produced this line (four since facelift
+// F0-1 added `out-of-stock`, which exists ONLY as a recorded class). Until now that
 // was re-derived downstream from "does the line carry an external product
 // reference?", which is correct only because the branch that omits the reference
 // happens to be the one that means `unavailable`. The hook knows which branch it

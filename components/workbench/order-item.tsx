@@ -59,6 +59,11 @@ export function OrderItemComponent({
 
   const availableStock = item.product.currentQuantity ?? 0;
   const isOverPicked = item.quantity > availableStock;
+  // Facelift F0-1 (FL-C-2): a store-order line that holds fewer units than the
+  // order still needs (capped at the stock here, or stepped down) says so on
+  // the row. The cap toast it used to rely on alone was gone in seconds.
+  const neededQuantity = item.neededQuantity;
+  const isShortOfNeeded = neededQuantity !== undefined && item.quantity < neededQuantity;
 
   return (
     <div
@@ -75,6 +80,11 @@ export function OrderItemComponent({
         <h4 className="font-medium text-sm truncate">
           {item.product.name}
         </h4>
+        {isShortOfNeeded && (
+          <p className="text-xs text-amber-700 dark:text-amber-400">
+            {`${neededQuantity} needed · ${item.product.currentQuantity} in stock here · ${neededQuantity - item.quantity} not in this cart`}
+          </p>
+        )}
         <div className="mt-1 flex flex-wrap items-center gap-2">
           <ValueChip
             tone={

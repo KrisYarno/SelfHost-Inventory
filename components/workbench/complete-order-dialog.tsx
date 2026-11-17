@@ -1010,7 +1010,15 @@ export function CompleteOrderDialog({
                             <span className="text-muted-foreground">
                               {item.product.name}
                             </span>
-                            <span className="font-medium">{item.quantity}</span>
+                            {/* Facelift F0-1: a line holding less than the order
+                                still needs says "3 of 5", in the warning tone. */}
+                            {item.neededQuantity !== undefined && item.quantity < item.neededQuantity ? (
+                              <span className="font-medium text-amber-700 dark:text-amber-400">
+                                {`${item.quantity} of ${item.neededQuantity}`}
+                              </span>
+                            ) : (
+                              <span className="font-medium">{item.quantity}</span>
+                            )}
                           </li>
                         ))}
                       </ul>

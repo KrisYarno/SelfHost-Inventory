@@ -26,6 +26,12 @@ interface WCOrderSelectorProps {
   onOrderSelected: (order: ExternalOrder) => void;
   selectedOrder: SelectedExternalOrder | null;
   onClear: () => void;
+  /**
+   * Facelift F0-1 (OC1-1): the page's products query is loading, or is still
+   * showing the PREVIOUS location's rows as placeholder data. A selection now
+   * would build "in stock here" from somewhere else, so the rows wait.
+   */
+  stockLoading?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +69,7 @@ export function WCOrderSelector({
   onOrderSelected,
   selectedOrder,
   onClear,
+  stockLoading = false,
 }: WCOrderSelectorProps) {
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebounce(search, 300);
@@ -186,6 +193,7 @@ export function WCOrderSelector({
               <button
                 key={order.id}
                 onClick={() => onOrderSelected(order)}
+                disabled={stockLoading}
                 className={cn(
                   "flex w-full items-center justify-between gap-2 rounded-lg",
                   "border border-border/60 bg-background px-3 py-2.5",
@@ -221,7 +229,9 @@ export function WCOrderSelector({
                     </div>
                   </div>
                 </div>
-                <span className="text-xs text-muted-foreground shrink-0">Select</span>
+                <span className="text-xs text-muted-foreground shrink-0">
+                  {stockLoading ? "Loading stock…" : "Select"}
+                </span>
               </button>
             );
           })}

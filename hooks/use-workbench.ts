@@ -221,7 +221,21 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
             (p) => p.id === item.productLink!.internalProductId
           );
 
-          if (matchingProduct) {
+          if (matchingProduct && matchingProduct.currentQuantity <= 0) {
+            // Facelift F0-1 (FL-C-2): nothing in stock HERE (none, a row the
+            // location does not have, or negative). This line used to be capped
+            // to 0 and then pushed nowhere, so it vanished from every surface
+            // and the order completed as if whole. It is a skipped line of its
+            // own now, on screen and tap-required in the completion dialog, so
+            // the passing toast that was its only record is gone.
+            unmappedItems.push({
+              name: item.name,
+              sku: item.sku ?? undefined,
+              quantity: remainingQty,
+              externalItemId: item.id,
+              class: 'out-of-stock',
+            });
+          } else if (matchingProduct) {
             let qty = remainingQty;
 
             // Amendment 8: warn if order needs more than available stock, cap at stock
@@ -232,14 +246,15 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
               qty = matchingProduct.currentQuantity;
             }
 
-            if (qty > 0) {
-              cartItems.push({
-                product: matchingProduct,
-                quantity: qty,
-                fulfillmentItemId: item.id,
-                source: 'wc-order',
-              });
-            }
+            cartItems.push({
+              product: matchingProduct,
+              quantity: qty,
+              fulfillmentItemId: item.id,
+              source: 'wc-order',
+              // F0-1: what the line still needs, kept beside the capped
+              // quantity so the row can say how short the cart is.
+              neededQuantity: remainingQty,
+            });
           } else {
             // Product was mapped but not found in loaded products array
             unmappedItems.push({

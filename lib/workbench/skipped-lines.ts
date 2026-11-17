@@ -1,16 +1,20 @@
 /**
- * The three classes a skipped workbench line can belong to, and the ONE copy
- * each of them gets (contract pack REV-3 T6; extracted at W1-4b).
+ * The four classes a skipped workbench line can belong to, and the ONE copy
+ * each of them gets (contract pack REV-3 T6; extracted at W1-4b; the fourth,
+ * `out-of-stock`, added by facelift F0-1).
  *
  * `unmappedExternalItems` (hooks/use-workbench.ts `selectExternalOrder`) mixes
- * three different truths under one array name:
+ * four different truths under one array name:
  *
- *   bundle       the line IS mapped, but a bundle cannot sit in the workbench
- *                cart (cart entries are 1:1 with one internal product) — the
- *                operator fulfills it from the Order Details sheet;
- *   unavailable  the line IS mapped, but its internal product was not in the
- *                loaded products array, so it could not be added to the cart;
- *   unmapped     the line was never mapped at all.
+ *   bundle        the line IS mapped, but a bundle cannot sit in the workbench
+ *                 cart (cart entries are 1:1 with one internal product) — the
+ *                 operator fulfills it from the Order Details sheet;
+ *   unavailable   the line IS mapped, but its internal product was not in the
+ *                 loaded products array, so it could not be added to the cart;
+ *   out-of-stock  the line IS mapped and its product IS loaded, but there is
+ *                 none of it in stock at the selected location (F0-1: this line
+ *                 used to be dropped from every surface);
+ *   unmapped      the line was never mapped at all.
  *
  * W0.5-a taught the COMPLETE dialog to say all three. The page-level alert kept
  * calling every non-bundle line "unmapped", so the same array told two stories
@@ -27,18 +31,20 @@
  * Pure: no React, no Next, no Prisma.
  */
 
-export type SkippedLineClass = 'unmapped' | 'unavailable' | 'bundle';
+export type SkippedLineClass = 'unmapped' | 'unavailable' | 'out-of-stock' | 'bundle';
 
 /** The per-line truth. Bundles are the only class that still ships correctly. */
 export const SKIPPED_LINE_COPY: Record<SkippedLineClass, string> = {
   unmapped: 'ships unmapped — not deducted',
   unavailable: 'mapped but unavailable — not deducted',
+  'out-of-stock': 'none in stock here — not deducted',
   bundle: 'bundle — fulfill via Order Details',
 };
 
 export const SKIPPED_LINE_LABEL: Record<SkippedLineClass, string> = {
   unmapped: 'Unmapped',
   unavailable: 'Mapped but unavailable',
+  'out-of-stock': 'Out of stock here',
   bundle: 'Bundles',
 };
 
@@ -50,6 +56,7 @@ export const SKIPPED_LINE_LABEL: Record<SkippedLineClass, string> = {
 export const SKIPPED_LINE_NOUN: Record<SkippedLineClass, [string, string]> = {
   unmapped: ['unmapped line', 'unmapped lines'],
   unavailable: ['mapped but unavailable line', 'mapped but unavailable lines'],
+  'out-of-stock': ['out-of-stock line', 'out-of-stock lines'],
   bundle: ['bundle line', 'bundle lines'],
 };
 
@@ -57,13 +64,15 @@ export const SKIPPED_LINE_NOUN: Record<SkippedLineClass, [string, string]> = {
 export const SKIPPED_LINE_CLASSES: readonly SkippedLineClass[] = [
   'unmapped',
   'unavailable',
+  'out-of-stock',
   'bundle',
 ];
 
 /**
  * The fields the classification reads. `class` (W2-1 ride-along) is the
  * STRUCTURAL answer stamped by the push site itself; the other three are the
- * as-built heuristic that has to reconstruct it.
+ * as-built heuristic that has to reconstruct it. The heuristic only knows the
+ * original three classes: `out-of-stock` exists only as a recorded class.
  */
 export type ClassifiableLine = {
   class?: SkippedLineClass;
@@ -74,7 +83,7 @@ export type ClassifiableLine = {
 
 /**
  * A RECORDED class always wins: the hook branch that pushed the line knew which
- * of the three truths it was pushing, and that beats re-deducing it from the
+ * of the four truths it was pushing, and that beats re-deducing it from the
  * shape of the payload.
  *
  * The heuristic stays as the fallback rather than being deleted, because a line

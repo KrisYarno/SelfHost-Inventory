@@ -18,6 +18,7 @@
 
 import * as React from "react";
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 jest.mock("next-auth/react", () => ({
   useSession: jest.fn(() => ({ data: { user: { isAdmin: true } } })),
@@ -282,5 +283,102 @@ describe("a line with no store product", () => {
     expect(screen.getByTestId("skipped-group-unavailable")).toBeInTheDocument();
     expect(screen.queryByText(NO_STORE_PRODUCT_LINE_HINT)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^map$/i })).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0-1 (plan 2026-11-17-facelift-f0, part 4 + folds (a), (c)).
+//
+// The phone's cart sheet now renders THIS component, inside one scroll region
+// it shares with the order list. So the list may not clip itself: the old
+// `max-h-[600px] overflow-hidden` hid every line past roughly the twelfth, and
+// the collapsed list sat in the DOM (focusable, read aloud) at `max-h-0`. The
+// expanded list renders unclipped; the collapsed list is not rendered at all.
+// ---------------------------------------------------------------------------
+
+/** A mapped single with nothing in stock here, stamped the way the hook stamps it. */
+const OUT_OF_STOCK = {
+  name: "Empty Shelf 5mg",
+  sku: "ES-5",
+  quantity: 2,
+  class: "out-of-stock" as const,
+};
+
+const manyLines = (count: number) =>
+  Array.from({ length: count }, (_, i) => ({
+    name: `Skipped line ${i + 1}`,
+    quantity: 1,
+    externalProductId: `wc-${i + 1}`,
+    class: "unmapped" as const,
+  }));
+
+describe("F0-1 — the expanded list is never clipped; the collapsed one is not rendered", () => {
+  it("12 skipped lines, expanded, render all 12 — with no height clip anywhere", () => {
+    const { container } = renderAlert(manyLines(12), { defaultExpanded: true });
+
+    expect(screen.getAllByRole("listitem")).toHaveLength(12);
+    expect(screen.getByText("Skipped line 12")).toBeInTheDocument();
+    expect(container.querySelector('[class*="max-h-"]')).toBeNull();
+    expect(container.querySelector(".overflow-hidden")).toBeNull();
+  });
+
+  it("collapsed, the list is not in the DOM at all", () => {
+    renderAlert(manyLines(4));
+
+    expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+    expect(screen.queryByText("Skipped line 1")).toBeNull();
+    // The header still counts them.
+    expect(screen.getByTestId("skipped-lines-header")).toHaveTextContent("4 unmapped lines");
+  });
+
+  it("opening it renders every line", async () => {
+    const user = userEvent.setup();
+    renderAlert(manyLines(4));
+
+    await user.click(screen.getByTestId("skipped-lines-header"));
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
+  });
+
+  it("defaultExpanded={false} starts collapsed even for a short list; the default is unchanged", () => {
+    const first = renderAlert([UNMAPPED], { defaultExpanded: false });
+    expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+    first.unmount();
+
+    // Without the prop: 3 or fewer lines open, exactly as before.
+    renderAlert([UNMAPPED]);
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+  });
+});
+
+describe("F0-1 — the out-of-stock class on the page alert", () => {
+  it("groups it under its own label with its own copy, and counts it with its own noun", () => {
+    renderAlert([OUT_OF_STOCK]);
+
+    const group = screen.getByTestId("skipped-group-out-of-stock");
+    expect(within(group).getByText("Out of stock here (1)")).toBeInTheDocument();
+    expect(within(group).getByText("none in stock here — not deducted")).toBeInTheDocument();
+    expect(screen.getByTestId("skipped-lines-header")).toHaveTextContent(
+      "1 out-of-stock line will not be deducted"
+    );
+  });
+
+  it("offers no Map button and no hand-typed hint (the line IS mapped)", () => {
+    renderAlert([OUT_OF_STOCK]);
+
+    expect(screen.queryByRole("button", { name: /^map$/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(NO_STORE_PRODUCT_LINE_HINT)).not.toBeInTheDocument();
+  });
+
+  it("renders after the unavailable group and before the bundles", () => {
+    renderAlert([BUNDLE, OUT_OF_STOCK, UNAVAILABLE_STAMPED]);
+
+    const order = Array.from(
+      document.querySelectorAll('[data-testid^="skipped-group-"]')
+    ).map((el) => el.getAttribute("data-testid"));
+    expect(order).toEqual([
+      "skipped-group-unavailable",
+      "skipped-group-out-of-stock",
+      "skipped-group-bundle",
+    ]);
   });
 });

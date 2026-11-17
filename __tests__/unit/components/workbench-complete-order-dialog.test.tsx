@@ -2170,3 +2170,118 @@ describe("complete-order dialog — a committed leg whose reply can't be read (C
     expect(toast.success as jest.Mock).not.toHaveBeenCalledWith(UNREADABLE);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Facelift F0-1 (plan 2026-11-17-facelift-f0, parts 1-3 + folds (a), (b)).
+//
+// FL-C-2: an ordered line with no stock here used to vanish — no cart line, no
+// checklist line — and the order completed as if whole. It is now an
+// `'out-of-stock'` skipped line, and only bundles are informational, so it is
+// TAP-REQUIRED here with no dialog change. A short line keeps the number the
+// order needs, and the From Order list says "3 of 5" for it.
+//
+// What is SENT does not move: both bodies are built field by field, so the new
+// cart field cannot ride along. The byte-identity pins below hold the exact
+// strings for a mixed cart with a short line in it.
+// ---------------------------------------------------------------------------
+
+describe("complete-order dialog — F0-1: out-of-stock and short store lines", () => {
+  // Product 504 has nothing here; 505 has 3. 501 is the house in-stock widget.
+  const F01_PRODUCTS = [
+    { id: 501, name: "Widget In Stock", currentQuantity: 10 },
+    { id: 504, name: "Empty Here", currentQuantity: 0 },
+    { id: 505, name: "Three Left", currentQuantity: 3 },
+  ] as unknown as ProductWithQuantity[];
+
+  const OUT_OF_STOCK_ITEM = orderItem({
+    id: "it-oos",
+    name: "Empty Here",
+    sku: "EH-1",
+    quantity: 2,
+    isMapped: true,
+    productLinkId: "pl-5",
+    productLink: {
+      id: "pl-5",
+      internalProductId: 504,
+      externalSku: null,
+      externalTitle: null,
+      internalProduct: { id: 504, name: "Empty Here", baseName: null, variant: null },
+    },
+  });
+
+  const SHORT_ITEM = orderItem({
+    id: "it-short",
+    name: "Three Left",
+    quantity: 5,
+    isMapped: true,
+    productLinkId: "pl-6",
+    productLink: {
+      id: "pl-6",
+      internalProductId: 505,
+      externalSku: null,
+      externalTitle: null,
+      internalProduct: { id: 505, name: "Three Left", baseName: null, variant: null },
+    },
+  });
+
+  function seedF01(items: ExternalItem[]) {
+    act(() => {
+      useWorkbench.getState().selectExternalOrder(makeOrder(items), F01_PRODUCTS);
+    });
+  }
+
+  it("lists an out-of-stock line under its own class, with its own copy", () => {
+    seedF01([CART_ITEM, OUT_OF_STOCK_ITEM]);
+    renderDialog();
+
+    expect(screen.getByText("Out of stock here (1)")).toBeInTheDocument();
+    expect(screen.getByText("none in stock here — not deducted")).toBeInTheDocument();
+  });
+
+  it("requires a tap on an out-of-stock line before Complete unlocks", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    seedF01([CART_ITEM, OUT_OF_STOCK_ITEM]);
+    renderDialog();
+
+    expect(tapTargets()).toHaveLength(1);
+    expect(completeButton()).toBeDisabled();
+
+    await user.click(screen.getByRole("checkbox", { name: /Empty Here/ }));
+    expect(completeButton()).toBeEnabled();
+  });
+
+  it("the From Order list says '3 of 5' for a short line, in the warning tone", () => {
+    seedF01([CART_ITEM, SHORT_ITEM]);
+    renderDialog();
+
+    const short = screen.getByText("3 of 5");
+    expect(short).toHaveClass("text-amber-700", "dark:text-amber-400");
+    // A complete line keeps its bare quantity.
+    expect(screen.queryByText("2 of 2")).toBeNull();
+  });
+
+  it("the fulfil and deduct bodies are byte-identical for the same cart (no new field rides along)", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    seedF01([CART_ITEM, SHORT_ITEM, OUT_OF_STOCK_ITEM]);
+    act(() => {
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    renderDialog();
+
+    await user.click(screen.getByRole("checkbox", { name: /Empty Here/ }));
+    await user.click(completeButton());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    const [fulfil, deduct] = fetchMock.mock.calls as unknown as Array<[string, { body: string }]>;
+    expect(fulfil[0]).toBe("/api/orders/ord-1/fulfill");
+    expect(fulfil[1].body).toBe(
+      '{"locationId":1,"items":[{"itemId":"it-cart","quantity":2},{"itemId":"it-short","quantity":3}]}'
+    );
+    expect(deduct[0]).toBe("/api/inventory/deduct-simple");
+    expect(deduct[1].body).toBe(
+      '{"orderReference":"9001","locationId":1,"items":[{"productId":777,"quantity":1}],"selectedExternalOrderId":"ord-1","intent":"order"}'
+    );
+  });
+});
