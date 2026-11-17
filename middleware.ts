@@ -27,15 +27,44 @@ const authRoutes = ["/auth/signin", "/auth/signup"];
 // Routes that should have rate limiting
 const rateLimitedRoutes = ["/api/", "/auth/"];
 
-// THE ONE per-path override (reconciliation Part 2, FR-R2 (1), QA-1). The order
-// search runs up to one call per digit at phone typing speed, and every bench
-// device behind one office IP shares this per-IP, per-pathname bucket — at the
-// default 30/min a handful of typed removals a minute starts answering 429. The
-// route is read-only, authenticated and keeps its OWN per-user 60/min, so this
-// exact pathname gets 240/min here. EXACT match, never a prefix: any deeper
-// path (and every other path) keeps the limiter's default 30.
-const ORDER_SEARCH_PATHNAME = "/api/reconciliation/orders/search";
-const ORDER_SEARCH_PER_IP_LIMIT = 240;
+// THE per-path overrides of the per-IP, per-pathname bucket (the limiter's
+// default is 30/min). Every bench device behind one office IP shares that bucket,
+// so a path a few people hit together at work speed needs more than 30. EXACT
+// pathnames, never prefixes: any deeper path, and every other path, keeps the
+// default 30. Each route's own per-user limit is a separate bucket and unchanged.
+//
+// - The ORDER SEARCH (reconciliation Part 2, FR-R2 (1), QA-1): up to one call per
+//   digit at phone typing speed; read-only, authenticated, its own per-user
+//   60/min — 240/min here.
+// - The STOCKTAKE paths (P2-B3-2, Kris 2026-11-16). One spot count is one save to
+//   the adjust route, and every successful save refreshes the lists on screen
+//   behind the dialog (`invalidateInventoryCaches` refetches only ACTIVE
+//   queries). The dialog opens from two pages:
+//     /inventory — `/api/inventory/variants` (an infinite list: a refresh
+//       refetches EVERY loaded page — three load on their own, more after "Load
+//       more" — and search keystrokes use the same path, so 480), plus whichever
+//       of `/api/inventory/logs` / `/api/inventory/transfers` backs the tab on
+//       screen (lazy panes: the hidden one refetches when its tab opens);
+//     /products — `/api/products/optimized`.
+//   At 30/min a few people counting together would be refused at about one count
+//   every 2 s office-wide; the save and each refresh get 120 (variants 480). The
+//   adjust route keeps its own per-user 30/min; the four list reads have no
+//   per-user limit, so this bucket is their only throttle (they are read-only
+//   and page-capped, except `/api/products/optimized`'s pageSize — registered).
+//   And `/api/csrf`, 240: a tab whose full page load found no CSRF cookie has no
+//   token meta tag for its whole life, so `useCSRF` fetches a token on EVERY
+//   mount of a writing dialog (one per open on /inventory; two on /products,
+//   where Adjust and Stock In mount together) — refused, the save then fails its
+//   CSRF check. Public, no database; cheap to serve.
+const PER_IP_LIMIT_OVERRIDES: ReadonlyMap<string, number> = new Map([
+  ["/api/reconciliation/orders/search", 240],
+  ["/api/inventory/adjust", 120],
+  ["/api/inventory/variants", 480],
+  ["/api/inventory/logs", 120],
+  ["/api/inventory/transfers", 120],
+  ["/api/products/optimized", 120],
+  ["/api/csrf", 240],
+]);
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -53,7 +82,7 @@ export async function middleware(request: NextRequest) {
       enforceRateLimit(
         request,
         `middleware:${pathname}`,
-        pathname === ORDER_SEARCH_PATHNAME ? { limit: ORDER_SEARCH_PER_IP_LIMIT } : {}
+        PER_IP_LIMIT_OVERRIDES.has(pathname) ? { limit: PER_IP_LIMIT_OVERRIDES.get(pathname) } : {}
       );
     } catch (error) {
       if (error instanceof RateLimitError) {
