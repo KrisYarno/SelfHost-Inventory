@@ -46,3 +46,9 @@ test("sidebar renders Analytics -> /analytics and Price Board -> /scratchpad for
   expect(screen.getByRole("link", { name: /analytics/i })).toHaveAttribute("href", "/analytics");
   expect(screen.getByRole("link", { name: /price board/i })).toHaveAttribute("href", "/scratchpad");
 });
+
+// Facelift F1-8 (FL-A-18): both <nav> elements are labelled.
+test("the sidebar <nav> is labelled `Primary`", () => {
+  render(<SidebarNav />);
+  expect(screen.getByRole("navigation", { name: "Primary" })).toBeInTheDocument();
+});

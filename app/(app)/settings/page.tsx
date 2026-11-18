@@ -27,7 +27,7 @@ export default function SettingsPage() {
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 p-6 overflow-y-auto">
+      <div className="flex-1 p-6 overflow-y-auto">
         <div className="max-w-3xl space-y-6">
           {/* Theme Settings */}
           <Card>
@@ -97,7 +97,7 @@ export default function SettingsPage() {
             </CardContent>
           </Card>
         </div>
-      </main>
+      </div>
     </div>
   );
 }

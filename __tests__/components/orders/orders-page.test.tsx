@@ -62,6 +62,8 @@ let totalOrders = 500;
 let refuseOrders = false;
 /** When set, the next orders request hangs until `release()` is called. */
 let holdNext = false;
+/** F1-7: how `/api/companies/user` answers (`hold` never answers). */
+let companiesMode: "ok" | "empty" | "refuse" | "hold" = "ok";
 let release: () => void = () => {};
 let fetchMock: jest.Mock;
 
@@ -81,10 +83,18 @@ beforeEach(() => {
   totalOrders = 500;
   holdNext = false;
   refuseOrders = false;
+  companiesMode = "ok";
   mockToastError.mockReset();
   fetchMock = jest.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://x");
     if (url.pathname === "/api/companies/user") {
+      if (companiesMode === "hold") return new Promise<Response>(() => {});
+      if (companiesMode === "refuse") {
+        return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: "boom" }) } as Response);
+      }
+      if (companiesMode === "empty") {
+        return Promise.resolve({ ok: true, json: async () => ({ companies: [] }) } as Response);
+      }
       return Promise.resolve({
         ok: true,
         json: async () => ({ companies: [{ id: "c1", name: "Co 1" }, { id: "c2", name: "Co 2" }] }),
@@ -310,5 +320,95 @@ describe("FR1-9 ruling — a failed Load More", () => {
     await act(async () => {});
     expect(mockToastError).not.toHaveBeenCalled();
     expect(activeKeyPageSize()).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F1-6 + F1-7 (plan 2026-11-18-facelift-f1 REV 2) — Orders renders
+// through the `Page` frame (wide: today's full width, now with a gutter), and
+// its two reads say their states through `QueryState`: error only with no
+// data, empty only on an answer. The companies read used to treat a FAILED
+// read as "No Companies Found".
+// ---------------------------------------------------------------------------
+
+const FRAME_WIDE = "px-4 sm:px-6 py-4 mx-auto max-w-none";
+const DESCRIPTION = "Manage external orders from Shopify and WooCommerce";
+
+describe("F1-6 — Orders in the Page frame", () => {
+  it("renders through Page (wide) with its unchanged title, description and Refresh (labelled) as the action", async () => {
+    renderPage();
+    await loaded(50);
+    const h1 = screen.getByRole("heading", { level: 1, name: "Orders" });
+    expect(h1.getAttribute("class")).toBe("text-h2 sm:text-h1 min-w-0");
+    const frame = h1.closest("header")!.parentElement as HTMLElement;
+    expect(frame.getAttribute("class")).toBe(FRAME_WIDE);
+    const description = screen.getByText(DESCRIPTION);
+    expect(description).toHaveClass("hidden", "sm:block");
+    const refresh = screen.getByRole("button", { name: "Refresh" });
+    expect(refresh).toHaveAttribute("aria-label", "Refresh");
+    expect(h1.closest("header")).toContainElement(refresh);
+  });
+});
+
+describe("F1-7 — the companies read", () => {
+  it("loading renders inside Page title=Orders (title only), as a status", async () => {
+    companiesMode = "hold";
+    renderPage();
+    const h1 = await screen.findByRole("heading", { level: 1, name: "Orders" });
+    expect(h1.closest("header")!.parentElement!.getAttribute("class")).toBe(FRAME_WIDE);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(screen.queryByText(DESCRIPTION)).toBeNull();
+    expect(screen.queryByText("No Companies Found")).toBeNull();
+  });
+
+  it("a failed read says `Couldn't load your companies.` with Retry — never `No Companies Found`", async () => {
+    companiesMode = "refuse";
+    renderPage();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Couldn't load your companies.");
+    expect(screen.queryByText("No Companies Found")).toBeNull();
+    expect(screen.getByRole("heading", { level: 1, name: "Orders" })).toBeInTheDocument();
+
+    companiesMode = "ok";
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await loaded(50);
+    expect(screen.queryByText("Couldn't load your companies.")).toBeNull();
+  });
+
+  it("a successful [] says `No Companies Found`, inside Page title=Orders", async () => {
+    companiesMode = "empty";
+    renderPage();
+    expect(await screen.findByText("No Companies Found")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Orders" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("F1-7 — the orders list", () => {
+  it("a failed first read is a role=alert panel with the pinned title and text", async () => {
+    refuseOrders = true;
+    renderPage();
+    await waitFor(() => expect(lastOrderRequest().searchParams.get("companyId")).toBe("c1"));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Failed to Load Orders");
+    expect(alert).toHaveTextContent("Please check your connection and try again");
+  });
+
+  it("placeholder [] while the next filter loads is not `No Orders Found`; the empty ANSWER is", async () => {
+    totalOrders = 0;
+    renderPage();
+    await waitFor(() => {
+      expect(lastOrderRequest().searchParams.get("companyId")).toBe("c1");
+      expect(screen.getByText("No Orders Found")).toBeInTheDocument();
+    });
+
+    holdNext = true;
+    fireEvent.click(screen.getByRole("button", { name: "change status" }));
+    await waitFor(() => expect(lastOrderRequest().searchParams.get("status")).toBe("PENDING"));
+    expect(screen.queryByText("No Orders Found")).toBeNull();
+    expect(screen.getByText("Showing 0 of 0 orders")).toBeInTheDocument();
+
+    release();
+    expect(await screen.findByText("No Orders Found")).toBeInTheDocument();
   });
 });

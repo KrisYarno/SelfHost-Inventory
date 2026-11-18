@@ -29,7 +29,7 @@ export function SidebarNav() {
   const links = [...flattenNav(navConfig, isAdmin), ...desktopOnlyNav];
 
   return (
-    <nav className="space-y-1 px-3 py-4">
+    <nav aria-label="Primary" className="space-y-1 px-3 py-4">
       {links.map((link) => {
         const isActive = pathname === link.href || pathname.startsWith(`${link.href}/`);
 

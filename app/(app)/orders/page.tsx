@@ -6,6 +6,8 @@ import { toast } from "sonner";
 import { Package, RefreshCw, Loader2, Plug } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { QueryState } from "@/components/ui/query-state";
+import { Page } from "@/components/layout/page";
 import { ExternalOrderCard } from "@/components/orders/external-order-card";
 import { OrderFilters } from "@/components/orders/order-filters";
 import { ExternalOrderDetailsSheet } from "@/components/orders/external-order-details-sheet";
@@ -34,7 +36,8 @@ export default function OrdersPage() {
   const { token: csrfToken } = useCSRF();
 
   // Fetch user's companies
-  const { data: companiesData, isLoading: companiesLoading } = useUserCompanies();
+  const companiesQuery = useUserCompanies();
+  const companiesData = companiesQuery.data;
   const companies = useMemo(() => companiesData?.companies || [], [companiesData?.companies]);
 
   // Set default company when companies are loaded
@@ -45,14 +48,7 @@ export default function OrdersPage() {
   }, [companies, selectedCompanyId]);
 
   // Fetch orders with filters
-  const {
-    data: ordersData,
-    isLoading: ordersLoading,
-    error: ordersError,
-    refetch,
-    isFetching,
-    isPlaceholderData,
-  } = useExternalOrders({
+  const ordersQuery = useExternalOrders({
     companyId: selectedCompanyId || undefined,
     platform,
     status,
@@ -60,6 +56,7 @@ export default function OrdersPage() {
     page: 1,
     pageSize,
   });
+  const { data: ordersData, error: ordersError, refetch, isFetching, isPlaceholderData } = ordersQuery;
 
   // Memoized so the identity is stable across renders — the rebind effect below
   // depends on `orders`, and a fresh array each render would re-run it endlessly.
@@ -134,163 +131,165 @@ export default function OrdersPage() {
     }
   }, [orders, selectedOrder]);
 
-  // Loading state
-  if (companiesLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
-  // No companies state
+  // Facelift F1-7: the companies read says its own states inside the page
+  // frame — loading, a failed read (never "no companies"), and an ANSWER of
+  // none. A list with companies renders the page below.
   if (companies.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[400px] text-center px-4">
-        <Package className="h-16 w-16 text-muted-foreground/50 mb-4" />
-        <h2 className="text-2xl font-semibold mb-2">No Companies Found</h2>
-        <p className="text-muted-foreground max-w-md">
-          You need to be associated with a company to view orders. Please contact your administrator.
-        </p>
-      </div>
+      <Page title="Orders" width="wide">
+        <QueryState
+          query={companiesQuery}
+          skeleton={
+            <div className="flex items-center justify-center min-h-[400px]">
+              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            </div>
+          }
+          isEmpty={(data) => (data?.companies ?? []).length === 0}
+          empty={
+            <div className="flex flex-col items-center justify-center min-h-[400px] text-center px-4">
+              <Package className="h-16 w-16 text-muted-foreground/50 mb-4" />
+              <h2 className="text-2xl font-semibold mb-2">No Companies Found</h2>
+              <p className="text-muted-foreground max-w-md">
+                You need to be associated with a company to view orders. Please contact your administrator.
+              </p>
+            </div>
+          }
+          errorText="Couldn't load your companies."
+        >
+          {() => null}
+        </QueryState>
+      </Page>
     );
   }
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <div>
-          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Orders</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Manage external orders from Shopify and WooCommerce
-          </p>
-        </div>
+    <Page
+      title="Orders"
+      description="Manage external orders from Shopify and WooCommerce"
+      width="wide"
+      actions={
         <Button
           variant="outline"
           size="sm"
           onClick={handleRefresh}
           disabled={isFetching}
           className="gap-2"
+          aria-label="Refresh"
         >
           <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} />
           <span className="hidden sm:inline">Refresh</span>
         </Button>
-      </div>
+      }
+    >
+      <div className="space-y-6">
+        {/* Filters */}
+        <OrderFilters
+          companies={companies}
+          selectedCompanyId={selectedCompanyId}
+          onCompanyChange={handleCompanyChange}
+          platform={platform}
+          onPlatformChange={handlePlatformChange}
+          status={status}
+          onStatusChange={handleStatusChange}
+          searchQuery={searchQuery}
+          onSearchChange={handleSearchChange}
+        />
 
-      {/* Filters */}
-      <OrderFilters
-        companies={companies}
-        selectedCompanyId={selectedCompanyId}
-        onCompanyChange={handleCompanyChange}
-        platform={platform}
-        onPlatformChange={handlePlatformChange}
-        status={status}
-        onStatusChange={handleStatusChange}
-        searchQuery={searchQuery}
-        onSearchChange={handleSearchChange}
-      />
-
-      {/* Orders List */}
-      <div className="space-y-4">
-        {ordersLoading ? (
-          // Loading skeleton
-          <div className="space-y-3">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <Skeleton key={i} className="h-32 w-full rounded-lg" />
-            ))}
-          </div>
-        ) : ordersError && ordersData === undefined ? (
-          // Error state — FR1-9: only when nothing is loaded. The list polls
-          // every 30 s, and a failed poll over loaded rows keeps the rows.
-          <div className="flex flex-col items-center justify-center py-12 text-center">
-            <Package className="h-12 w-12 text-muted-foreground/50 mb-4" />
-            <h3 className="text-lg font-semibold mb-2">Failed to Load Orders</h3>
-            <p className="text-sm text-muted-foreground mb-4">
-              Please check your connection and try again
-            </p>
-            <Button onClick={handleRefresh} variant="outline">
-              <RefreshCw className="h-4 w-4 mr-2" />
-              Retry
-            </Button>
-          </div>
-        ) : orders.length === 0 ? (
-          // Empty state
-          <div className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="rounded-2xl bg-muted/50 p-6 mb-6">
-              <Package className="h-16 w-16 text-muted-foreground/40" />
-            </div>
-            <h3 className="text-h3 mb-2">No Orders Found</h3>
-            {searchQuery || status !== "all" ? (
-              <p className="text-body text-muted-foreground max-w-sm">
-                No orders match your current filters. Try adjusting your search or status filter.
-              </p>
-            ) : (
+        {/* Orders List — F1-7: error only with nothing loaded (the list polls
+            every 30 s, and a failed poll over loaded rows keeps the rows); empty
+            only on an answer, never on placeholder rows. */}
+        <div className="space-y-4">
+          <QueryState
+            query={ordersQuery}
+            skeleton={
+              <div className="space-y-3">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <Skeleton key={i} className="h-32 w-full rounded-lg" />
+                ))}
+              </div>
+            }
+            isEmpty={(data) => (data.orders ?? []).length === 0}
+            empty={
+              <div className="flex flex-col items-center justify-center py-16 text-center">
+                <div className="rounded-2xl bg-muted/50 p-6 mb-6">
+                  <Package className="h-16 w-16 text-muted-foreground/40" />
+                </div>
+                <h3 className="text-h3 mb-2">No Orders Found</h3>
+                {searchQuery || status !== "all" ? (
+                  <p className="text-body text-muted-foreground max-w-sm">
+                    No orders match your current filters. Try adjusting your search or status filter.
+                  </p>
+                ) : (
+                  <>
+                    <p className="text-body text-muted-foreground max-w-sm mb-6">
+                      Orders will appear here once you connect a Shopify or WooCommerce store.
+                      Set up an integration to start syncing orders automatically.
+                    </p>
+                    <Button asChild variant="outline">
+                      <Link href="/admin/integrations">
+                        <Plug className="h-4 w-4 mr-2" />
+                        Set Up Integration
+                      </Link>
+                    </Button>
+                  </>
+                )}
+              </div>
+            }
+            errorTitle="Failed to Load Orders"
+            errorText="Please check your connection and try again"
+          >
+            {() => (
               <>
-                <p className="text-body text-muted-foreground max-w-sm mb-6">
-                  Orders will appear here once you connect a Shopify or WooCommerce store.
-                  Set up an integration to start syncing orders automatically.
-                </p>
-                <Button asChild variant="outline">
-                  <Link href="/admin/integrations">
-                    <Plug className="h-4 w-4 mr-2" />
-                    Set Up Integration
-                  </Link>
-                </Button>
+                <div className="grid gap-3 grid-cols-1 lg:grid-cols-2 xl:grid-cols-3">
+                  {orders.map((order) => (
+                    <ExternalOrderCard
+                      key={order.id}
+                      order={order}
+                      onSelect={handleOrderSelect}
+                    />
+                  ))}
+                </div>
+
+                {/* Load More: 50 more per click, the current list kept on screen
+                    while the bigger page loads; at the cap, a sentence instead. */}
+                {hasMore &&
+                  (atCap && !isPlaceholderData ? (
+                    <p className="pt-4 text-center text-sm text-muted-foreground">
+                      Showing the newest 200 — search or filter to find older orders.
+                    </p>
+                  ) : (
+                    <div className="flex justify-center pt-4">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={isPlaceholderData}
+                        onClick={handleLoadMore}
+                      >
+                        {isPlaceholderData ? "Loading…" : "Load More"}
+                      </Button>
+                    </div>
+                  ))}
+
+                {/* Results summary */}
+                <div className="text-center text-sm text-muted-foreground py-4">
+                  Showing {orders.length} of {ordersData?.total || 0} orders
+                </div>
               </>
             )}
-          </div>
-        ) : (
-          // Orders grid
-          <>
-            <div className="grid gap-3 grid-cols-1 lg:grid-cols-2 xl:grid-cols-3">
-              {orders.map((order) => (
-                <ExternalOrderCard
-                  key={order.id}
-                  order={order}
-                  onSelect={handleOrderSelect}
-                />
-              ))}
-            </div>
+          </QueryState>
+        </div>
 
-            {/* Load More: 50 more per click, the current list kept on screen
-                while the bigger page loads; at the cap, a sentence instead. */}
-            {hasMore &&
-              (atCap && !isPlaceholderData ? (
-                <p className="pt-4 text-center text-sm text-muted-foreground">
-                  Showing the newest 200 — search or filter to find older orders.
-                </p>
-              ) : (
-                <div className="flex justify-center pt-4">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={isPlaceholderData}
-                    onClick={handleLoadMore}
-                  >
-                    {isPlaceholderData ? "Loading…" : "Load More"}
-                  </Button>
-                </div>
-              ))}
-
-            {/* Results summary */}
-            <div className="text-center text-sm text-muted-foreground py-4">
-              Showing {orders.length} of {ordersData?.total || 0} orders
-            </div>
-          </>
+        {/* Order Details Sheet */}
+        {selectedOrder && (
+          <ExternalOrderDetailsSheet
+            order={selectedOrder}
+            open={isSheetOpen}
+            onOpenChange={setIsSheetOpen}
+            onRefresh={handleRefresh}
+            csrfToken={csrfToken || undefined}
+          />
         )}
       </div>
-
-      {/* Order Details Sheet */}
-      {selectedOrder && (
-        <ExternalOrderDetailsSheet
-          order={selectedOrder}
-          open={isSheetOpen}
-          onOpenChange={setIsSheetOpen}
-          onRefresh={handleRefresh}
-          csrfToken={csrfToken || undefined}
-        />
-      )}
-    </div>
+    </Page>
   );
 }

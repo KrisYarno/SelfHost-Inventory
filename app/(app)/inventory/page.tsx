@@ -9,6 +9,7 @@ import { TransferLogTable } from "@/components/inventory/transfer-log-table";
 import { VariantProductCard } from "@/components/inventory/variant-product-card";
 import { QuickAdjustDialog } from "@/components/inventory/quick-adjust-dialog";
 import { StockInDialog } from "@/components/inventory/stock-in-dialog";
+import { Page } from "@/components/layout/page";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -159,12 +160,11 @@ export default function InventoryPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row justify-between items-start gap-4">
-        <div>
-          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Inventory Management</h1>
-        </div>
-        <div className="flex gap-2 w-full sm:w-auto">
+    <Page
+      title="Inventory Management"
+      width="wide"
+      actions={
+        <>
           <Button asChild variant="outline" size="sm" className="flex-1 sm:flex-initial">
             <Link href="/journal" className="gap-2">
               <BookOpen className="h-4 w-4" />
@@ -188,222 +188,225 @@ export default function InventoryPage() {
             onClick={handleRefresh}
             disabled={isRefreshing}
             className="sm:hidden"
+            aria-label="Refresh"
           >
             <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
           </Button>
-        </div>
-      </div>
-
-      {/* Current Inventory Levels */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Current Stock Levels</CardTitle>
-          <CardDescription>
-            Real-time inventory quantities across all products and locations
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {/* Search Bar and Controls */}
-          <div className="mb-6 space-y-4">
-            <div className="flex flex-col sm:flex-row gap-4">
-              <Input
-                type="search"
-                placeholder="Search products..."
-                value={searchQuery}
-                onChange={(e) => handleSearchChange(e.target.value)}
-                className="max-w-sm"
-              />
-              {products.length > 0 && (
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => persistExpanded(allCategories)}
-                    className="whitespace-nowrap"
-                  >
-                    Expand All
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => persistExpanded([])}
-                    className="whitespace-nowrap"
-                  >
-                    Collapse All
-                  </Button>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Loading State */}
-          {variants.isLoading ? (
-            <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-              {[...Array(6)].map((_, i) => (
-                <Card key={i}>
-                  <CardContent className="p-6">
-                    <div className="space-y-3">
-                      <Skeleton className="h-6 w-3/4" />
-                      <Skeleton className="h-4 w-1/2" />
-                      <Skeleton className="h-20 w-full" />
-                      <div className="flex gap-2">
-                        <Skeleton className="h-9 flex-1" />
-                        <Skeleton className="h-9 flex-1" />
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          ) : variants.isError ? (
-            <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-8 text-center">
-              <p className="text-sm text-destructive">Could not load inventory.</p>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => variants.refetch()}
-                className="mt-3"
-              >
-                Retry
-              </Button>
-            </div>
-          ) : products.length === 0 ? (
-            <div className="text-center py-12">
-              <p className="text-muted-foreground">
-                {searchQuery
-                  ? "No products found matching your search."
-                  : "No products found in inventory."}
-              </p>
-              {!searchQuery && (
-                <Button asChild className="mt-4">
-                  <Link href="/products">Add Products</Link>
-                </Button>
-              )}
-            </div>
-          ) : (
-            <>
-              <Accordion
-                type="multiple"
-                value={expandedCategories}
-                onValueChange={handleAccordionChange}
-                className="space-y-4"
-              >
-                {Object.entries(groupedProducts).map(([category, categoryProducts]) => (
-                  <AccordionItem key={category} value={category} className="border-border">
-                    <AccordionTrigger className="hover:no-underline">
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between w-full pr-4 gap-2">
-                        <div className="flex items-center gap-2 sm:gap-3">
-                          <Package className="h-4 w-4 sm:h-5 sm:w-5 text-muted-foreground shrink-0" />
-                          <span className="text-sm sm:text-base font-semibold truncate">
-                            {category}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2 text-xs sm:text-sm">
-                          <Badge variant="secondary" className="font-normal px-2 py-0.5">
-                            {categoryProducts.length}{" "}
-                            {categoryProducts.length === 1 ? "variant" : "variants"}
-                          </Badge>
-                          <Badge variant="outline" className="font-normal px-2 py-0.5">
-                            {categoryProducts.reduce((sum, p) => sum + p.totalQuantity, 0)} units
-                          </Badge>
-                        </div>
-                      </div>
-                    </AccordionTrigger>
-                    <AccordionContent>
-                      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 pt-4">
-                        {categoryProducts.map((product) => (
-                          <VariantProductCard
-                            key={product.id}
-                            product={product}
-                            onStockIn={(id) => handleProductAction(id, "stockIn")}
-                            onAdjust={(id) => handleProductAction(id, "adjust")}
-                            onTransfer={(id) => handleProductAction(id, "transfer")}
-                          />
-                        ))}
-                      </div>
-                    </AccordionContent>
-                  </AccordionItem>
-                ))}
-              </Accordion>
-
-              {/* Load More Trigger */}
-              <div ref={loadMoreRef} className="h-20 flex items-center justify-center">
-                {variants.isFetchingNextPage ? (
-                  <div className="flex items-center gap-2">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span className="text-sm text-muted-foreground">Loading more...</span>
+        </>
+      }
+    >
+      <div className="space-y-6">
+        {/* Current Inventory Levels */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Current Stock Levels</CardTitle>
+            <CardDescription>
+              Real-time inventory quantities across all products and locations
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {/* Search Bar and Controls */}
+            <div className="mb-6 space-y-4">
+              <div className="flex flex-col sm:flex-row gap-4">
+                <Input
+                  type="search"
+                  placeholder="Search products..."
+                  value={searchQuery}
+                  onChange={(e) => handleSearchChange(e.target.value)}
+                  className="max-w-sm"
+                />
+                {products.length > 0 && (
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => persistExpanded(allCategories)}
+                      className="whitespace-nowrap"
+                    >
+                      Expand All
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => persistExpanded([])}
+                      className="whitespace-nowrap"
+                    >
+                      Collapse All
+                    </Button>
                   </div>
-                ) : variants.hasNextPage && !shouldAutoLoad(pagesLoaded, true, autoLoadLimit) ? (
-                  <Button variant="outline" size="sm" onClick={handleLoadMore}>
-                    Load more ({remaining} remaining)
-                  </Button>
-                ) : products.length > 0 && !variants.hasNextPage && !variants.isPlaceholderData ? (
-                  <p className="text-sm text-muted-foreground">
-                    Showing all {total} products in {allCategories.length} categories
-                  </p>
-                ) : null}
+                )}
               </div>
-            </>
-          )}
-        </CardContent>
-      </Card>
+            </div>
 
-      {/* Tabs for different views */}
-      <Tabs defaultValue="logs" className="space-y-4">
-        <TabsList className="w-full sm:w-auto overflow-x-auto">
-          <TabsTrigger value="logs">Recent Activity</TabsTrigger>
-          <TabsTrigger value="transfers">Transfers</TabsTrigger>
-        </TabsList>
+            {/* Loading State */}
+            {variants.isLoading ? (
+              <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
+                {[...Array(6)].map((_, i) => (
+                  <Card key={i}>
+                    <CardContent className="p-6">
+                      <div className="space-y-3">
+                        <Skeleton className="h-6 w-3/4" />
+                        <Skeleton className="h-4 w-1/2" />
+                        <Skeleton className="h-20 w-full" />
+                        <div className="flex gap-2">
+                          <Skeleton className="h-9 flex-1" />
+                          <Skeleton className="h-9 flex-1" />
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            ) : variants.isError ? (
+              <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-8 text-center">
+                <p className="text-sm text-destructive">Could not load inventory.</p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => variants.refetch()}
+                  className="mt-3"
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : products.length === 0 ? (
+              <div className="text-center py-12">
+                <p className="text-muted-foreground">
+                  {searchQuery
+                    ? "No products found matching your search."
+                    : "No products found in inventory."}
+                </p>
+                {!searchQuery && (
+                  <Button asChild className="mt-4">
+                    <Link href="/products">Add Products</Link>
+                  </Button>
+                )}
+              </div>
+            ) : (
+              <>
+                <Accordion
+                  type="multiple"
+                  value={expandedCategories}
+                  onValueChange={handleAccordionChange}
+                  className="space-y-4"
+                >
+                  {Object.entries(groupedProducts).map(([category, categoryProducts]) => (
+                    <AccordionItem key={category} value={category} className="border-border">
+                      <AccordionTrigger className="hover:no-underline">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between w-full pr-4 gap-2">
+                          <div className="flex items-center gap-2 sm:gap-3">
+                            <Package className="h-4 w-4 sm:h-5 sm:w-5 text-muted-foreground shrink-0" />
+                            <span className="text-sm sm:text-base font-semibold truncate">
+                              {category}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-xs sm:text-sm">
+                            <Badge variant="secondary" className="font-normal px-2 py-0.5">
+                              {categoryProducts.length}{" "}
+                              {categoryProducts.length === 1 ? "variant" : "variants"}
+                            </Badge>
+                            <Badge variant="outline" className="font-normal px-2 py-0.5">
+                              {categoryProducts.reduce((sum, p) => sum + p.totalQuantity, 0)} units
+                            </Badge>
+                          </div>
+                        </div>
+                      </AccordionTrigger>
+                      <AccordionContent>
+                        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 pt-4">
+                          {categoryProducts.map((product) => (
+                            <VariantProductCard
+                              key={product.id}
+                              product={product}
+                              onStockIn={(id) => handleProductAction(id, "stockIn")}
+                              onAdjust={(id) => handleProductAction(id, "adjust")}
+                              onTransfer={(id) => handleProductAction(id, "transfer")}
+                            />
+                          ))}
+                        </div>
+                      </AccordionContent>
+                    </AccordionItem>
+                  ))}
+                </Accordion>
 
-        <TabsContent value="logs" className="space-y-4">
-          <LogsTabContent />
-        </TabsContent>
+                {/* Load More Trigger */}
+                <div ref={loadMoreRef} className="h-20 flex items-center justify-center">
+                  {variants.isFetchingNextPage ? (
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <span className="text-sm text-muted-foreground">Loading more...</span>
+                    </div>
+                  ) : variants.hasNextPage && !shouldAutoLoad(pagesLoaded, true, autoLoadLimit) ? (
+                    <Button variant="outline" size="sm" onClick={handleLoadMore}>
+                      Load more ({remaining} remaining)
+                    </Button>
+                  ) : products.length > 0 && !variants.hasNextPage && !variants.isPlaceholderData ? (
+                    <p className="text-sm text-muted-foreground">
+                      Showing all {total} products in {allCategories.length} categories
+                    </p>
+                  ) : null}
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
 
-        <TabsContent value="transfers" className="space-y-4">
-          <TransfersTabContent />
-        </TabsContent>
-      </Tabs>
+        {/* Tabs for different views */}
+        <Tabs defaultValue="logs" className="space-y-4">
+          <TabsList className="w-full sm:w-auto overflow-x-auto">
+            <TabsTrigger value="logs">Recent Activity</TabsTrigger>
+            <TabsTrigger value="transfers">Transfers</TabsTrigger>
+          </TabsList>
 
-      {/* Quick Adjust Dialog — mounted PER OPEN (pack § P2-B3-1R, R-b.2 / M-a.3):
-          rendered only while it is open for a product, and the product is
-          nulled when it closes, so every open is a fresh mount with an empty
-          draft. Nothing typed for one product can reach another's removal. */}
-      {selectedProduct && showQuickAdjust && (
-        <QuickAdjustDialog
-          open={showQuickAdjust}
-          onOpenChange={(open) => {
-            setShowQuickAdjust(open);
-            if (!open) setSelectedProduct(null);
-          }}
-          product={selectedProduct}
-        />
-      )}
+          <TabsContent value="logs" className="space-y-4">
+            <LogsTabContent />
+          </TabsContent>
 
-      {/* Stock In and Transfer — mounted PER OPEN too (§ P2-B3-1R, MS-1-5 /
-          M-a.3): one shared product, three flags, and ANY close nulls the
-          product, so product A's quantity or note can never ride into product
-          B's stock-in or transfer. */}
-      {selectedProduct && showStockIn && (
-        <StockInDialog
-          open={showStockIn}
-          onOpenChange={(open) => {
-            setShowStockIn(open);
-            if (!open) setSelectedProduct(null);
-          }}
-          product={selectedProduct}
-        />
-      )}
+          <TabsContent value="transfers" className="space-y-4">
+            <TransfersTabContent />
+          </TabsContent>
+        </Tabs>
 
-      {selectedProduct && showTransfer && (
-        <TransferDialog
-          open={showTransfer}
-          onOpenChange={(open) => {
-            setShowTransfer(open);
-            if (!open) setSelectedProduct(null);
-          }}
-          product={selectedProduct}
-        />
-      )}
-    </div>
+        {/* Quick Adjust Dialog — mounted PER OPEN (pack § P2-B3-1R, R-b.2 / M-a.3):
+            rendered only while it is open for a product, and the product is
+            nulled when it closes, so every open is a fresh mount with an empty
+            draft. Nothing typed for one product can reach another's removal. */}
+        {selectedProduct && showQuickAdjust && (
+          <QuickAdjustDialog
+            open={showQuickAdjust}
+            onOpenChange={(open) => {
+              setShowQuickAdjust(open);
+              if (!open) setSelectedProduct(null);
+            }}
+            product={selectedProduct}
+          />
+        )}
+
+        {/* Stock In and Transfer — mounted PER OPEN too (§ P2-B3-1R, MS-1-5 /
+            M-a.3): one shared product, three flags, and ANY close nulls the
+            product, so product A's quantity or note can never ride into product
+            B's stock-in or transfer. */}
+        {selectedProduct && showStockIn && (
+          <StockInDialog
+            open={showStockIn}
+            onOpenChange={(open) => {
+              setShowStockIn(open);
+              if (!open) setSelectedProduct(null);
+            }}
+            product={selectedProduct}
+          />
+        )}
+
+        {selectedProduct && showTransfer && (
+          <TransferDialog
+            open={showTransfer}
+            onOpenChange={(open) => {
+              setShowTransfer(open);
+              if (!open) setSelectedProduct(null);
+            }}
+            product={selectedProduct}
+          />
+        )}
+      </div>
+    </Page>
   );
 }

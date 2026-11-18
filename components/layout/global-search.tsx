@@ -48,7 +48,16 @@ function useDebounce<T>(value: T, delay: number): T {
 // Component
 // ---------------------------------------------------------------------------
 
-export function GlobalSearch() {
+interface GlobalSearchProps {
+  /**
+   * Facelift F1-5. `bar`: the desktop sidebar's full-width trigger, labelled
+   * `Search (Cmd+K)` — the ONLY instance that binds Cmd+K, so the shortcut opens
+   * one dialog. `icon`: the phone header's 44 × 44 icon button.
+   */
+  variant: "bar" | "icon";
+}
+
+export function GlobalSearch({ variant }: GlobalSearchProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const debouncedQuery = useDebounce(query, 250);
@@ -56,8 +65,9 @@ export function GlobalSearch() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
 
-  // Keyboard shortcut: Cmd+K / Ctrl+K
+  // Keyboard shortcut: Cmd+K / Ctrl+K — bound by the `bar` instance only.
   useEffect(() => {
+    if (variant !== "bar") return;
     function handleKeyDown(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
@@ -66,7 +76,7 @@ export function GlobalSearch() {
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [variant]);
 
   // Reset state when dialog opens/closes
   useEffect(() => {
@@ -165,17 +175,31 @@ export function GlobalSearch() {
   return (
     <>
       {/* Trigger button */}
-      <button
-        onClick={() => setOpen(true)}
-        className="flex items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        aria-label="Search (Cmd+K)"
-      >
-        <Search className="h-4 w-4" />
-        <span className="hidden sm:inline">Search...</span>
-        <kbd className="hidden sm:inline-flex items-center gap-0.5 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground">
-          <span className="text-xs">&#8984;</span>K
-        </kbd>
-      </button>
+      {variant === "icon" ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setOpen(true)}
+          className="h-11 w-11 shrink-0 text-muted-foreground"
+          aria-label="Search"
+        >
+          <Search className="h-4 w-4" />
+        </Button>
+      ) : (
+        <button
+          onClick={() => setOpen(true)}
+          className="flex w-full items-center justify-between gap-2 rounded-lg border border-border bg-muted/50 px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          aria-label="Search (Cmd+K)"
+        >
+          <span className="flex items-center gap-2">
+            <Search className="h-4 w-4" />
+            <span className="hidden sm:inline">Search...</span>
+          </span>
+          <kbd className="hidden sm:inline-flex items-center gap-0.5 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground">
+            <span className="text-xs">&#8984;</span>K
+          </kbd>
+        </button>
+      )}
 
       {/* Search dialog */}
       <Dialog open={open} onOpenChange={setOpen}>

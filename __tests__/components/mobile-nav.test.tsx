@@ -119,3 +119,9 @@ test("a route change closes an open group (navigating via a direct link/pill)", 
   rerender(<MobileNav />);
   expect(screen.getByRole("button", { name: /fulfill/i })).toHaveAttribute("aria-expanded", "false");
 });
+
+// Facelift F1-8 (FL-A-18): both <nav> elements are labelled.
+test("the dock <nav> is labelled `Primary`", () => {
+  render(<MobileNav />);
+  expect(screen.getByRole("navigation", { name: "Primary" })).toBeInTheDocument();
+});

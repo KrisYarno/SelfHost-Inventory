@@ -281,7 +281,7 @@ export default function AdminReportsPage() {
         </div>
       </header>
 
-      <main className="flex-1 overflow-y-auto overflow-x-hidden">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden">
         <div className="p-4 sm:p-6 space-y-6 max-w-7xl w-full mx-auto">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
             <MetricsCard
@@ -474,7 +474,7 @@ export default function AdminReportsPage() {
             </TabsContent>
           </Tabs>
         </div>
-      </main>
+      </div>
 
       <DrillDownModal
         isOpen={drillDownModal.isOpen}

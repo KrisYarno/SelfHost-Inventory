@@ -37,9 +37,6 @@ jest.mock("@/components/layout/user-menu", () => ({
 jest.mock("@/components/layout/location-switcher", () => ({
   LocationSwitcher: () => <div data-testid="location-switcher" />,
 }));
-jest.mock("@/components/theme-toggle-sidebar", () => ({
-  ThemeToggleSidebar: () => <div data-testid="theme-toggle" />,
-}));
 jest.mock("@/components/layout/global-search", () => ({
   GlobalSearch: () => <div data-testid="global-search" />,
 }));

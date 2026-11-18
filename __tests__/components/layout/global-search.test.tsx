@@ -38,7 +38,7 @@ function renderOpen() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
-      <GlobalSearch />
+      <GlobalSearch variant="bar" />
     </QueryClientProvider>,
   );
   fireEvent.click(screen.getByRole("button", { name: "Search (Cmd+K)" }));

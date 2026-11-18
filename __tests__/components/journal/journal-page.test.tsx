@@ -474,3 +474,23 @@ describe("Journal page — the pending-changes bar is the StickyActionBar (F1-3)
     expect((container.firstElementChild as HTMLElement).className.split(/\s+/)).toContain("pb-32");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Facelift F1-8 (plan 2026-11-18-facelift-f1 REV 2; FL-A-18) — the shell's
+// <main> is the only main. The products list was a `role="main"` div; it is a
+// section labelled by its `Products` heading, and the page's own skip link to
+// that heading stays.
+// ---------------------------------------------------------------------------
+describe("Journal page — landmarks (F1-8)", () => {
+  it("claims no main; the list is a region named by its heading; the skip link stays", async () => {
+    renderJournal();
+    const list = await screen.findByRole("region", { name: "Products" });
+    expect(list.tagName).toBe("SECTION");
+    expect(list).toHaveAttribute("aria-labelledby", "products-heading");
+    expect(screen.queryByRole("main")).toBeNull();
+    expect(screen.getByRole("link", { name: "Skip to products list" })).toHaveAttribute(
+      "href",
+      "#products-heading"
+    );
+  });
+});

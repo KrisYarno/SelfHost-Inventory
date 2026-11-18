@@ -280,7 +280,7 @@ export default function DashboardPage() {
         }
       />
 
-      <main className="flex-1 overflow-y-auto p-4 sm:p-6">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6">
         <div className="mx-auto max-w-7xl space-y-6">
           {/* ── Row 1: Stat Cards ── */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -611,7 +611,7 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
         </div>
-      </main>
+      </div>
     </div>
   );
 }

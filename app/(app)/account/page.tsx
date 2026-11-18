@@ -224,7 +224,7 @@ export default function AccountPage() {
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 p-6">
+      <div className="flex-1 p-6">
         <div className="mx-auto max-w-2xl space-y-6">
           {/* Profile Information */}
           <Card>
@@ -494,7 +494,7 @@ export default function AccountPage() {
             </CardContent>
           </Card>
         </div>
-      </main>
+      </div>
     </div>
   );
 }

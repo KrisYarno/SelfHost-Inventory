@@ -21,13 +21,21 @@
  *   - mobile: in-flow header on top (`md:hidden`), the fixed bottom dock
  *     (`MobileNav`), and main padded for the dock + safe-area inset
  *     (`md:pb-0` clears it on desktop).
+ *
+ * Facelift F1-5 / F1-8 (pinned in `__tests__/components/layout/f1-shell.test.tsx`):
+ *   - the skip link to `#main` is the root's FIRST child, and the one `<main>`
+ *     is its focusable target;
+ *   - the phone header is one compact 48 px row with no static title (the
+ *     page's own h1 follows): the location chip takes the free width, then the
+ *     search icon and the account avatar, each 44 × 44;
+ *   - the sidebar captions the chip `Location`, its search bar is the only
+ *     Cmd+K binding, and Theme lives in the user menu only.
  */
 
 import { SidebarNav } from "./sidebar-nav";
 import { MobileNav } from "./mobile-nav";
 import { UserMenu } from "./user-menu";
 import { LocationSwitcher } from "./location-switcher";
-import { ThemeToggleSidebar } from "@/components/theme-toggle-sidebar";
 import { GlobalSearch } from "./global-search";
 
 interface AppShellProps {
@@ -37,6 +45,8 @@ interface AppShellProps {
 export function AppShell({ children }: AppShellProps) {
   return (
     <div className="flex h-dvh min-h-0 flex-col bg-background md:flex-row">
+      <a href="#main" className="skip-link">Skip to content</a>
+
       {/* Desktop sidebar (chrome; hidden below md) */}
       <aside className="hidden w-64 shrink-0 border-r border-border bg-surface md:flex">
         <div className="flex h-full w-full flex-col">
@@ -46,13 +56,14 @@ export function AppShell({ children }: AppShellProps) {
           </div>
 
           {/* Location Switcher */}
-          <div className="border-b border-border p-4">
+          <div className="space-y-2 border-b border-border p-4">
+            <p className="text-xs font-medium text-muted-foreground">Location</p>
             <LocationSwitcher />
           </div>
 
           {/* Global Search */}
           <div className="border-b border-border p-4">
-            <GlobalSearch />
+            <GlobalSearch variant="bar" />
           </div>
 
           {/* Navigation */}
@@ -60,35 +71,34 @@ export function AppShell({ children }: AppShellProps) {
             <SidebarNav />
           </div>
 
-          {/* User Menu and Theme Toggle at Bottom */}
-          <div className="space-y-2 border-t border-border p-4">
-            <ThemeToggleSidebar />
+          {/* User Menu at Bottom (Theme is inside it) */}
+          <div className="border-t border-border p-4">
             <UserMenu />
           </div>
         </div>
       </aside>
 
-      {/* Mobile header (chrome; hidden at md+) */}
-      <header className="shrink-0 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 md:hidden">
-        {/* The right cluster must be allowed to shrink: its width scales with the
-            signed-in user's name, and without min-w-0 a long name pushes the whole
-            page wider than the viewport (found in the Lane 5 drive at 375px — the
-            "assistant overflow" logged in Lane 4 was really this header, on every
-            page). The title never shrinks below its text. */}
-        <div className="flex h-16 items-center justify-between gap-2 px-4">
-          <div className="shrink-0 text-lg font-semibold">Inventory</div>
-          <div className="flex min-w-0 items-center gap-2">
-            <GlobalSearch />
+      {/* Mobile header (chrome; hidden at md+). One row: the chip takes the
+          free width and truncates (min-w-0 flex-1), so a long location name can
+          never push the search or the avatar off-screen (FL-A-4). */}
+      <header className="h-12 shrink-0 border-b border-border bg-background md:hidden">
+        <div className="flex h-full items-center gap-2 px-4">
+          <div className="min-w-0 flex-1">
             <LocationSwitcher />
-            <UserMenu />
           </div>
+          <GlobalSearch variant="icon" />
+          <UserMenu compact />
         </div>
       </header>
 
       {/* THE single main — the only children render (R-A2). Mobile bottom
           padding keeps content clear of the fixed dock + safe-area inset; the
           dock height is the one --dock-height variable (facelift F1-3). */}
-      <main className="min-h-0 flex-1 overflow-y-auto pb-[calc(var(--dock-height)+env(safe-area-inset-bottom))] md:pb-0">
+      <main
+        id="main"
+        tabIndex={-1}
+        className="min-h-0 flex-1 overflow-y-auto pb-[calc(var(--dock-height)+env(safe-area-inset-bottom))] md:pb-0"
+      >
         {children}
       </main>
 

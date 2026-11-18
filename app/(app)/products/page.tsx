@@ -78,7 +78,7 @@ export default function ProductsPage() {
       </PageHeader>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-auto p-[var(--card-padding)]">
+      <div className="flex-1 overflow-auto p-[var(--card-padding)]">
         <div className="mx-auto max-w-7xl">
           {showDeleted && isAdmin ? (
             <DeletedProductsList />
@@ -93,7 +93,7 @@ export default function ProductsPage() {
             />
           )}
         </div>
-      </main>
+      </div>
 
       {/* Dialogs */}
       <CreateProductDialog open={createDialogOpen} onOpenChange={setCreateDialogOpen} />

@@ -494,7 +494,7 @@ export default function JournalPage() {
         <CardHeader>
           <CardTitle id="products-heading">Products</CardTitle>
         </CardHeader>
-        <CardContent role="main" aria-labelledby="products-heading">
+        <section aria-labelledby="products-heading" className="p-6 pt-0">
           <ScrollArea className="h-[calc(100dvh-26rem)] sm:h-[600px]" aria-label="Products list">
             <div
               className="space-y-2 pr-3 sm:pr-0"
@@ -531,7 +531,7 @@ export default function JournalPage() {
               )}
             </div>
           </ScrollArea>
-        </CardContent>
+        </section>
       </Card>
 
       {/* Pending-changes bar (facelift F1-3: the shared StickyActionBar) */}

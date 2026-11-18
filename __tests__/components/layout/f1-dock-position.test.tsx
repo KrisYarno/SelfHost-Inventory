@@ -31,7 +31,6 @@ jest.mock("@/components/layout/sidebar-nav", () => ({ SidebarNav: () => null }))
 jest.mock("@/components/layout/mobile-nav", () => ({ MobileNav: () => null }));
 jest.mock("@/components/layout/user-menu", () => ({ UserMenu: () => null }));
 jest.mock("@/components/layout/location-switcher", () => ({ LocationSwitcher: () => null }));
-jest.mock("@/components/theme-toggle-sidebar", () => ({ ThemeToggleSidebar: () => null }));
 jest.mock("@/components/layout/global-search", () => ({ GlobalSearch: () => null }));
 
 const BAR =

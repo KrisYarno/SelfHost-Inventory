@@ -201,3 +201,28 @@ describe.each<DialogKey>(["adjust", "stockIn", "transfer"])("the %s dialog is mo
     }
   });
 });
+
+// Facelift F1-6 (plan 2026-11-18-facelift-f1 REV 2): Inventory renders through
+// the `Page` frame — wide (today's full width, now with a gutter) — with its
+// unchanged title as the framed h1 and its header buttons, classes kept, as the
+// actions. The phone-only Refresh (an icon) is labelled.
+test("F1-6 — renders through Page (wide); the header buttons are the actions; the phone Refresh is labelled", async () => {
+  mockFetch();
+  wrap();
+  const h1 = await screen.findByRole("heading", { level: 1, name: "Inventory Management" });
+  expect(h1.getAttribute("class")).toBe("text-h2 sm:text-h1 min-w-0");
+  const header = h1.closest("header") as HTMLElement;
+  expect((header.parentElement as HTMLElement).getAttribute("class")).toBe(
+    "px-4 sm:px-6 py-4 mx-auto max-w-none"
+  );
+  const refresh = screen.getByRole("button", { name: "Refresh" });
+  expect(refresh).toHaveAttribute("aria-label", "Refresh");
+  expect(refresh).toHaveClass("sm:hidden");
+  expect(header).toContainElement(refresh);
+  const journal = screen.getByRole("link", { name: /journal/i });
+  expect(header).toContainElement(journal);
+  expect(journal).toHaveClass("flex-1", "sm:flex-initial");
+  const exportButton = screen.getByRole("button", { name: /export/i });
+  expect(header).toContainElement(exportButton);
+  expect(exportButton).toHaveClass("flex-1", "sm:flex-initial");
+});
