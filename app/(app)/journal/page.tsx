@@ -46,6 +46,7 @@ import { useInventoryChangeAnnouncer } from "@/hooks/use-accessibility-announcer
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { ContextTag } from "@/components/ui/context-tag";
 import { PageHeader } from "@/components/layout/page-header";
+import { StickyActionBar } from "@/components/layout/sticky-action-bar";
 
 export default function JournalPage() {
   const { data: session, status } = useSession();
@@ -533,68 +534,59 @@ export default function JournalPage() {
         </CardContent>
       </Card>
 
-      {/* Fixed Action Bar */}
+      {/* Pending-changes bar (facelift F1-3: the shared StickyActionBar) */}
       {hasAnyChanges && (
-        <div
-          className="fixed left-0 right-0 md:left-64 bg-surface border-t-2 border-primary shadow-lg z-30 bottom-[4.75rem] md:bottom-0"
-          role="region"
-          aria-label="Pending changes summary"
-          aria-live="polite"
-        >
-          <div className="container mx-auto max-w-7xl px-4 py-3">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              {/* Summary chips */}
-              <div className="flex items-center gap-3 flex-wrap">
-                <Badge variant="outline" className="font-mono tabular-nums">
-                  {itemCount} products
-                </Badge>
-                {showItemCounter && (
-                  <ValueChip
-                    tone={overItemCap ? "negative" : "neutral"}
-                    className="font-mono tabular-nums"
-                  >
-                    {itemCount} of {MAX_JOURNAL_ITEMS} items
-                  </ValueChip>
-                )}
-                {totalChanges.additions > 0 && (
-                  <ValueChip tone="positive" className="gap-1">
-                    <TrendingUp className="h-3 w-3" />
-                    +{totalChanges.additions}
-                  </ValueChip>
-                )}
-                {totalChanges.removals > 0 && (
-                  <ValueChip tone="negative" className="gap-1">
-                    <TrendingDown className="h-3 w-3" />
-                    -{totalChanges.removals}
-                  </ValueChip>
-                )}
+        <StickyActionBar
+          ariaLabel="Pending changes summary"
+          className="border-t-2 border-primary shadow-lg"
+          summary={
+            <div className="flex items-center gap-3 flex-wrap">
+              <Badge variant="outline" className="font-mono tabular-nums">
+                {itemCount} products
+              </Badge>
+              {showItemCounter && (
                 <ValueChip
-                  tone={totalChanges.total > 0 ? "positive" : totalChanges.total < 0 ? "negative" : "neutral"}
-                  className="font-semibold"
+                  tone={overItemCap ? "negative" : "neutral"}
+                  className="font-mono tabular-nums"
                 >
-                  Net: {totalChanges.total > 0 ? "+" : ""}{totalChanges.total}
+                  {itemCount} of {MAX_JOURNAL_ITEMS} items
                 </ValueChip>
-                {overItemCap && (
-                  <span className="text-sm text-destructive" role="alert">
-                    {JOURNAL_CAP_MESSAGE}
-                  </span>
-                )}
-              </div>
-
-              {/* Actions */}
-              <div className="flex gap-2 flex-shrink-0">
-                <Button variant="ghost" size="sm" onClick={clearAllAdjustments}>
-                  <RotateCcw className="h-4 w-4 mr-1" />
-                  Reset
-                </Button>
-                <Button size="sm" onClick={() => setShowReviewDialog(true)}>
-                  <Save className="h-4 w-4 mr-1" />
-                  Review & Submit
-                </Button>
-              </div>
+              )}
+              {totalChanges.additions > 0 && (
+                <ValueChip tone="positive" className="gap-1">
+                  <TrendingUp className="h-3 w-3" />
+                  +{totalChanges.additions}
+                </ValueChip>
+              )}
+              {totalChanges.removals > 0 && (
+                <ValueChip tone="negative" className="gap-1">
+                  <TrendingDown className="h-3 w-3" />
+                  -{totalChanges.removals}
+                </ValueChip>
+              )}
+              <ValueChip
+                tone={totalChanges.total > 0 ? "positive" : totalChanges.total < 0 ? "negative" : "neutral"}
+                className="font-semibold"
+              >
+                Net: {totalChanges.total > 0 ? "+" : ""}{totalChanges.total}
+              </ValueChip>
+              {overItemCap && (
+                <span className="text-sm text-destructive" role="alert">
+                  {JOURNAL_CAP_MESSAGE}
+                </span>
+              )}
             </div>
-          </div>
-        </div>
+          }
+        >
+          <Button variant="ghost" size="sm" onClick={clearAllAdjustments}>
+            <RotateCcw className="h-4 w-4 mr-1" />
+            Reset
+          </Button>
+          <Button size="sm" onClick={() => setShowReviewDialog(true)}>
+            <Save className="h-4 w-4 mr-1" />
+            Review & Submit
+          </Button>
+        </StickyActionBar>
       )}
 
       {/* Review Changes Dialog */}

@@ -86,8 +86,9 @@ export function AppShell({ children }: AppShellProps) {
       </header>
 
       {/* THE single main — the only children render (R-A2). Mobile bottom
-          padding keeps content clear of the fixed dock + safe-area inset. */}
-      <main className="min-h-0 flex-1 overflow-y-auto pb-[calc(theme(spacing.14)+env(safe-area-inset-bottom))] md:pb-0">
+          padding keeps content clear of the fixed dock + safe-area inset; the
+          dock height is the one --dock-height variable (facelift F1-3). */}
+      <main className="min-h-0 flex-1 overflow-y-auto pb-[calc(var(--dock-height)+env(safe-area-inset-bottom))] md:pb-0">
         {children}
       </main>
 

@@ -436,3 +436,41 @@ describe("Journal page — a refusal says what the SERVER said (F7)", () => {
     expect(screen.queryByText("Something went wrong")).not.toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Facelift F1-3 (plan 2026-11-18-facelift-f1 REV 2) — the pending-changes bar
+// is the shared StickyActionBar: above the dock through --dock-height (no more
+// `bottom-[4.75rem] md:bottom-0`), keeping its own label and emphasis. The page
+// keeps `pb-32` so the last rows scroll clear of it.
+// ---------------------------------------------------------------------------
+describe("Journal page — the pending-changes bar is the StickyActionBar (F1-3)", () => {
+  it("renders the bar's region with the Journal's label and emphasis; the page keeps pb-32", async () => {
+    useJournalStore.getState().addAdjustment({ productId: 1, quantityChange: 5, version: 3 });
+    const { container } = renderJournal();
+
+    const region = await screen.findByRole("region", { name: "Pending changes summary" });
+    const cls = (region.getAttribute("class") ?? "").split(/\s+/);
+    expect(cls).toEqual(
+      expect.arrayContaining([
+        "fixed",
+        "inset-x-0",
+        "md:left-64",
+        "z-30",
+        "bottom-[calc(var(--dock-height)+env(safe-area-inset-bottom))]",
+        "border-t-2",
+        "border-primary",
+        "shadow-lg",
+      ])
+    );
+    expect(cls).not.toContain("bottom-[4.75rem]");
+    expect(cls).not.toContain("md:bottom-0");
+    // the summary is the polite live region; the actions follow it
+    const [summary, actions] = Array.from((region.firstElementChild as HTMLElement).children) as HTMLElement[];
+    expect(summary.getAttribute("aria-live")).toBe("polite");
+    expect(summary).toHaveTextContent("1 products");
+    expect(
+      Array.from(actions.querySelectorAll("button")).map((b) => b.textContent?.trim())
+    ).toEqual(["Reset", "Review & Submit"]);
+    expect((container.firstElementChild as HTMLElement).className.split(/\s+/)).toContain("pb-32");
+  });
+});

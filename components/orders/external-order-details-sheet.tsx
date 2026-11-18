@@ -323,7 +323,7 @@ export function ExternalOrderDetailsSheet({
                               )}
                               {isAdmin && isCatalogProductId(item.externalProductId) && (
                                 <Button
-                                  size="sm"
+                                  size="compact"
                                   variant="outline"
                                   className="h-6 px-2 text-xs"
                                   onClick={(e) => {

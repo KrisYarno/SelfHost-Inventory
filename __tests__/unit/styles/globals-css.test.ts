@@ -72,8 +72,10 @@ describe("F0-10 — the destructive TEXT token", () => {
     });
     expect((theme.backgroundColor.destructive as Record<string, string>).DEFAULT).toBe("hsl(var(--destructive))");
     expect((theme.borderColor.destructive as Record<string, string>).DEFAULT).toBe("hsl(var(--destructive))");
-    // extended, not replaced: every other text colour is still there
-    expect((theme.textColor.primary as Record<string, string>).DEFAULT).toBe("hsl(var(--primary))");
+    // extended, not replaced: every other text colour is still there. (F1-2
+    // gave text-primary its own token, `--primary-text`; it is pinned in
+    // f1-tokens.test.ts. The text-primary key itself must still exist.)
+    expect((theme.textColor.primary as Record<string, string>).DEFAULT).toBe("hsl(var(--primary-text) / <alpha-value>)");
     expect(theme.textColor.negative).toBeDefined();
   });
 

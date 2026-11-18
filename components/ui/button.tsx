@@ -20,11 +20,16 @@ const buttonVariants = cva(
         ghost: "hover:bg-surface-hover hover:text-foreground",
         link: "text-primary underline-offset-4 hover:underline",
       },
+      // Facelift F1-1 (DESIGN.md §4.5): a 44 px MINIMUM below `md`, never an
+      // exact height, so a caller's own height still renders as written and
+      // one smaller than 44 px still reaches it on a phone. `compact` does not
+      // grow, and only the dense row actions the F1 plan names may use it.
       size: {
-        default: "h-9 px-4 py-2",
-        sm: "h-8 rounded-md px-3 text-xs",
-        lg: "h-10 rounded-md px-8",
-        icon: "h-9 w-9",
+        default: "h-9 max-md:min-h-11 px-4 py-2",
+        sm: "h-8 max-md:min-h-11 max-md:min-w-11 rounded-md px-3 text-xs",
+        lg: "h-10 max-md:min-h-11 rounded-md px-8",
+        icon: "h-9 w-9 max-md:min-h-11 max-md:min-w-11",
+        compact: "h-8 rounded-md px-3 text-xs",
       },
     },
     defaultVariants: {

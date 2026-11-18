@@ -67,7 +67,13 @@ export default async function RootLayout({
               {children}
             </QueryProvider>
           </AuthProvider>
-          <Toaster />
+          {/* F1-3: toasts clear the phone dock. sonner applies mobileOffset
+              only at <= 600px; offset covers 601-767px (and is plain 24px at
+              md and up, where --dock-height is 0). */}
+          <Toaster
+            offset={{ bottom: "calc(var(--dock-height) + env(safe-area-inset-bottom) + 24px)" }}
+            mobileOffset={{ bottom: "calc(var(--dock-height) + env(safe-area-inset-bottom) + 8px)" }}
+          />
         </ThemeProvider>
       </body>
     </html>

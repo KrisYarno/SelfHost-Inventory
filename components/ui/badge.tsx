@@ -2,6 +2,7 @@ import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 
 import { cn } from "@/lib/utils"
+import { toneClasses } from "@/components/ui/tone-classes"
 
 const badgeVariants = cva(
   "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
@@ -15,12 +16,11 @@ const badgeVariants = cva(
         destructive:
           "border-transparent bg-destructive text-destructive-foreground shadow hover:bg-destructive/85",
         outline: "text-foreground border-border bg-transparent hover:bg-muted",
-        warning:
-          "border-transparent bg-warning/90 text-warning-foreground hover:bg-warning",
-        success:
-          "border-transparent bg-success/90 text-success-foreground hover:bg-success",
-        info:
-          "border-transparent bg-info/90 text-white hover:bg-info",
+        // Facelift F1-2: state colour rides the shared tones (readable text on
+        // a muted fill in both themes), not a fill colour under white text.
+        warning: toneClasses.warning,
+        success: toneClasses.positive,
+        info: toneClasses.info,
         muted:
           "border border-border/50 bg-muted text-muted-foreground",
         ghost:

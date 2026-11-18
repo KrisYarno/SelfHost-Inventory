@@ -37,7 +37,7 @@ export function DataTable<T extends Record<string, unknown>>({
 
   if (data.length === 0) {
     return (
-      <div className="text-center py-12 text-gray-500">
+      <div className="text-center py-12 text-muted-foreground">
         <p>{emptyMessage}</p>
       </div>
     );
@@ -51,7 +51,7 @@ export function DataTable<T extends Record<string, unknown>>({
             {columns.map((column) => (
               <th
                 key={column.key}
-                className={`text-left py-3 px-4 font-medium text-sm text-gray-700 whitespace-nowrap ${column.className || ''}`}
+                className={`text-left py-3 px-4 font-medium text-sm text-foreground whitespace-nowrap ${column.className || ''}`}
               >
                 {column.header}
               </th>

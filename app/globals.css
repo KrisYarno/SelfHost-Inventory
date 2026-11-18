@@ -8,13 +8,17 @@
     --background: 35 45% 98%; /* #fdfbf7 */
     --foreground: 220 12% 18%; /* #2a2f35 */
     --surface: 30 30% 99%; /* #fffaf3 */
-    --surface-hover: 30 35% 96%; /* #f7efe4 */
+    --surface-hover: 30 35% 93%; /* #f3ede7 (facelift F1-2: was 96%) */
     --border: 35 20% 85%; /* #e8dfd3 */
     --ring: 35 45% 55%; /* warm ring */
     
     /* Brand / Accent - Light Mode (creamy orange) */
     --primary: 35 70% 65%; /* #f5b97a */
     --primary-foreground: 25 70% 12%; /* deep brown for contrast */
+    /* The colour `text-primary` paints (tailwind textColor.primary; facelift
+       F1-2). The light --primary is a FILL colour, about 1.9:1 as text on the
+       cream; this is about 5.9:1 on --background. Fills keep --primary. */
+    --primary-text: 30 80% 32%;
     --accent: 35 65% 70%; /* lighter creamy accent */
     --accent-foreground: 25 70% 12%;
     /* semantic nav-affordance accent (chevron cue + glow ring ONLY; not a text-fill color) */
@@ -134,6 +138,9 @@
     /* Brand Colors - Dark Mode */
     --primary: 262 83% 58%; /* #8b5cf6 - Violet Primary in Dark Mode for pop */
     --primary-foreground: 210 40% 98%;
+    /* Primary TEXT in dark mode (F1-2): about 5.8:1 on --background and 4.8:1
+       on --surface. The dark --primary above is a fill colour. */
+    --primary-text: 262 83% 72%;
     --accent: 199 89% 48%; /* #0ea5e9 - Sky Blue Accent */
     --accent-foreground: 222 47% 11%;
     /* semantic nav-affordance accent (chevron cue + glow ring ONLY; not a text-fill color) */
@@ -191,6 +198,20 @@
     --destructive-text: 0 91% 71%;
     --secondary: 217 33% 17%;
     --secondary-foreground: 210 40% 98%;
+  }
+
+  /* The phone dock's height (facelift F1-3): MobileNav's h-14 row plus its 1px
+     top border. Everything that sits above the dock (the shell's main padding,
+     StickyActionBar, the floating cart button, the toasts) reads this one
+     variable. There is no dock at md and up, so it is 0 there. */
+  :root {
+    --dock-height: calc(3.5rem + 1px);
+  }
+
+  @media (min-width: 768px) {
+    :root {
+      --dock-height: 0px;
+    }
   }
 }
 

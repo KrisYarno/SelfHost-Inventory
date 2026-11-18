@@ -30,14 +30,14 @@ export function FloatingCartButton({
       onClick={onClick}
       size="icon"
       className={cn(
-        "fixed right-4 z-30",
+        // F1-3: 1rem above the dock, from the one --dock-height variable.
+        "fixed right-4 z-30 bottom-[calc(var(--dock-height)+env(safe-area-inset-bottom)+1rem)]",
         "h-14 w-14 rounded-full shadow-lg",
         "bg-primary hover:bg-primary/90",
         "transition-all duration-300",
         "hover:scale-110 active:scale-95",
         className
       )}
-      style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 4.5rem)" }}
     >
       <ShoppingCart className="h-6 w-6" />
       <Badge

@@ -331,7 +331,7 @@ export function AnalyticsHub() {
                   setSearch("");
                   setPage(1);
                 }}
-                className="absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2 p-0"
+                className="absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2 p-0 max-md:min-h-0 max-md:min-w-0"
                 aria-label="Clear search"
               >
                 <X className="h-4 w-4" />

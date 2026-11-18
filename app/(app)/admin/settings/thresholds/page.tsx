@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { StickyActionBar } from "@/components/layout/sticky-action-bar";
 import { toast } from "sonner";
 import { Undo2 } from "lucide-react";
 import {
@@ -482,7 +483,7 @@ export default function MinimumSettingsPage() {
                       />
                       <Button
                         variant="outline"
-                        size="sm"
+                        size="compact"
                         onClick={() => setDrawerProduct(product)}
                         aria-label={`Edit per-location minimums for ${product.name}`}
                       >
@@ -622,39 +623,40 @@ function StickySaveBar({
   onReset: () => void;
   error: string | null;
 }) {
+  // Facelift F1-3: the shared StickyActionBar, with this bar's own pending
+  // (amber) emphasis passed through unchanged.
   return (
-    <div
-      className={cn(
-        "fixed left-0 right-0 md:left-64 z-40 border-t backdrop-blur",
+    <StickyActionBar
+      ariaLabel="Threshold changes"
+      className={
         changes > 0
           ? "border-amber-300 bg-amber-50/90 dark:border-amber-700 dark:bg-amber-900/30"
           : "border-border bg-background/90"
-      )}
-      style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 4.75rem)" }}
-    >
-      <div className="mx-auto flex max-w-6xl items-center gap-2 px-4 py-3 sm:px-6">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onUndo}
-          disabled={changes === 0}
-          className="flex items-center gap-1"
-        >
-          <Undo2 className="h-4 w-4" />
-          Undo
-        </Button>
-        <Button variant="ghost" size="sm" onClick={onReset} disabled={changes === 0}>
-          Reset
-        </Button>
-        <div className="flex-1 text-sm text-muted-foreground">
+      }
+      summary={
+        <div className="text-sm text-muted-foreground">
           {changes > 0 ? `${changes} change${changes > 1 ? "s" : ""} pending` : "No changes"}
           {error && <span className="ml-2 text-destructive">{error}</span>}
         </div>
-        <Button onClick={onSave} disabled={changes === 0 || saving}>
-          {saving ? "Saving..." : "Save"}
-        </Button>
-      </div>
-    </div>
+      }
+    >
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={onUndo}
+        disabled={changes === 0}
+        className="flex items-center gap-1"
+      >
+        <Undo2 className="h-4 w-4" />
+        Undo
+      </Button>
+      <Button variant="ghost" size="sm" onClick={onReset} disabled={changes === 0}>
+        Reset
+      </Button>
+      <Button onClick={onSave} disabled={changes === 0 || saving}>
+        {saving ? "Saving..." : "Save"}
+      </Button>
+    </StickyActionBar>
   );
 }
 

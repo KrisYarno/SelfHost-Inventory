@@ -96,6 +96,14 @@ const config: Config = {
           DEFAULT: "hsl(var(--destructive-text) / <alpha-value>)",
           foreground: "hsl(var(--destructive-foreground))",
         },
+        // `text-primary` reads its own token too (facelift F1-2): the light
+        // --primary is a pale fill (about 1.9:1 as text on the cream), so text
+        // and icons coloured primary read --primary-text in both themes.
+        // bg-/border-/ring-primary keep colors.primary.
+        primary: {
+          DEFAULT: "hsl(var(--primary-text) / <alpha-value>)",
+          foreground: "hsl(var(--primary-foreground))",
+        },
       },
       fontFamily: {
         sans: ["var(--font-sans)", "system-ui", "sans-serif"],
