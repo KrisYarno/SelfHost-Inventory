@@ -94,3 +94,113 @@ describe("FR1-1 (e) — order rows when the stock read failed", () => {
     expect(onOrderSelected).not.toHaveBeenCalled();
   });
 });
+
+// Facelift F0 FR2-6 (REV 7, QA-3): with no location selected there is no
+// "here" and no stock read in flight, so "Loading stock…" was untrue — it would
+// never finish. The rows wait and say where to choose one.
+describe("FR2-6 — order rows with no location selected", () => {
+  it("the rows are disabled and read `Choose a location at the top of the page.`", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onOrderSelected = jest.fn();
+    render(
+      <WCOrderSelector
+        onOrderSelected={onOrderSelected}
+        selectedOrder={null}
+        onClear={jest.fn()}
+        noLocation
+        // What the page's products query reports with no location: not
+        // arrived. The no-location sentence wins over both stock sentences.
+        stockLoading
+        stockFailed={false}
+      />
+    );
+
+    expect(orderRow()).toBeDisabled();
+    expect(orderRow()).toHaveTextContent("Choose a location at the top of the page.");
+    expect(orderRow()).not.toHaveTextContent("Loading stock…");
+    expect(orderRow()).not.toHaveTextContent("Select");
+
+    await user.click(orderRow());
+    expect(onOrderSelected).not.toHaveBeenCalled();
+  });
+
+  it("`noLocation` alone disables the rows (whatever the stock flags say)", () => {
+    render(
+      <WCOrderSelector onOrderSelected={jest.fn()} selectedOrder={null} onClear={jest.fn()} noLocation />
+    );
+
+    expect(orderRow()).toBeDisabled();
+    expect(orderRow()).toHaveTextContent("Choose a location at the top of the page.");
+  });
+
+  it("over a failed stock read too, the location comes first", () => {
+    render(
+      <WCOrderSelector
+        onOrderSelected={jest.fn()}
+        selectedOrder={null}
+        onClear={jest.fn()}
+        noLocation
+        stockFailed
+      />
+    );
+
+    expect(orderRow()).toBeDisabled();
+    expect(orderRow()).toHaveTextContent("Choose a location at the top of the page.");
+    expect(orderRow()).not.toHaveTextContent("Stock couldn't be loaded");
+  });
+});
+
+// Facelift F0 FR2-5 (REV 7, QA-2; orchestrator ruling, option (a)): the
+// stock-failed sentence gets a Retry. The sentence lives inside each order
+// row's (disabled) button, where a button cannot go — so in the stock-failed
+// state ONLY the selector renders ONE line above the rows: the sentence, then
+// a 44px `Retry` that calls `onRetryStock` (the page passes its products
+// refetch). The rows keep their disabled state and trailing label.
+describe("FR2-5 — the stock-failed line and its Retry", () => {
+  const SENTENCE = "Stock couldn't be loaded — try again shortly.";
+  const renderWith = (over: Partial<React.ComponentProps<typeof WCOrderSelector>>) => {
+    const onRetryStock = jest.fn();
+    render(
+      <WCOrderSelector
+        onOrderSelected={jest.fn()}
+        selectedOrder={null}
+        onClear={jest.fn()}
+        onRetryStock={onRetryStock}
+        {...over}
+      />
+    );
+    return { onRetryStock };
+  };
+  /** The line: the sentence NOT inside a row's button. */
+  const lineSentences = () => screen.queryAllByText(SENTENCE).filter((el) => el.closest("button") === null);
+
+  it("stock failed: ONE line above the rows — the sentence, then Retry — and the rows keep their label", async () => {
+    const user = userEvent.setup();
+    const { onRetryStock } = renderWith({ stockFailed: true });
+
+    expect(lineSentences()).toHaveLength(1);
+    const retry = screen.getByRole("button", { name: "Retry" });
+    expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
+    expect(retry).toHaveClass("min-h-[44px]");
+    // The line sits above the rows, sentence first.
+    const line = lineSentences()[0];
+    expect(line.compareDocumentPosition(retry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(retry.compareDocumentPosition(orderRow()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The row is as built: disabled, with the sentence as its label.
+    expect(orderRow()).toBeDisabled();
+    expect(orderRow()).toHaveTextContent(SENTENCE);
+
+    await user.click(retry);
+    expect(onRetryStock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["stock loading", { stockLoading: true }],
+    ["stock here", {}],
+    ["no location", { noLocation: true, stockFailed: true }],
+  ])("no line and no Retry when %s", (_label, over) => {
+    renderWith(over);
+    expect(lineSentences()).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+});

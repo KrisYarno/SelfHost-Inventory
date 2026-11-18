@@ -62,10 +62,13 @@ export function LocationProvider({ children }: { children: ReactNode }) {
     }
   }, [session, reloadKey]);
 
+  // FR2-4: with no session the effect above fetches nothing, so a retry then
+  // would set `isLoading` with no read to clear it. It does nothing instead.
   const retryLocations = useCallback(() => {
+    if (!session) return;
     setIsLoading(true);
     setReloadKey((key) => key + 1);
-  }, []);
+  }, [session]);
 
   // Save selected location to localStorage
   useEffect(() => {

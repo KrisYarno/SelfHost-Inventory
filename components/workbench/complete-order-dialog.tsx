@@ -160,7 +160,7 @@ export function CompleteOrderDialog({
     selectedExternalOrder,
     unmappedExternalItems,
   } = useWorkbench();
-  const { selectedLocationId } = useLocation();
+  const { selectedLocationId, selectedLocation } = useLocation();
   const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
   const queryClient = useQueryClient();
 
@@ -185,6 +185,15 @@ export function CompleteOrderDialog({
   const stopped = selectedExternalOrder !== null && stoppedSelection === selectedExternalOrder;
 
   const isWCOrder = !!selectedExternalOrder;
+
+  // Facelift F0 FR2-2: the dialog checks the location ITSELF. A store order's
+  // cart describes the stock of the location that built it; while that is not
+  // the selected location the page is rebuilding it, and completing now would
+  // deduct here a cart read somewhere else. The page's own gate is not the
+  // only one: the dialog's action waits too, and its submit handler refuses.
+  const notBuiltHere =
+    selectedExternalOrder !== null && selectedExternalOrder.builtAtLocationId !== selectedLocationId;
+  const locationName = selectedLocation?.name ?? "the selected location";
 
   // Amendment 2: Split cart items by source for dual API calls
   const { wcItems, manualItems } = useMemo(() => {
@@ -287,6 +296,8 @@ export function CompleteOrderDialog({
   const handleComplete = async () => {
     // A belt under the disabled action: nothing more is sent for this order.
     if (stopped) return;
+    // FR2-2: and nothing is sent for a cart that was not built here.
+    if (notBuiltHere) return;
 
     if (!csrfToken) {
       toast.error("Secure session is still initializing. Please wait a moment and try again.");
@@ -1200,6 +1211,13 @@ export function CompleteOrderDialog({
                       You can undo this within 10 seconds after completion.
                     </p>
                   )}
+
+                  {/* FR2-2: why the action is waiting. */}
+                  {notBuiltHere && (
+                    <p className="text-sm text-muted-foreground">
+                      {`This order is being updated for ${locationName} — wait a moment.`}
+                    </p>
+                  )}
                 </div>
               </fieldset>
             </div>
@@ -1221,6 +1239,7 @@ export function CompleteOrderDialog({
             // CB1.5c: plus the request caps — either leg over its own cap would
             // be refused by its route with the whole cart already spent.
             // FR-R2 (3): and never again for an order stopped mid-completion.
+            // FR2-2: and not while a store order's cart was built elsewhere.
             disabled={
               processing ||
               csrfLoading ||
@@ -1228,7 +1247,8 @@ export function CompleteOrderDialog({
               !allAcknowledged ||
               wcOver ||
               manualOver ||
-              stopped
+              stopped ||
+              notBuiltHere
             }
           >
             {processing

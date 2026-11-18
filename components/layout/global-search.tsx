@@ -155,9 +155,12 @@ export function GlobalSearch() {
 
   // "No results" is an ANSWER: only a search that succeeded may give it. A failed
   // search says so instead (F0-6).
+  // FR2-8: the REV 2 rule — a failed re-read over results already on screen
+  // keeps them, with no error line; the error is for a search with no answer.
   const showEmpty =
     debouncedQuery.trim().length > 0 && isSuccess && !isFetching && results.length === 0;
-  const showError = debouncedQuery.trim().length > 0 && isError && !isFetching;
+  const showError =
+    debouncedQuery.trim().length > 0 && isError && !isFetching && productData === undefined;
 
   return (
     <>

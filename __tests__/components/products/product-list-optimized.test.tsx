@@ -15,6 +15,11 @@
 // from that value on first mount (so there is no unfiltered first fetch), and
 // re-seeds whenever the value changes while it is mounted. Typing never writes
 // the URL; clearing the box with its X drops a present `search` param.
+//
+// FR2-3 (REV 7): dropping the param is not a navigation — it is a plain
+// `history.replaceState(null, "", "/products")` (Next 14.2 keeps
+// `useSearchParams` in sync with it), never `router.replace`, which went to the
+// server on a keystroke. The drop pins below assert BOTH halves.
 
 import * as React from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -120,6 +125,8 @@ function renderList() {
 }
 
 const searchBox = () => screen.getByPlaceholderText(/Search/) as HTMLInputElement;
+/** FR2-3: the list's only way to drop the param. A no-op here, so jsdom's URL stays put. */
+let replaceStateSpy: jest.SpyInstance;
 /** The X inside the search box (it has no name of its own). */
 const clearButton = () => searchBox().parentElement!.querySelector("button") as HTMLButtonElement;
 
@@ -127,11 +134,16 @@ beforeEach(() => {
   mockSearchParams = new URLSearchParams();
   mockRouter.replace.mockReset();
   mockRouter.push.mockReset();
+  replaceStateSpy = jest.spyOn(window.history, "replaceState").mockImplementation(() => {});
   mockIsMobile = false;
   mockExportToCSV.mockReset();
   mockToastSuccess.mockReset();
   rows = catalogue(60);
   mockFetch();
+});
+
+afterEach(() => {
+  replaceStateSpy.mockRestore();
 });
 
 describe("F0-5 — the summary line", () => {
@@ -272,6 +284,7 @@ describe("F0-6 — the list follows `?search=`", () => {
     await act(() => new Promise((resolve) => setTimeout(resolve, 400)));
     expect(mockRouter.replace).not.toHaveBeenCalled();
     expect(mockRouter.push).not.toHaveBeenCalled();
+    expect(replaceStateSpy).not.toHaveBeenCalled();
   });
 
   it("clearing the box with its X drops a present `search` param", async () => {
@@ -281,7 +294,9 @@ describe("F0-6 — the list follows `?search=`", () => {
 
     fireEvent.click(clearButton());
     expect(searchBox().value).toBe("");
-    expect(mockRouter.replace).toHaveBeenCalledWith("/products");
+    // FR2-3: by `history.replaceState`, never a router navigation.
+    expect(replaceStateSpy).toHaveBeenCalledWith(null, "", "/products");
+    expect(mockRouter.replace).not.toHaveBeenCalled();
   });
 
   it("clearing the box with its X leaves the URL alone when there is no `search` param", async () => {
@@ -291,6 +306,7 @@ describe("F0-6 — the list follows `?search=`", () => {
     fireEvent.click(clearButton());
     expect(searchBox().value).toBe("");
     expect(mockRouter.replace).not.toHaveBeenCalled();
+    expect(replaceStateSpy).not.toHaveBeenCalled();
   });
 
   it("the rendered rows are the list's (sanity)", async () => {
@@ -351,8 +367,11 @@ describe("FR1-8 — re-seeding from global search", () => {
     await waitFor(() => expect(searchBox().value).toBe("Product 1"));
 
     fireEvent.change(searchBox(), { target: { value: "Product 12" } });
-    expect(mockRouter.replace).toHaveBeenCalledTimes(1);
-    expect(mockRouter.replace).toHaveBeenCalledWith("/products");
+    // FR2-3: typing makes no `router.replace` call; the param goes by
+    // `history.replaceState`, once.
+    expect(mockRouter.replace).not.toHaveBeenCalled();
+    expect(replaceStateSpy).toHaveBeenCalledTimes(1);
+    expect(replaceStateSpy).toHaveBeenCalledWith(null, "", "/products");
     expect(mockRouter.push).not.toHaveBeenCalled();
 
     // The URL lets go of the param: the box keeps what was typed.
@@ -387,7 +406,9 @@ describe("FR1-8 — re-seeding from global search", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "clear filters" }));
     expect(searchBox().value).toBe("");
-    expect(mockRouter.replace).toHaveBeenCalledWith("/products");
+    // FR2-3: by `history.replaceState`, never a router navigation.
+    expect(replaceStateSpy).toHaveBeenCalledWith(null, "", "/products");
+    expect(mockRouter.replace).not.toHaveBeenCalled();
   });
 
   it("clearing the filters leaves the URL alone when there is no `search` param", async () => {
@@ -396,5 +417,6 @@ describe("FR1-8 — re-seeding from global search", () => {
     await screen.findByText("Showing 1–25 of 60 products");
     fireEvent.click(screen.getByRole("button", { name: "clear filters" }));
     expect(mockRouter.replace).not.toHaveBeenCalled();
+    expect(replaceStateSpy).not.toHaveBeenCalled();
   });
 });

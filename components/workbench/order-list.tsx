@@ -5,7 +5,16 @@ import { useWorkbench } from "@/hooks/use-workbench";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ShoppingCart } from "lucide-react";
 
-export function OrderList() {
+interface OrderListProps {
+  /**
+   * Facelift F0 FR2-1: the cart is about to be replaced (the order is being
+   * updated for the selected location), so no line can be changed or binned —
+   * the edit would be lost without a word.
+   */
+  readOnly?: boolean;
+}
+
+export function OrderList({ readOnly = false }: OrderListProps = {}) {
   const { orderItems, updateItemQuantity, removeItem, getTotalQuantity } = useWorkbench();
 
   if (orderItems.length === 0) {
@@ -41,6 +50,7 @@ export function OrderList() {
             <OrderItemComponent
               key={item.fulfillmentItemId ?? `manual-${item.product.id}`}
               item={item}
+              readOnly={readOnly}
               onUpdateQuantity={(quantity) =>
                 updateItemQuantity(item.product.id, quantity, item.fulfillmentItemId)
               }

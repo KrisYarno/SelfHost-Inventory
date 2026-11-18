@@ -12,7 +12,7 @@
 // deductible says so instead of "Click on products", and its Clear works.
 
 import * as React from "react";
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 jest.mock("next-auth/react", () => ({
@@ -93,7 +93,9 @@ function seedOrder(items: ExternalItem[]) {
   });
 }
 
-function renderSheet(over: { canComplete?: boolean; updatingNotice?: string | null } = {}) {
+function renderSheet(
+  over: { canComplete?: boolean; updatingNotice?: string | null; cartReadOnly?: boolean } = {}
+) {
   const props = {
     onOpenChange: jest.fn(),
     onClearOrder: jest.fn(),
@@ -113,6 +115,7 @@ function renderSheet(over: { canComplete?: boolean; updatingNotice?: string | nu
       onCompleteOrder={props.onCompleteOrder}
       canComplete={over.canComplete ?? false}
       updatingNotice={over.updatingNotice}
+      cartReadOnly={over.cartReadOnly}
       queuePosition={null}
       onItemMapped={props.onItemMapped}
     />
@@ -320,5 +323,35 @@ describe("FR1-1 (d) — the sheet while the order is being updated", () => {
 
     expect(screen.queryByText(/^Updating this order/)).toBeNull();
     expect(screen.getByRole("button", { name: "Complete & Fulfill" })).toBeEnabled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR2-1 (REV 7): while the order is being updated the cart is
+// read-only — on the phone too. The page hands the sheet `cartReadOnly`, and
+// the sheet's order list disables every line's steppers, editor and bin.
+// ---------------------------------------------------------------------------
+
+describe("FR2-1 — the sheet's cart is read-only while the order updates", () => {
+  const lineButtons = () => {
+    const row = screen.getByRole("heading", { level: 4, name: "Widget In Stock" }).closest("div.rounded-xl");
+    return within(row as HTMLElement).getAllByRole("button");
+  };
+
+  it("cartReadOnly: the line's steppers, quantity editor and bin are disabled", () => {
+    seedOrder([CART_LINE]);
+    renderSheet({ cartReadOnly: true, updatingNotice: "Updating this order for Overflow…" });
+
+    const buttons = lineButtons();
+    expect(buttons).toHaveLength(4);
+    for (const button of buttons) expect(button).toBeDisabled();
+  });
+
+  it("without it, the line is live (unchanged)", () => {
+    seedOrder([CART_LINE]);
+    renderSheet();
+
+    // − (2 > 1), the quantity, + (2 < 10) and the bin.
+    for (const button of lineButtons()) expect(button).toBeEnabled();
   });
 });

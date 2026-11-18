@@ -133,6 +133,10 @@ export default function WorkbenchPage() {
    * nothing is in flight — with or without cached rows. Stock will not arrive,
    * so a pending rebuild clears the order rather than leave "Updating this
    * order…" standing over no read at all.
+   *
+   * FR2-5: the order rows read the same fact. A read that errored and is being
+   * read AGAIN is loading, not failed — its rows say "Loading stock…" until the
+   * re-read answers.
    */
   const stockFailed = productsError && !productsFetching;
   /**
@@ -159,9 +163,25 @@ export default function WorkbenchPage() {
     unmappedExternalItems,
     selectExternalOrder,
     clearExternalOrder,
+    selectionSeq,
+    invalidateInFlightReads,
   } = useWorkbench();
 
   const isWCOrder = !!selectedExternalOrder;
+
+  /**
+   * Facelift F0 FR2-1 (Q/A B1): an order read issued by THIS page instance is
+   * dead once the instance unmounts. The store — and the order in it — outlives
+   * the page, so a late answer to a read from a page the operator has left must
+   * not clear or replace what the next instance of the page shows.
+   */
+  const pageAliveRef = useRef(true);
+  useEffect(() => {
+    pageAliveRef.current = true;
+    return () => {
+      pageAliveRef.current = false;
+    };
+  }, []);
 
   // Handle scroll for collapsing search bar on mobile
   useEffect(() => {
@@ -695,18 +715,25 @@ export default function WorkbenchPage() {
   // MAPPING, so that caller passes `quiet` and words its own failure.
   //
   // FR1-1 (f), LATEST WINS, for both callers: a read that is no longer the
-  // latest, or whose order is no longer the selected one (cleared, another order
-  // picked, switched to Manual), answers "stale" and does NOTHING — no select,
-  // no clear, no toast. A rebuild that lands on another order's selection would
-  // replace the operator's cart with the old order's lines.
+  // latest answers "stale" and does NOTHING — no select, no clear, no toast.
+  //
+  // FR2-1: and staleness is scoped to the SELECTION, not the order id. The read
+  // captures the store's `selectionSeq` when it goes out; any selection change
+  // since (cleared, another order picked — or the SAME order picked again —,
+  // switched to Manual, the queue advanced, `invalidateInFlightReads`) makes it
+  // stale, and so does the unmount of the page instance that issued it. An id
+  // check let a late answer replace a re-selection of the same order: put back
+  // a quantity the packer lowered, or clear a cart just built here.
   const refetchExternalOrder = useCallback(
     async ({ quiet = false }: { quiet?: boolean } = {}): Promise<boolean | "stale"> => {
       const orderId = selectedExternalOrder?.id;
       if (!orderId) return false;
       const seq = ++orderReadSeqRef.current;
+      const issuedAtSelection = useWorkbench.getState().selectionSeq;
       const isStale = () =>
+        !pageAliveRef.current ||
         seq !== orderReadSeqRef.current ||
-        useWorkbench.getState().selectedExternalOrder?.id !== orderId;
+        useWorkbench.getState().selectionSeq !== issuedAtSelection;
       try {
         const res = await fetch(`/api/orders/external/${orderId}`, { cache: "no-store" });
         if (isStale()) return "stale";
@@ -744,19 +771,32 @@ export default function WorkbenchPage() {
    * FR1-1 (c) as ruled): a cart built from another location's stock must never
    * stand under this location's name.
    *
-   * `rebuildTargetRef` is the location a rebuild is in flight for, so a render
-   * while it is out never fires a second one for the same location.
-   * `rebuildingOrderId` is the order it is rebuilding: Complete waits for THAT
-   * order only — a rebuild left stale by another selection holds nothing up.
+   * `rebuildInFlightRef` is the rebuild in flight — the location it is for and
+   * the selection it was issued under — so a render while it is out never fires
+   * a second one for the same location and selection. A read made stale by a
+   * selection change holds nothing up (FR2-1).
+   * `rebuildSeq` is that captured `selectionSeq`: Complete waits only while it
+   * is still the current one (FR2-1) — a rebuild whose selection has moved on,
+   * including a clear-and-reselect of the SAME order, holds nothing up.
    */
   const rebuildPending =
     selectedExternalOrder !== null && selectedExternalOrder.builtAtLocationId !== selectedLocationId;
-  const rebuildTargetRef = useRef<number | null>(null);
-  const [rebuildingOrderId, setRebuildingOrderId] = useState<string | null>(null);
-  const orderUpdating =
-    rebuildPending ||
-    (selectedExternalOrder !== null && rebuildingOrderId === selectedExternalOrder.id);
+  const rebuildInFlightRef = useRef<{ target: number | null; seq: number } | null>(null);
+  const [rebuildSeq, setRebuildSeq] = useState<number | null>(null);
+  const rebuildLive = rebuildSeq !== null && rebuildSeq === selectionSeq;
+  const orderUpdating = rebuildPending || rebuildLive;
   const locationName = selectedLocation?.name ?? "the selected location";
+
+  /**
+   * FR2-1, the flip-back (FD1-1): the location went back to the one the cart
+   * was built at while a rebuild was out. Nothing needs rebuilding any more, and
+   * the read in flight — when it lands — would replace the cart the operator
+   * now has (hand lines, lowered quantities) with no toast to say so. It is made
+   * stale instead.
+   */
+  useEffect(() => {
+    if (!rebuildPending && rebuildLive) invalidateInFlightReads();
+  }, [rebuildPending, rebuildLive, invalidateInFlightReads]);
 
   useEffect(() => {
     if (!rebuildPending || !selectedExternalOrder) return;
@@ -772,16 +812,21 @@ export default function WorkbenchPage() {
       return;
     }
     if (!stockArrived) return;
-    if (rebuildTargetRef.current === selectedLocationId) return;
+    // The selection the read is issued under: `refetchExternalOrder` captures
+    // the same value in this same synchronous run.
+    const seq = useWorkbench.getState().selectionSeq;
+    const inFlight = rebuildInFlightRef.current;
+    if (inFlight !== null && inFlight.target === selectedLocationId && inFlight.seq === seq) return;
     const target = selectedLocationId;
-    rebuildTargetRef.current = target;
-    setRebuildingOrderId(selectedExternalOrder.id);
+    const mine = { target, seq };
+    rebuildInFlightRef.current = mine;
+    setRebuildSeq(seq);
     // Manual lines are the ones the fulfil leg does not carry (the dialog's split).
     const handAdded = orderItems.some((item) => !item.fulfillmentItemId);
     void refetchExternalOrder({ quiet: true }).then((result) => {
-      if (rebuildTargetRef.current === target) {
-        rebuildTargetRef.current = null;
-        setRebuildingOrderId(null);
+      if (rebuildInFlightRef.current === mine) {
+        rebuildInFlightRef.current = null;
+        setRebuildSeq(null);
       }
       if (result === "stale") return;
       if (!result) {
@@ -799,7 +844,8 @@ export default function WorkbenchPage() {
     });
   }, [
     rebuildPending,
-    rebuildingOrderId,
+    rebuildSeq,
+    selectionSeq,
     selectedExternalOrder,
     selectedLocationId,
     stockArrived,
@@ -818,13 +864,18 @@ export default function WorkbenchPage() {
     selectExternalOrder(order, products, selectedLocationId);
   };
 
+  // FR2-1: while the order is being updated the cart is read-only — it is about
+  // to be replaced, and a line added now would be lost without a word. Adding
+  // is refused here (the picker never opens) and again at the add (the belt).
   const handleProductClick = (product: ProductWithQuantity) => {
+    if (orderUpdating) return;
     if (product.currentQuantity > 0) {
       setSelectedProduct(product);
     }
   };
 
   const handleQuantityConfirm = (quantity: number) => {
+    if (orderUpdating) return;
     if (selectedProduct) {
       // Manual additions always use 'manual' source
       addItem(selectedProduct, quantity, 'manual');
@@ -938,8 +989,10 @@ export default function WorkbenchPage() {
                         onOrderSelected={handleOrderSelected}
                         selectedOrder={selectedExternalOrder}
                         onClear={clearExternalOrder}
-                        stockLoading={!stockArrived && !productsError}
-                        stockFailed={productsError}
+                        noLocation={selectedLocationId === null}
+                        stockLoading={!stockArrived && !stockFailed}
+                        stockFailed={stockFailed}
+                        onRetryStock={refetchProducts}
                       />
                       {unmappedExternalItems.length > 0 && (
                         <div className="mt-2">
@@ -1161,8 +1214,10 @@ export default function WorkbenchPage() {
                     onOrderSelected={handleOrderSelected}
                     selectedOrder={selectedExternalOrder}
                     onClear={clearExternalOrder}
-                    stockLoading={!stockArrived && !productsError}
-                    stockFailed={productsError}
+                    noLocation={selectedLocationId === null}
+                    stockLoading={!stockArrived && !stockFailed}
+                    stockFailed={stockFailed}
+                    onRetryStock={refetchProducts}
                   />
                   {unmappedExternalItems.length > 0 && (
                     <div className="mt-2">
@@ -1177,9 +1232,9 @@ export default function WorkbenchPage() {
               </Tabs>
             </div>
 
-            {/* Order Items */}
+            {/* Order Items — read-only while the order is being updated (FR2-1). */}
             <div className="flex-1 overflow-hidden">
-              <OrderList />
+              <OrderList readOnly={orderUpdating} />
             </div>
 
             {/* Order Actions */}
@@ -1254,6 +1309,7 @@ export default function WorkbenchPage() {
           onCompleteOrder={handleCompleteOrder}
           canComplete={orderItems.length > 0 && !!orderReference.trim() && !orderUpdating}
           updatingNotice={orderUpdating ? `Updating this order for ${locationName}…` : null}
+          cartReadOnly={orderUpdating}
           queuePosition={getQueuePosition()}
           onItemMapped={refetchExternalOrder}
         />

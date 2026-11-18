@@ -10,7 +10,7 @@
 // warning tone. It covers the stock cap AND a line the operator stepped down.
 
 import * as React from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { OrderItemComponent } from "@/components/workbench/order-item";
 import type { OrderItem } from "@/types/workbench";
 import type { ProductWithQuantity } from "@/types/product";
@@ -84,5 +84,72 @@ describe("F0-1 — the store-order line says what it is short", () => {
     renderItem({ product: product(10), quantity: 2, source: "manual" });
 
     expect(screen.queryByText(SENTENCE)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR2-1 (REV 7): a read-only line. While the order is being
+// updated the cart is about to be replaced, so no edit may be made — it would
+// be lost without a word.
+// ---------------------------------------------------------------------------
+
+describe("FR2-1 — a read-only line", () => {
+  const line: OrderItem = {
+    product: product(10),
+    quantity: 3,
+    neededQuantity: 3,
+    fulfillmentItemId: "it-1",
+    source: "wc-order",
+  };
+
+  it("disables the steppers, the quantity editor and the bin, and none of them acts", () => {
+    const onUpdateQuantity = jest.fn();
+    const onRemove = jest.fn();
+    render(<OrderItemComponent item={line} onUpdateQuantity={onUpdateQuantity} onRemove={onRemove} readOnly />);
+
+    const buttons = screen.getAllByRole("button");
+    expect(buttons).toHaveLength(4);
+    for (const button of buttons) {
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+    }
+    expect(onUpdateQuantity).not.toHaveBeenCalled();
+    expect(onRemove).not.toHaveBeenCalled();
+    // The quantity editor never opened.
+    expect(screen.queryByRole("spinbutton")).toBeNull();
+  });
+
+  it("an edit already open when the line turns read-only cannot be confirmed", () => {
+    const onUpdateQuantity = jest.fn();
+    const view = render(
+      <OrderItemComponent item={line} onUpdateQuantity={onUpdateQuantity} onRemove={jest.fn()} />
+    );
+    fireEvent.click(screen.getByRole("button", { name: "3" }));
+    const editor = screen.getByRole("spinbutton");
+    fireEvent.change(editor, { target: { value: "1" } });
+
+    view.rerender(
+      <OrderItemComponent item={line} onUpdateQuantity={onUpdateQuantity} onRemove={jest.fn()} readOnly />
+    );
+    expect(screen.getByRole("spinbutton")).toBeDisabled();
+    // The editor's confirm (the first of its two buttons) is disabled; the bin too.
+    const [confirm, cancel, bin] = screen.getAllByRole("button");
+    expect(confirm).toBeDisabled();
+    expect(bin).toBeDisabled();
+    fireEvent.keyDown(screen.getByRole("spinbutton"), { key: "Enter" });
+    fireEvent.click(confirm);
+    expect(onUpdateQuantity).not.toHaveBeenCalled();
+    // Cancel still closes the editor.
+    fireEvent.click(cancel);
+    expect(screen.queryByRole("spinbutton")).toBeNull();
+  });
+
+  it("not read-only, the same line is live (unchanged)", () => {
+    const onUpdateQuantity = jest.fn();
+    render(<OrderItemComponent item={line} onUpdateQuantity={onUpdateQuantity} onRemove={jest.fn()} />);
+
+    for (const button of screen.getAllByRole("button")) expect(button).toBeEnabled();
+    fireEvent.click(screen.getAllByRole("button")[0]);
+    expect(onUpdateQuantity).toHaveBeenCalledWith(2);
   });
 });

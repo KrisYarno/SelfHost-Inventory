@@ -32,6 +32,11 @@ interface MobileCartSheetProps {
    * as a muted line above Complete. Null when nothing is pending.
    */
   updatingNotice?: string | null;
+  /**
+   * Facelift F0 FR2-1: the order is being updated, so the cart is read-only —
+   * its lines are about to be replaced and an edit would be lost.
+   */
+  cartReadOnly?: boolean;
   queuePosition?: { current: number; total: number } | null;
   /** The page's order refetch, handed to the skipped-lines alert's Map (F0-1). */
   onItemMapped?: () => void;
@@ -48,6 +53,7 @@ export function MobileCartSheet({
   onCompleteOrder,
   canComplete,
   updatingNotice = null,
+  cartReadOnly = false,
   queuePosition,
   onItemMapped,
 }: MobileCartSheetProps) {
@@ -157,7 +163,7 @@ export function MobileCartSheet({
             // parent is left auto-height there and the list grows with its
             // lines; without the alert it fills the region exactly as before.
             <div className={showSkippedLines ? undefined : "h-full"}>
-              <OrderList />
+              <OrderList readOnly={cartReadOnly} />
             </div>
           )}
         </div>

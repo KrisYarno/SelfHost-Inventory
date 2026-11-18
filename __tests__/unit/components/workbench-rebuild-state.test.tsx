@@ -23,7 +23,7 @@
 // "placeholder", "cached" and "fetching" mean here is react-query's, not a mock's.
 
 import * as React from "react";
-import { render, screen, act, waitFor } from "@testing-library/react";
+import { render, screen, act, waitFor, within, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 jest.mock("next/navigation", () => ({
@@ -73,6 +73,8 @@ type SelectorProps = {
   onClear: () => void;
   stockLoading?: boolean;
   stockFailed?: boolean;
+  noLocation?: boolean;
+  onRetryStock?: () => unknown;
 };
 let selectorProps: SelectorProps | null;
 jest.mock("@/components/workbench/wc-order-selector", () => ({
@@ -85,6 +87,7 @@ jest.mock("@/components/workbench/wc-order-selector", () => ({
 type SheetProps = {
   canComplete: boolean;
   updatingNotice?: string | null;
+  cartReadOnly?: boolean;
   onCompleteOrder: () => void;
   onItemMapped?: () => void;
 };
@@ -101,6 +104,7 @@ import WorkbenchPage from "@/app/(app)/workbench/page";
 import { useWorkbench } from "@/hooks/use-workbench";
 import type { ExternalOrder } from "@/types/external-orders";
 import type { ProductWithQuantity } from "@/types/product";
+import { queryClient as appQueryClient } from "@/lib/query-client";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -203,7 +207,7 @@ function renderPage(client: QueryClient = newClient()) {
     </QueryClientProvider>
   );
   const view = render(ui());
-  return { rerender: () => view.rerender(ui()) };
+  return { rerender: () => view.rerender(ui()), unmount: () => view.unmount() };
 }
 
 const setWidth = (width: number) =>
@@ -699,5 +703,491 @@ describe("FR1-1 (e) — the order rows and the page's selection gate", () => {
       selectorProps!.onOrderSelected(ORDER_X);
     });
     expect(useWorkbench.getState().selectedExternalOrder?.builtAtLocationId).toBe(1);
+  });
+});
+
+// ===========================================================================
+// Facelift F0 FR2 (plan 2026-11-17-facelift-f0, REV 7) — staleness is scoped
+// to the SELECTION, not the order id (F0-QA-1 = F0-FD1-2, FD1-1).
+//
+// FR1's latest-wins guard compared the ORDER ID. So a clear-and-reselect of
+// the SAME order, or a read issued by a page instance that has since
+// unmounted, was not stale: Complete stayed blocked on a cart just built here
+// (A1); a late failure cleared the good re-selection (A2); a late success put
+// back a quantity the packer lowered (A3: a packer who packed 1 could deduct
+// 2); and an old page's read cleared the new page's order (B1). Now every
+// order read captures the store's `selectionSeq` and is stale once it moves,
+// or once its page has unmounted; a flip-back to the cart's own location
+// invalidates the read in flight; and the cart is read-only while it updates.
+// ===========================================================================
+
+describe("FR2-1 — a clear-and-reselect of the SAME order is a new selection", () => {
+  /** X built at Main, then rebuilt at Overflow with the rebuild's order read HELD. */
+  async function rebuildHeldAtOverflow() {
+    selectXAtMain();
+    const held = deferred<Response>();
+    const reads = [held.promise];
+    orderReply["ord-x"] = () => reads.shift() ?? Promise.resolve(ok(ORDER_X));
+    const { rerender } = renderPage();
+    await waitFor(() => expect(stockFetches(1).length).toBeGreaterThan(0));
+    moveTo(OVERFLOW, rerender);
+    await waitFor(() => expect(orderFetches()).toHaveLength(1));
+    expect(completeButton()).toBeDisabled();
+    return { held };
+  }
+
+  /** The operator clears X, goes back to the From Order tab and picks X again, at Overflow. */
+  async function clearAndReselectX() {
+    act(() => {
+      selectorProps!.onClear();
+    });
+    act(() => {
+      useWorkbench.getState().setOrderSource("wc-order");
+    });
+    await waitFor(() => expect(selectorProps?.stockLoading).toBe(false));
+    act(() => {
+      selectorProps!.onOrderSelected(ORDER_X);
+    });
+    const state = useWorkbench.getState();
+    expect(state.selectedExternalOrder?.id).toBe("ord-x");
+    expect(state.selectedExternalOrder?.builtAtLocationId).toBe(2);
+  }
+
+  it("A1: Complete is live at once on the cart just built here — it does not wait on the stale read", async () => {
+    await rebuildHeldAtOverflow();
+    await clearAndReselectX();
+    await act(async () => {});
+
+    // The old read is still out, and holds nothing up.
+    expect(completeButton()).toBeEnabled();
+    expect(screen.queryByText(UPDATING_OVERFLOW)).toBeNull();
+  });
+
+  it("A2: a late FAILURE of the old read does not clear the good re-selection", async () => {
+    const consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+    const { held } = await rebuildHeldAtOverflow();
+    await clearAndReselectX();
+
+    await act(async () => held.resolve(refused()));
+    await act(async () => {});
+
+    const after = useWorkbench.getState();
+    expect(after.selectedExternalOrder?.id).toBe("ord-x");
+    expect(after.selectedExternalOrder?.builtAtLocationId).toBe(2);
+    expect(after.orderItems.map((i) => [i.fulfillmentItemId, i.quantity])).toEqual([["x-1", 2]]);
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.info).not.toHaveBeenCalled();
+    expect(completeButton()).toBeEnabled();
+    consoleError.mockRestore();
+  });
+
+  it("A3: a late SUCCESS does not put back a quantity the packer lowered", async () => {
+    const { held } = await rebuildHeldAtOverflow();
+    await clearAndReselectX();
+
+    // The packer packed 1 of the 2.
+    act(() => {
+      useWorkbench.getState().updateItemQuantity(501, 1, "x-1");
+    });
+    expect(useWorkbench.getState().orderItems[0]?.quantity).toBe(1);
+
+    await act(async () => held.resolve(ok(ORDER_X)));
+    await act(async () => {});
+
+    // Still 1: the deduction says what was packed, not what the stale read built.
+    expect(useWorkbench.getState().orderItems.map((i) => [i.fulfillmentItemId, i.quantity])).toEqual([
+      ["x-1", 1],
+    ]);
+    expect(toast.info).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("FR2-1 (B1) — a read issued by a page instance that has unmounted", () => {
+  it.each([
+    ["failure", () => refused()],
+    ["success", () => ok(ORDER_X)],
+  ])("its late %s does nothing to the order the next page instance shows", async (_label, answer) => {
+    const consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+    // X was built at Main; the shell already says Overflow when the page opens.
+    selectXAtMain();
+    locationContext = { selectedLocationId: 2, selectedLocation: OVERFLOW };
+    const oldRead = deferred<Response>();
+    const reads = [oldRead.promise];
+    orderReply["ord-x"] = () => reads.shift() ?? Promise.resolve(ok(ORDER_X));
+
+    // The first page instance issues the rebuild's read, then the operator leaves.
+    const client = newClient();
+    const first = renderPage(client);
+    await waitFor(() => expect(orderFetches()).toHaveLength(1));
+    first.unmount();
+
+    // The next instance rebuilds the order for itself.
+    renderPage(client);
+    await waitFor(() => expect(orderFetches()).toHaveLength(2));
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(REBUILT_OVERFLOW));
+    expect(useWorkbench.getState().selectedExternalOrder?.builtAtLocationId).toBe(2);
+
+    // The old page's read lands now.
+    await act(async () => oldRead.resolve(answer()));
+    await act(async () => {});
+
+    const after = useWorkbench.getState();
+    expect(after.selectedExternalOrder?.id).toBe("ord-x");
+    expect(after.selectedExternalOrder?.builtAtLocationId).toBe(2);
+    expect(after.orderItems.map((i) => i.fulfillmentItemId)).toEqual(["x-1"]);
+    expect(toast.error).not.toHaveBeenCalled();
+    // Only the new page's own rebuild spoke.
+    expect(toast.info).toHaveBeenCalledTimes(1);
+    expect(completeButton()).toBeEnabled();
+    consoleError.mockRestore();
+  });
+});
+
+describe("FR2-1 (B1) — the old page's read lands BEFORE the next instance has rebuilt", () => {
+  // Nothing has changed the selection yet (the new page is still waiting for
+  // Overflow's rows), so only the dead page tells this read apart.
+  it.each([
+    ["failure", () => refused()],
+    ["success", () => ok(ORDER_X)],
+  ])("its %s does nothing; the new page then rebuilds for itself", async (_label, answer) => {
+    const consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+    selectXAtMain();
+    locationContext = { selectedLocationId: 2, selectedLocation: OVERFLOW };
+    const oldRead = deferred<Response>();
+    const reads = [oldRead.promise];
+    orderReply["ord-x"] = () => reads.shift() ?? Promise.resolve(ok(ORDER_X));
+
+    const client = newClient();
+    const first = renderPage(client);
+    await waitFor(() => expect(orderFetches()).toHaveLength(1));
+    first.unmount();
+
+    // The next instance re-reads Overflow's (cached, stale) rows: held.
+    const reread = deferred<Response>();
+    stockReply[2] = () => reread.promise;
+    renderPage(client);
+    await waitFor(() => expect(stockFetches(2)).toHaveLength(2));
+    const seqBefore = useWorkbench.getState().selectionSeq;
+
+    await act(async () => oldRead.resolve(answer()));
+    await act(async () => {});
+    // Untouched: still X as built at Main, still waiting, nobody spoke.
+    expect(useWorkbench.getState().selectionSeq).toBe(seqBefore);
+    expect(useWorkbench.getState().selectedExternalOrder?.builtAtLocationId).toBe(1);
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.info).not.toHaveBeenCalled();
+    expect(screen.getByText(UPDATING_OVERFLOW)).toBeInTheDocument();
+
+    // The new page's own rebuild, once its rows are here.
+    await act(async () => reread.resolve(ok({ inventory: STOCK[2] })));
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(REBUILT_OVERFLOW));
+    expect(orderFetches()).toHaveLength(2);
+    expect(toast.info).toHaveBeenCalledTimes(1);
+    expect(useWorkbench.getState().selectedExternalOrder?.builtAtLocationId).toBe(2);
+    consoleError.mockRestore();
+  });
+});
+
+describe("FR2-1 (FD1-1) — the flip-back: the location returns to the cart's own while a rebuild is out", () => {
+  it("the in-flight read is invalidated: it cannot replace the cart the operator now has", async () => {
+    selectXAtMain();
+    const held = deferred<Response>();
+    const reads = [held.promise];
+    orderReply["ord-x"] = () => reads.shift() ?? Promise.resolve(ok(ORDER_X));
+    const { rerender } = renderPage();
+    await waitFor(() => expect(stockFetches(1).length).toBeGreaterThan(0));
+
+    moveTo(OVERFLOW, rerender);
+    await waitFor(() => expect(orderFetches()).toHaveLength(1));
+
+    // Back to Main, where the cart was built: nothing needs rebuilding.
+    moveTo(MAIN, rerender);
+    await act(async () => {});
+
+    // The packer lowers the line to what they packed.
+    act(() => {
+      useWorkbench.getState().updateItemQuantity(501, 1, "x-1");
+    });
+
+    // The read for Overflow lands: it is stale, and does nothing.
+    await act(async () => held.resolve(ok(ORDER_X)));
+    await act(async () => {});
+    const after = useWorkbench.getState();
+    expect(after.selectedExternalOrder?.builtAtLocationId).toBe(1);
+    expect(after.orderItems.map((i) => [i.fulfillmentItemId, i.product.currentQuantity, i.quantity])).toEqual([
+      ["x-1", 10, 1],
+    ]);
+    expect(toast.info).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("flip back and forward again: a fresh rebuild goes out at once — the invalidated read holds nothing up", async () => {
+    selectXAtMain();
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    const reads = [first.promise, second.promise];
+    orderReply["ord-x"] = () => reads.shift() ?? Promise.resolve(ok(ORDER_X));
+    const { rerender } = renderPage();
+    await waitFor(() => expect(stockFetches(1).length).toBeGreaterThan(0));
+
+    moveTo(OVERFLOW, rerender);
+    await waitFor(() => expect(orderFetches()).toHaveLength(1));
+    moveTo(MAIN, rerender);
+    await act(async () => {});
+    // Main's cached rows are re-read; let that settle before going forward again.
+    await waitFor(() => expect(stockFetches(1).length).toBeGreaterThan(1));
+    await act(async () => {});
+
+    // Forward to Overflow again, its rows cached: a NEW read goes out, while
+    // the first (invalidated) one is still unanswered.
+    moveTo(OVERFLOW, rerender);
+    await waitFor(() => expect(orderFetches()).toHaveLength(2));
+
+    await act(async () => second.resolve(ok(ORDER_X)));
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(REBUILT_OVERFLOW));
+    expect(useWorkbench.getState().selectedExternalOrder?.builtAtLocationId).toBe(2);
+
+    // The invalidated read lands last: nothing.
+    await act(async () => first.resolve(refused()));
+    await act(async () => {});
+    expect(useWorkbench.getState().selectedExternalOrder?.builtAtLocationId).toBe(2);
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.info).toHaveBeenCalledTimes(1);
+  });
+
+  it("and Complete does not wait on that read: the flip-back gives it back at once", async () => {
+    selectXAtMain();
+    const held = deferred<Response>();
+    const reads = [held.promise];
+    orderReply["ord-x"] = () => reads.shift() ?? Promise.resolve(ok(ORDER_X));
+    const { rerender } = renderPage();
+    await waitFor(() => expect(stockFetches(1).length).toBeGreaterThan(0));
+
+    moveTo(OVERFLOW, rerender);
+    await waitFor(() => expect(orderFetches()).toHaveLength(1));
+    expect(completeButton()).toBeDisabled();
+
+    moveTo(MAIN, rerender);
+    await act(async () => {});
+    // The Overflow read is still out, and holds nothing up.
+    expect(completeButton()).toBeEnabled();
+    expect(screen.queryByText(/^Updating this order/)).toBeNull();
+  });
+});
+
+describe("FR2-1 — the cart is read-only while the order is updating", () => {
+  /** The order row in the desktop cart (an h4 — the product tiles use h3). */
+  const cartRowButtons = () => {
+    const row = screen.getByRole("heading", { level: 4, name: "Widget 10mg" }).closest("div.rounded-xl");
+    return within(row as HTMLElement).getAllByRole("button");
+  };
+  const tileButtons = () =>
+    screen
+      .getAllByText(/^Stock: /)
+      .map((el) => el.closest("button"))
+      .filter((b): b is HTMLButtonElement => b !== null);
+
+  it("the steppers, the quantity editor and the bin are disabled, and a product tile does not open the picker", async () => {
+    selectXAtMain();
+    const { rerender } = renderPage();
+    await waitFor(() => expect(stockFetches(1).length).toBeGreaterThan(0));
+    await waitFor(() => expect(tileButtons().length).toBeGreaterThan(0));
+    // Built here: the row is live (the + stays enabled: 2 of Main's 10).
+    expect(cartRowButtons()).toHaveLength(4);
+    for (const button of cartRowButtons()) expect(button).toBeEnabled();
+
+    // To Overflow, whose stock is still on its way: the order is updating.
+    const overflowStock = deferred<Response>();
+    stockReply[2] = () => overflowStock.promise;
+    moveTo(OVERFLOW, rerender);
+    await waitFor(() => expect(screen.getByText(UPDATING_OVERFLOW)).toBeInTheDocument());
+
+    const [minus, quantity, plus, bin] = cartRowButtons();
+    for (const button of [minus, quantity, plus, bin]) expect(button).toBeDisabled();
+    expect(quantity).toHaveTextContent("2");
+
+    fireEvent.click(tileButtons()[0]);
+    expect(screen.queryByText("Select Quantity")).toBeNull();
+
+    // The rebuild lands: the cart is editable again.
+    await act(async () => overflowStock.resolve(ok({ inventory: STOCK[2] })));
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(REBUILT_OVERFLOW));
+    await waitFor(() => expect(cartRowButtons()[1]).toBeEnabled());
+    expect(cartRowButtons()[0]).toBeEnabled();
+    expect(cartRowButtons()[3]).toBeEnabled();
+  });
+
+  it("a picker already open when the update begins adds nothing", async () => {
+    selectXAtMain();
+    const { rerender } = renderPage();
+    await waitFor(() => expect(tileButtons().length).toBeGreaterThan(0));
+
+    // The picker opens on Main's rows while the order is built here.
+    fireEvent.click(tileButtons()[0]);
+    expect(await screen.findByText("Select Quantity")).toBeInTheDocument();
+
+    // The location changes under it (the picker is modal; the change comes from elsewhere).
+    stockReply[2] = () => new Promise<Response>(() => {});
+    moveTo(OVERFLOW, rerender);
+    await waitFor(() => expect(screen.getByText(UPDATING_OVERFLOW)).toBeInTheDocument());
+    const before = useWorkbench.getState().orderItems.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "1" }));
+    expect(useWorkbench.getState().orderItems).toHaveLength(before);
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("the phone's sheet is told the cart is read-only while updating, and not after", async () => {
+    setWidth(375);
+    selectXAtMain();
+    locationContext = { selectedLocationId: 2, selectedLocation: OVERFLOW };
+    const stock = deferred<Response>();
+    stockReply[2] = () => stock.promise;
+    renderPage();
+
+    await waitFor(() => expect(sheetProps?.updatingNotice).toBe(UPDATING_OVERFLOW));
+    expect(sheetProps!.cartReadOnly).toBe(true);
+
+    await act(async () => stock.resolve(ok({ inventory: STOCK[2] })));
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(REBUILT_OVERFLOW));
+    await waitFor(() => expect(sheetProps!.cartReadOnly).toBe(false));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR2-5 (QA-2, FD1-3): a failed stock read being read AGAIN is loading
+// ---------------------------------------------------------------------------
+
+describe("FR2-5 — the rows' stock-failed state is `productsError && !productsFetching`", () => {
+  beforeEach(() => {
+    act(() => {
+      useWorkbench.getState().setOrderSource("wc-order");
+    });
+  });
+
+  it("a re-read of rows whose last read FAILED says loading while it is out, and becomes live when it answers", async () => {
+    // Main's rows are here; their next read fails, so the query is in error
+    // OVER cached rows (react-query keeps `status: "error"` while it re-reads
+    // them — with no rows it would be "pending" again, which already read as
+    // loading).
+    renderPage();
+    await waitFor(() => expect(selectorProps?.stockLoading).toBe(false));
+    stockReply[1] = async () => refused();
+    await act(async () => {
+      await qc.refetchQueries({ queryKey: ["inventory-products"] });
+    });
+    await waitFor(() => expect(selectorProps?.stockFailed).toBe(true));
+    expect(selectorProps?.stockLoading).toBe(false);
+
+    // Read again (what the rows' Retry is for): while it is out, it is loading.
+    const reread = deferred<Response>();
+    stockReply[1] = () => reread.promise;
+    await act(async () => {
+      void qc.refetchQueries({ queryKey: ["inventory-products"] });
+    });
+    await waitFor(() => expect(selectorProps?.stockLoading).toBe(true));
+    const mainKey = ["inventory-products", 1, "baseNameNumeric", "asc"];
+    expect(qc.getQueryState(mainKey)?.status).toBe("error");
+    expect(qc.getQueryState(mainKey)?.fetchStatus).toBe("fetching");
+    expect(selectorProps?.stockFailed).toBe(false);
+
+    await act(async () => reread.resolve(ok({ inventory: STOCK[1] })));
+    await waitFor(() => expect(selectorProps?.stockLoading).toBe(false));
+    expect(selectorProps?.stockFailed).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR2-6 (QA-3): no location selected
+// ---------------------------------------------------------------------------
+
+describe("FR2-6 — with no location selected the rows are told so", () => {
+  beforeEach(() => {
+    act(() => {
+      useWorkbench.getState().setOrderSource("wc-order");
+    });
+  });
+
+  it("the selector gets `noLocation`, no stock read goes out, and the page refuses a selection", async () => {
+    locationContext = { selectedLocationId: null, selectedLocation: null };
+    renderPage();
+
+    await waitFor(() => expect(selectorProps).not.toBeNull());
+    expect(selectorProps!.noLocation).toBe(true);
+    await act(async () => {});
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).startsWith("/api/inventory/current-fast"))).toHaveLength(0);
+    act(() => {
+      selectorProps!.onOrderSelected(ORDER_X);
+    });
+    expect(useWorkbench.getState().selectedExternalOrder).toBeNull();
+  });
+
+  it("with a location, `noLocation` is false", async () => {
+    renderPage();
+    await waitFor(() => expect(selectorProps?.stockLoading).toBe(false));
+    expect(selectorProps!.noLocation).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR2-9 (QA-4): one pin on the app's OWN query defaults
+// ---------------------------------------------------------------------------
+
+describe("FR2-9 — on the app's own QueryClient defaults (lib/query-client.ts: staleTime 5 min, retry 1)", () => {
+  // Documented, and accepted (REV 7): a location revisited within `staleTime`
+  // is FRESH by the app-wide model, so it is not re-read and the order is
+  // rebuilt at once from its cached rows. The location the cart describes is
+  // right; how old those rows may be is the app-wide staleness model, not this
+  // page's.
+  it("a cached location revisited within staleTime rebuilds at once from its cached rows, with no re-read", async () => {
+    const appDefaults = appQueryClient.getDefaultOptions();
+    expect(appDefaults.queries?.staleTime).toBe(5 * 60 * 1000);
+    expect(appDefaults.queries?.retry).toBe(1);
+
+    selectXAtMain();
+    const { rerender } = renderPage(new QueryClient({ defaultOptions: appDefaults }));
+    await waitFor(() => expect(stockFetches(1)).toHaveLength(1));
+
+    moveTo(OVERFLOW, rerender);
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(REBUILT_OVERFLOW));
+    await waitFor(() => expect(useWorkbench.getState().selectedExternalOrder?.builtAtLocationId).toBe(2));
+    const ordersBefore = orderFetches().length;
+
+    moveTo(MAIN, rerender);
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(
+        "Location changed to Main — order 9001 was rebuilt with this location's stock."
+      )
+    );
+    // No re-read of Main: its cached rows were fresh, and the rebuild used them.
+    expect(stockFetches(1)).toHaveLength(1);
+    expect(orderFetches()).toHaveLength(ordersBefore + 1);
+    const state = useWorkbench.getState();
+    expect(state.selectedExternalOrder?.builtAtLocationId).toBe(1);
+    expect(state.orderItems.map((i) => [i.product.currentQuantity, i.quantity])).toEqual([[10, 2]]);
+  });
+});
+
+describe("FR2-5 (ruling (a)) — the rows' Retry reads the stock again", () => {
+  beforeEach(() => {
+    act(() => {
+      useWorkbench.getState().setOrderSource("wc-order");
+    });
+  });
+
+  it("the selector's onRetryStock is the products refetch: it re-reads this location's stock, and the rows come back live", async () => {
+    stockReply[1] = async () => refused();
+    renderPage();
+    await waitFor(() => expect(selectorProps?.stockFailed).toBe(true));
+    const before = stockFetches(1).length;
+
+    stockReply[1] = async () => ok({ inventory: STOCK[1] });
+    await act(async () => {
+      void selectorProps!.onRetryStock?.();
+    });
+    await waitFor(() => expect(stockFetches(1).length).toBe(before + 1));
+    await waitFor(() => expect(selectorProps?.stockFailed).toBe(false));
+    expect(selectorProps?.stockLoading).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo, useEffect, useRef } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { ProductWithQuantity } from "@/types/product";
 import { ProductCard } from "./product-card";
@@ -41,7 +41,6 @@ export function ProductListOptimized({
   // here with `?search=<name>`). The initialiser reads it on first mount, so
   // there is no unfiltered first fetch; the effect below re-seeds it whenever
   // the VALUE changes while the list is mounted. Typing never writes the URL.
-  const router = useRouter();
   const searchParams = useSearchParams();
   const urlSearch = searchParams?.get("search") ?? "";
   const [search, setSearch] = useState(urlSearch);
@@ -64,11 +63,16 @@ export function ProductListOptimized({
   // WRITES typed text), so a later global-search pick of the same product
   // changes the URL and re-seeds. Its own drop is not a re-seed: the box keeps
   // what the user typed.
+  //
+  // FR2-3: dropping the param is not a navigation. `router.replace` went to the
+  // server for the route (a request on a keystroke, a scroll jump, and offline a
+  // failed transition); Next 14.2 keeps `useSearchParams` in sync with a plain
+  // `history.replaceState`, which does none of that.
   const droppingSearchParamRef = useRef(false);
   const dropSearchParam = () => {
     if (!searchParams?.has("search")) return;
     droppingSearchParamRef.current = true;
-    router.replace("/products");
+    window.history.replaceState(null, "", "/products");
   };
 
   useEffect(() => {

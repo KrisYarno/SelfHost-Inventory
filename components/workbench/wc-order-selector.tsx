@@ -37,6 +37,19 @@ interface WCOrderSelectorProps {
    * stock to build "in stock here" from. The rows wait, and say why.
    */
   stockFailed?: boolean;
+  /**
+   * Facelift F0 FR2-6: no location is selected, so there is no "here" and no
+   * stock read in flight — "Loading stock…" would be untrue. The rows wait and
+   * say where to choose one.
+   */
+  noLocation?: boolean;
+  /**
+   * Facelift F0 FR2-5 (orchestrator ruling (a)): reads the page's stock again.
+   * The failure sentence sits inside each (disabled) row, where no button can
+   * go, so the stock-failed state gets ONE line above the rows: the sentence,
+   * then a Retry that calls this.
+   */
+  onRetryStock?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +89,8 @@ export function WCOrderSelector({
   onClear,
   stockLoading = false,
   stockFailed = false,
+  noLocation = false,
+  onRetryStock,
 }: WCOrderSelectorProps) {
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebounce(search, 300);
@@ -151,6 +166,27 @@ export function WCOrderSelector({
 
       {/* Results list */}
       <div className="space-y-1">
+        {/* FR2-5: the stock-failed line, once, above the rows (which keep their
+            own disabled state and label). Not with no location: that sentence
+            comes first on the rows, and there is no stock to read again. */}
+        {stockFailed && !noLocation && (
+          <div className="flex items-center justify-between gap-2 py-1">
+            <p className="text-sm text-destructive">
+              Stock couldn&apos;t be loaded — try again shortly.
+            </p>
+            {onRetryStock && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="min-h-[44px] shrink-0"
+                onClick={() => onRetryStock()}
+              >
+                Retry
+              </Button>
+            )}
+          </div>
+        )}
+
         {/* Loading skeleton */}
         {isFetching && orders.length === 0 && (
           <div className="space-y-1.5">
@@ -199,7 +235,7 @@ export function WCOrderSelector({
               <button
                 key={order.id}
                 onClick={() => onOrderSelected(order)}
-                disabled={stockLoading || stockFailed}
+                disabled={noLocation || stockLoading || stockFailed}
                 className={cn(
                   "flex w-full items-center justify-between gap-2 rounded-lg",
                   "border border-border/60 bg-background px-3 py-2.5",
@@ -236,11 +272,13 @@ export function WCOrderSelector({
                   </div>
                 </div>
                 <span className="text-xs text-muted-foreground shrink-0">
-                  {stockFailed
-                    ? "Stock couldn't be loaded — try again shortly."
-                    : stockLoading
-                      ? "Loading stock…"
-                      : "Select"}
+                  {noLocation
+                    ? "Choose a location at the top of the page."
+                    : stockFailed
+                      ? "Stock couldn't be loaded — try again shortly."
+                      : stockLoading
+                        ? "Loading stock…"
+                        : "Select"}
                 </span>
               </button>
             );

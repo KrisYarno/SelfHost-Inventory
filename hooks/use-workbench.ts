@@ -16,6 +16,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   selectedExternalOrder: null,
   unmappedExternalItems: [],
 
+  // F0 FR2-1: the selection's generation (see WorkbenchState.selectionSeq).
+  selectionSeq: 0,
+
   // Actions
   // Amendment 5: items with different sources don't merge (even same product)
   addItem: (product: ProductWithQuantity, quantity: number, source?: 'manual' | 'wc-order', fulfillmentItemId?: string) => {
@@ -91,14 +94,15 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   // Amendment 6: clearOrder also resets WC state
   clearOrder: () => {
-    set({
+    set((state) => ({
       orderItems: [],
       orderReference: "",
       isProcessing: false,
       orderSource: 'manual',
       selectedExternalOrder: null,
       unmappedExternalItems: [],
-    });
+      selectionSeq: state.selectionSeq + 1,
+    }));
   },
 
   setIsProcessing: (processing: boolean) => {
@@ -145,6 +149,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       orderSource: 'manual',
       selectedExternalOrder: null,
       unmappedExternalItems: [],
+      selectionSeq: state.selectionSeq + 1,
     });
     return next;
   },
@@ -171,8 +176,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   // P1-8: When switching away from a WC order, clear the full WC state so the
   // manual tab doesn't inherit stale items, a WC order reference, or the
   // selectedExternalOrder banner.
+  // F0 FR2-1: either way the cart's source was set, so the selection moves on.
   setOrderSource: (source: 'manual' | 'wc-order') => {
     set((state) => {
+      const selectionSeq = state.selectionSeq + 1;
       if (source === 'manual' && state.selectedExternalOrder) {
         return {
           orderSource: 'manual',
@@ -180,9 +187,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           unmappedExternalItems: [],
           orderItems: [],
           orderReference: '',
+          selectionSeq,
         };
       }
-      return { orderSource: source };
+      return { orderSource: source, selectionSeq };
     });
   },
 
@@ -293,7 +301,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       }
     }
 
-    set({
+    set((state) => ({
       orderSource: 'wc-order',
       selectedExternalOrder: {
         id: order.id,
@@ -307,17 +315,28 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       orderReference: order.orderNumber,
       orderItems: cartItems,
       unmappedExternalItems: unmappedItems,
-    });
+      // F0 FR2-1: a new selection — even of the same order, even by a read's
+      // own rebuild — so any other read still in flight is stale.
+      selectionSeq: state.selectionSeq + 1,
+    }));
   },
 
   clearExternalOrder: () => {
-    set({
+    set((state) => ({
       selectedExternalOrder: null,
       unmappedExternalItems: [],
       orderItems: [],
       orderReference: "",
       orderSource: 'manual',
-    });
+      selectionSeq: state.selectionSeq + 1,
+    }));
+  },
+
+  // F0 FR2-1: nothing changes but the generation, so every order read in
+  // flight is stale and does nothing when it lands (the page's flip-back: the
+  // location returned to the one the cart was built at mid-rebuild).
+  invalidateInFlightReads: () => {
+    set((state) => ({ selectionSeq: state.selectionSeq + 1 }));
   },
 
   // Computed values

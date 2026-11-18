@@ -13,6 +13,11 @@ interface OrderItemProps {
   item: OrderItem;
   onUpdateQuantity: (quantity: number) => void;
   onRemove: () => void;
+  /**
+   * Facelift F0 FR2-1: the steppers, the quantity editor and the bin are
+   * disabled — the cart is about to be replaced and an edit would be lost.
+   */
+  readOnly?: boolean;
   className?: string;
 }
 
@@ -20,6 +25,7 @@ export function OrderItemComponent({
   item,
   onUpdateQuantity,
   onRemove,
+  readOnly = false,
   className,
 }: OrderItemProps) {
   const [isEditing, setIsEditing] = useState(false);
@@ -38,6 +44,7 @@ export function OrderItemComponent({
   };
 
   const handleEditConfirm = () => {
+    if (readOnly) return;
     const newQuantity = parseInt(editValue);
     if (
       !isNaN(newQuantity) &&
@@ -122,14 +129,15 @@ export function OrderItemComponent({
               size="icon"
               className="h-8 w-8"
               onClick={handleDecrement}
-              disabled={item.quantity <= 1}
+              disabled={readOnly || item.quantity <= 1}
             >
               <Minus className="h-3 w-3" />
             </Button>
 
             <button
               onClick={() => setIsEditing(true)}
-              className="min-w-[3rem] px-2 py-1 text-center font-medium hover:bg-muted rounded transition-colors"
+              disabled={readOnly}
+              className="min-w-[3rem] px-2 py-1 text-center font-medium hover:bg-muted rounded transition-colors disabled:pointer-events-none disabled:opacity-50"
             >
               {item.quantity}
             </button>
@@ -139,7 +147,7 @@ export function OrderItemComponent({
               size="icon"
               className="h-8 w-8"
               onClick={handleIncrement}
-              disabled={item.quantity >= item.product.currentQuantity}
+              disabled={readOnly || item.quantity >= item.product.currentQuantity}
             >
               <Plus className="h-3 w-3" />
             </Button>
@@ -157,6 +165,7 @@ export function OrderItemComponent({
                 if (e.key === "Escape") handleEditCancel();
               }}
               className="h-8 w-16 text-center"
+              disabled={readOnly}
               autoFocus
             />
             <Button
@@ -164,6 +173,7 @@ export function OrderItemComponent({
               size="icon"
               className="h-8 w-8"
               onClick={handleEditConfirm}
+              disabled={readOnly}
             >
               <Check className="h-3 w-3" />
             </Button>
@@ -185,6 +195,7 @@ export function OrderItemComponent({
         size="icon"
         className="h-8 w-8 text-destructive hover:text-destructive"
         onClick={onRemove}
+        disabled={readOnly}
       >
         <Trash2 className="h-4 w-4" />
       </Button>

@@ -49,8 +49,12 @@ function Calendar({
         day_outside:
           "day-outside text-muted-foreground opacity-50 aria-selected:bg-accent/50 aria-selected:text-muted-foreground aria-selected:opacity-30",
         day_disabled: "text-muted-foreground opacity-50",
+        // FR2-7: a range-middle day is ALSO a selected day, so it carries the
+        // important primary hover/focus above. The attribute variant outranks
+        // it (0,3,0 against 0,2,0) whatever order Tailwind emits them in; a
+        // plain important accent hover lost, emitted before the primary one.
         day_range_middle:
-          "aria-selected:bg-accent aria-selected:text-accent-foreground",
+          "aria-selected:bg-accent aria-selected:text-accent-foreground aria-selected:hover:!bg-accent aria-selected:hover:!text-accent-foreground aria-selected:focus:!bg-accent aria-selected:focus:!text-accent-foreground",
         day_hidden: "invisible",
         ...classNames,
       }}

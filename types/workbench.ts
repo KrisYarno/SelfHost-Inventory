@@ -83,6 +83,13 @@ export interface WorkbenchState {
   selectedExternalOrder: SelectedExternalOrder | null;
   unmappedExternalItems: UnmappedExternalItem[];
 
+  // Facelift F0 FR2-1: the SELECTION's generation. Every action that changes
+  // the selected order or the cart's source bumps it, and so does
+  // `invalidateInFlightReads`. An order read captures it when it is issued and
+  // does nothing at all if it has moved by the time the read resolves — the
+  // order id alone cannot tell a clear-and-reselect of the SAME order apart.
+  selectionSeq: number;
+
   // Actions
   addItem: (product: ProductWithQuantity, quantity: number, source?: 'manual' | 'wc-order', fulfillmentItemId?: string) => void;
   updateItemQuantity: (productId: number, quantity: number, fulfillmentItemId?: string) => void;
@@ -107,6 +114,8 @@ export interface WorkbenchState {
     locationId: number | null
   ) => void;
   clearExternalOrder: () => void;
+  // FR2-1: bumps `selectionSeq` alone, so every order read in flight is stale.
+  invalidateInFlightReads: () => void;
 
   // Computed values
   getTotalItems: () => number;

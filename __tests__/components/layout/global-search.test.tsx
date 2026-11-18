@@ -9,7 +9,7 @@
 // answer. The spinner sat under the dialog's close button.
 
 import * as React from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const mockPush = jest.fn();
@@ -42,6 +42,7 @@ function renderOpen() {
     </QueryClientProvider>,
   );
   fireEvent.click(screen.getByRole("button", { name: "Search (Cmd+K)" }));
+  return qc;
 }
 
 const input = () => screen.getByPlaceholderText("Search products...");
@@ -82,5 +83,35 @@ describe("F0-6 — global search", () => {
   it("the input row carries `pr-10`, so the spinner and text clear the close button", () => {
     renderOpen();
     expect(input().parentElement).toHaveClass("pr-10");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR2-8 (REV 7, QA-6.3): the REV 2 rule — an error line only for a
+// search with no answer. A failed RE-READ over results already on screen keeps
+// the results, with no error line under them.
+// ---------------------------------------------------------------------------
+
+describe("FR2-8 — a failed re-read over cached results", () => {
+  it("keeps the results and shows no error line", async () => {
+    const qc = renderOpen();
+    fireEvent.change(input(), { target: { value: "widget" } });
+    expect(await screen.findByText("Widget A & B")).toBeInTheDocument();
+
+    failing = true;
+    await act(async () => {
+      await qc.refetchQueries({ queryKey: ["global-search-products"] });
+      // react-query batches its observer notifications on a 0 ms timer: let the
+      // component render the failed re-read before reading the screen.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    // The re-read really did fail, over the cached answer.
+    const state = qc.getQueryState(["global-search-products", "widget"]);
+    expect(state?.status).toBe("error");
+    expect(state?.data).toBeDefined();
+
+    expect(screen.getByText("Widget A & B")).toBeInTheDocument();
+    expect(screen.queryByText("Search unavailable — try again.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 });
