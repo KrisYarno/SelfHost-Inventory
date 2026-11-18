@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { ProductWithQuantity } from "@/types/product";
@@ -60,7 +60,22 @@ export function ProductListOptimized({
     sortOrder: 'asc',
   });
 
+  // FR1-8: the list drops a `search` param it no longer matches (it never
+  // WRITES typed text), so a later global-search pick of the same product
+  // changes the URL and re-seeds. Its own drop is not a re-seed: the box keeps
+  // what the user typed.
+  const droppingSearchParamRef = useRef(false);
+  const dropSearchParam = () => {
+    if (!searchParams?.has("search")) return;
+    droppingSearchParamRef.current = true;
+    router.replace("/products");
+  };
+
   useEffect(() => {
+    if (droppingSearchParamRef.current) {
+      droppingSearchParamRef.current = false;
+      if (urlSearch === "") return;
+    }
     setSearch(urlSearch);
     setPage(1);
   }, [urlSearch]);
@@ -79,13 +94,14 @@ export function ProductListOptimized({
     setPage(1);
     // Clearing the box drops a `search` param, so the URL never re-seeds a box
     // the user just emptied.
-    if (searchParams?.has("search")) router.replace("/products");
+    dropSearchParam();
   };
 
   const clearFilters = () => {
     setStockFilter("all");
     setSearch("");
     setPage(1);
+    dropSearchParam();
   };
 
   const total = data?.total || 0;
@@ -131,7 +147,8 @@ export function ProductListOptimized({
       ],
       `products-${new Date().toISOString().split("T")[0]}.csv`
     );
-    toast.success(`Exported ${filteredProducts.length} products from this page.`);
+    const n = filteredProducts.length;
+    toast.success(`Exported ${n} ${n === 1 ? "product" : "products"} from this page.`);
   };
 
   const activeFilterCount = stockFilter !== "all" ? 1 : 0;
@@ -167,6 +184,8 @@ export function ProductListOptimized({
               onChange={(e) => {
                 setSearch(e.target.value);
                 setPage(1);
+                // FR1-8: the first edit that leaves the URL's value behind drops it.
+                if (e.target.value !== urlSearch) dropSearchParam();
               }}
               className="pl-10 pr-10"
             />
@@ -207,11 +226,12 @@ export function ProductListOptimized({
       {/* Results Summary — this page out of the response's total; with a stock
           filter on, how many of THIS page's rows match (the filter is
           client-side, over one page). */}
-      {data && total > 0 && (
+      {/* FR1-7: only when this page has rows — never "Showing 26–25 of 20". */}
+      {rowsOnPage > 0 && (
         <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground px-1 md:px-0">
           <span>
             {stockFilter === "all"
-              ? `Showing ${from}–${to} of ${total} products`
+              ? `Showing ${from}–${to} of ${total} ${total === 1 ? "product" : "products"}`
               : filteredProducts.length === 1
                 ? `1 of the ${rowsOnPage} products on this page matches`
                 : `${filteredProducts.length} of the ${rowsOnPage} products on this page match`}

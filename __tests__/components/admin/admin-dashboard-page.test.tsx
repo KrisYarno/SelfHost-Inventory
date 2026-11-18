@@ -14,7 +14,7 @@
 
 import * as React from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
 
 jest.mock("next/link", () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -153,5 +153,32 @@ describe("F0-4 — admin top movers and recent activity", () => {
     expect(screen.queryByText("Couldn't load product movement.")).toBeNull();
     expect(screen.queryByText("Couldn't load recent activity.")).toBeNull();
     expect(screen.queryByText("--")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-5 — the empty copy only on an answer. A paused (offline)
+// read is PENDING but not LOADING; keyed on loading, the lists fell through to
+// their empty sentences without ever having had an answer.
+// ---------------------------------------------------------------------------
+
+describe("FR1-5 — admin lists while the read is paused (offline)", () => {
+  afterEach(() => {
+    onlineManager.setOnline(true);
+  });
+
+  it("skeletons, never `No product movement in the last 7 days.` nor `No recent activity.`", async () => {
+    mockFetch({ ok: true, body: { ...LOADED, topMovingProducts: [], recentActivity: [] } });
+    onlineManager.setOnline(false);
+    renderPage();
+    await act(async () => {});
+    expect(qc.getQueryState(["admin", "dashboard"])?.fetchStatus).toBe("paused");
+
+    for (const title of ["Top Moving Products", "Recent Activity"]) {
+      const c = card(title);
+      expect(c.querySelector(".animate-pulse")).not.toBeNull();
+      expect(c).not.toHaveTextContent(/No /);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

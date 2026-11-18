@@ -26,6 +26,12 @@ interface MobileCartSheetProps {
   onClearOrder: () => void;
   onCompleteOrder: () => void;
   canComplete: boolean;
+  /**
+   * Facelift F0 FR1-1 (d): the page's sentence while a store order is being
+   * rebuilt for the selected location (Complete is disabled meanwhile), shown
+   * as a muted line above Complete. Null when nothing is pending.
+   */
+  updatingNotice?: string | null;
   queuePosition?: { current: number; total: number } | null;
   /** The page's order refetch, handed to the skipped-lines alert's Map (F0-1). */
   onItemMapped?: () => void;
@@ -41,6 +47,7 @@ export function MobileCartSheet({
   onClearOrder,
   onCompleteOrder,
   canComplete,
+  updatingNotice = null,
   queuePosition,
   onItemMapped,
 }: MobileCartSheetProps) {
@@ -59,6 +66,10 @@ export function MobileCartSheet({
   // so it clears the order directly (no confirm), then closes the sheet as the
   // page's Clear-with-items does.
   const isEmptyStoreOrder = isWCOrder && totalItems === 0;
+  // FR1-2: "can be deducted here" is true only when the build itself found
+  // nothing deductible. When it did and the lines were binned since, the cart
+  // is merely empty.
+  const builtNothing = (selectedExternalOrder?.builtCartCount ?? 0) === 0;
   const clearEmptyStoreOrder = () => {
     clearExternalOrder();
     onOpenChange(false);
@@ -136,7 +147,9 @@ export function MobileCartSheet({
           )}
           {isEmptyStoreOrder ? (
             <p className="py-12 text-center text-sm text-muted-foreground">
-              Nothing from this order can be deducted here.
+              {builtNothing
+                ? "Nothing from this order can be deducted here."
+                : "Nothing from this order is in the cart."}
             </p>
           ) : (
             // OrderList is h-full with a ScrollArea of its own. Under the alert
@@ -161,6 +174,10 @@ export function MobileCartSheet({
               <span className="font-medium">{totalQuantity} units</span>
             </div>
           </div>
+
+          {updatingNotice && (
+            <p className="text-xs text-muted-foreground">{updatingNotice}</p>
+          )}
 
           <div className="flex gap-2">
             <Button

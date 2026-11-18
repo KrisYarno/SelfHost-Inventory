@@ -32,6 +32,11 @@ interface WCOrderSelectorProps {
    * would build "in stock here" from somewhere else, so the rows wait.
    */
   stockLoading?: boolean;
+  /**
+   * Facelift F0 FR1-1 (e): the page's products read failed, so there is no
+   * stock to build "in stock here" from. The rows wait, and say why.
+   */
+  stockFailed?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +75,7 @@ export function WCOrderSelector({
   selectedOrder,
   onClear,
   stockLoading = false,
+  stockFailed = false,
 }: WCOrderSelectorProps) {
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebounce(search, 300);
@@ -193,7 +199,7 @@ export function WCOrderSelector({
               <button
                 key={order.id}
                 onClick={() => onOrderSelected(order)}
-                disabled={stockLoading}
+                disabled={stockLoading || stockFailed}
                 className={cn(
                   "flex w-full items-center justify-between gap-2 rounded-lg",
                   "border border-border/60 bg-background px-3 py-2.5",
@@ -230,7 +236,11 @@ export function WCOrderSelector({
                   </div>
                 </div>
                 <span className="text-xs text-muted-foreground shrink-0">
-                  {stockLoading ? "Loading stock…" : "Select"}
+                  {stockFailed
+                    ? "Stock couldn't be loaded — try again shortly."
+                    : stockLoading
+                      ? "Loading stock…"
+                      : "Select"}
                 </span>
               </button>
             );

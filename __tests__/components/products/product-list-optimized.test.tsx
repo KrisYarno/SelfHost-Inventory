@@ -40,10 +40,17 @@ jest.mock("@/components/products/product-card-mobile", () => ({
 }));
 // The phone's filter sheet is the only stock-filter control; a plain stand-in.
 jest.mock("@/components/products/mobile-filter-sheet", () => ({
-  MobileFilterSheet: ({ onStockFilterChange }: { onStockFilterChange: (f: string) => void }) => (
+  MobileFilterSheet: ({
+    onStockFilterChange,
+    onClearFilters,
+  }: {
+    onStockFilterChange: (f: string) => void;
+    onClearFilters: () => void;
+  }) => (
     <div>
       <button onClick={() => onStockFilterChange("out-of-stock")}>filter: out of stock</button>
       <button onClick={() => onStockFilterChange("all")}>filter: all</button>
+      <button onClick={onClearFilters}>clear filters</button>
     </div>
   ),
 }));
@@ -235,7 +242,7 @@ describe("F0-6 — the list follows `?search=`", () => {
     renderList();
 
     expect(searchBox().value).toBe("Widget A");
-    expect(await screen.findByText("Showing 1–1 of 1 products")).toBeInTheDocument();
+    expect(await screen.findByText("Showing 1–1 of 1 product")).toBeInTheDocument();
     const calls = productCalls();
     expect(calls.length).toBeGreaterThan(0);
     for (const u of calls) expect(u.searchParams.get("search")).toBe("Widget A");
@@ -252,7 +259,7 @@ describe("F0-6 — the list follows `?search=`", () => {
     rerenderList();
 
     await waitFor(() => expect(searchBox().value).toBe("Gadget"));
-    expect(await screen.findByText("Showing 1–1 of 1 products")).toBeInTheDocument();
+    expect(await screen.findByText("Showing 1–1 of 1 product")).toBeInTheDocument();
     const last = productCalls()[productCalls().length - 1];
     expect(last.searchParams.get("search")).toBe("Gadget");
     expect(last.searchParams.get("page")).toBe("1");
@@ -290,5 +297,104 @@ describe("F0-6 — the list follows `?search=`", () => {
     renderList();
     await screen.findByText("Showing 1–25 of 60 products");
     expect(within(document.body).getAllByTestId("product-row")).toHaveLength(25);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-7 — the products sentences
+// ---------------------------------------------------------------------------
+
+describe("FR1-7 — the summary and the export toast", () => {
+  it("a page with no rows renders no summary (never `Showing 26–25 of 20 products`)", async () => {
+    // A catalogue that shrank under page 2: the answer has a total but no rows.
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://x");
+      if (url.pathname === "/api/settings/low-stock-default") {
+        return { ok: true, json: async () => ({ threshold: 10 }) } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({ products: [], total: 20, page: 2, pageSize: 25 }),
+      } as Response;
+    });
+    renderList();
+    await waitFor(() => expect(productCalls().length).toBeGreaterThan(0));
+    await screen.findByText("No products found");
+    expect(screen.queryByText(/^Showing/)).toBeNull();
+    expect(screen.queryByText(/26–25/)).toBeNull();
+  });
+
+  it("a total of one reads `Showing 1–1 of 1 product`", async () => {
+    rows = catalogue(1);
+    renderList();
+    expect(await screen.findByText("Showing 1–1 of 1 product")).toBeInTheDocument();
+    expect(screen.queryByText("Showing 1–1 of 1 products")).toBeNull();
+  });
+
+  it("exporting one row: `Exported 1 product from this page.`", async () => {
+    rows = catalogue(1);
+    renderList();
+    await screen.findByText("Showing 1–1 of 1 product");
+    fireEvent.click(screen.getByRole("button", { name: "Export this page" }));
+    expect(mockToastSuccess).toHaveBeenCalledWith("Exported 1 product from this page.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-8 — the list lets go of a `search` param it no longer matches
+// ---------------------------------------------------------------------------
+
+describe("FR1-8 — re-seeding from global search", () => {
+  it("the first edit away from `?search=` drops the param (never writing the typed text); the box keeps it", async () => {
+    mockSearchParams = new URLSearchParams("search=Product 1");
+    const { rerenderList } = renderList();
+    await waitFor(() => expect(searchBox().value).toBe("Product 1"));
+
+    fireEvent.change(searchBox(), { target: { value: "Product 12" } });
+    expect(mockRouter.replace).toHaveBeenCalledTimes(1);
+    expect(mockRouter.replace).toHaveBeenCalledWith("/products");
+    expect(mockRouter.push).not.toHaveBeenCalled();
+
+    // The URL lets go of the param: the box keeps what was typed.
+    mockSearchParams = new URLSearchParams();
+    rerenderList();
+    await act(async () => {});
+    expect(searchBox().value).toBe("Product 12");
+  });
+
+  it("so a later global-search pick of the SAME product re-seeds the box", async () => {
+    mockSearchParams = new URLSearchParams("search=Product 1");
+    const { rerenderList } = renderList();
+    await waitFor(() => expect(searchBox().value).toBe("Product 1"));
+
+    fireEvent.change(searchBox(), { target: { value: "Prod" } });
+    mockSearchParams = new URLSearchParams();
+    rerenderList();
+    await act(async () => {});
+    expect(searchBox().value).toBe("Prod");
+
+    // Global search links here again with the same name.
+    mockSearchParams = new URLSearchParams("search=Product 1");
+    rerenderList();
+    await waitFor(() => expect(searchBox().value).toBe("Product 1"));
+  });
+
+  it("clearing the filters drops a present `search` param", async () => {
+    mockIsMobile = true;
+    mockSearchParams = new URLSearchParams("search=Product 1");
+    renderList();
+    await waitFor(() => expect(searchBox().value).toBe("Product 1"));
+
+    fireEvent.click(screen.getByRole("button", { name: "clear filters" }));
+    expect(searchBox().value).toBe("");
+    expect(mockRouter.replace).toHaveBeenCalledWith("/products");
+  });
+
+  it("clearing the filters leaves the URL alone when there is no `search` param", async () => {
+    mockIsMobile = true;
+    renderList();
+    await screen.findByText("Showing 1–25 of 60 products");
+    fireEvent.click(screen.getByRole("button", { name: "clear filters" }));
+    expect(mockRouter.replace).not.toHaveBeenCalled();
   });
 });

@@ -180,10 +180,11 @@ function renderPage() {
   return { rerender: () => view.rerender(ui()) };
 }
 
+/** FR1-1 (a): built at location 1 ("Main"), where the shell starts in these tests. */
 function selectOrder(items: ExternalItem[], rows: ProductWithQuantity[]) {
   freshOrder = makeOrder(items);
   act(() => {
-    useWorkbench.getState().selectExternalOrder(freshOrder, rows);
+    useWorkbench.getState().selectExternalOrder(freshOrder, rows, 1);
   });
 }
 

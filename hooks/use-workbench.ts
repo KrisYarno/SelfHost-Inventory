@@ -186,7 +186,14 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     });
   },
 
-  selectExternalOrder: (order: ExternalOrder, products: ProductWithQuantity[]) => {
+  // F0 FR1-1 (a): `locationId` is the location whose stock `products` holds;
+  // every caller passes it, and the order records it with the count of lines
+  // this build could deduct.
+  selectExternalOrder: (
+    order: ExternalOrder,
+    products: ProductWithQuantity[],
+    locationId: number | null
+  ) => {
     const cartItems: OrderItem[] = [];
     const unmappedItems: UnmappedExternalItem[] = [];
 
@@ -294,6 +301,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         customerName: order.customerName ?? undefined,
         total: order.total,
         integrationId: order.integrationId, // P1-10: thread through for Map button
+        builtAtLocationId: locationId,
+        builtCartCount: cartItems.length,
       },
       orderReference: order.orderNumber,
       orderItems: cartItems,

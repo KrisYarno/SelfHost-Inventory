@@ -106,25 +106,42 @@ export default function WorkbenchPage() {
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
   const {
-    data: products = [],
+    data: productsData,
     isLoading: loading,
     isPlaceholderData,
     isSuccess: productsLoaded,
+    isFetching: productsFetching,
+    isError: productsError,
     refetch: refetchProducts,
   } = useInventoryProducts({
     locationId: selectedLocationId,
     sortBy: "baseNameNumeric",
     sortOrder: "asc",
   });
+  const products = useMemo(() => productsData ?? [], [productsData]);
   /**
-   * Facelift F0-1 (e), OC1-1: "in stock here" must mean the location the stock
-   * will leave from. While the products are loading, or are still the PREVIOUS
-   * location's rows shown as placeholder data, a store order cannot be built
-   * truthfully: selection waits, and a location-change rebuild waits for
-   * `stockArrived`.
+   * Facelift F0-1 (e), OC1-1, and FR1-1 (b)/(e): "in stock here" must mean the
+   * location the stock will leave from. Stock has ARRIVED only when this
+   * location's own rows are here and no read of them is in flight — never the
+   * PREVIOUS location's rows shown as placeholder data, and never a cached
+   * location's rows while they are being re-read. Until then a store order is
+   * neither selected nor rebuilt.
    */
-  const stockLoading = loading || isPlaceholderData;
-  const stockArrived = productsLoaded && !isPlaceholderData;
+  const stockArrived = productsLoaded && !isPlaceholderData && !productsFetching;
+  /**
+   * FR1-1 (c), as ruled on REV 5 interpretation 5: the read ENDED in error and
+   * nothing is in flight — with or without cached rows. Stock will not arrive,
+   * so a pending rebuild clears the order rather than leave "Updating this
+   * order…" standing over no read at all.
+   */
+  const stockFailed = productsError && !productsFetching;
+  /**
+   * The location the rows in `products` belong to — null while they are the
+   * previous location's placeholder or there are none. A build stamps THIS,
+   * never a location whose stock it did not read (FR1-1 (a)).
+   */
+  const rowsLocationId =
+    productsData !== undefined && !isPlaceholderData ? selectedLocationId : null;
 
   const {
     orderItems,
@@ -654,6 +671,21 @@ export default function WorkbenchPage() {
     }
   }, [showInStockOnly, showLowStockOnly, showOutOfStockOnly]);
 
+  /**
+   * What a build reads when an order read RESOLVES (FR1-1 (f)): the rows on
+   * screen then, and the location they belong to. Never the rows captured when
+   * the read went out — the location may have changed while it was in flight.
+   */
+  const stockForBuildRef = useRef<{ products: ProductWithQuantity[]; locationId: number | null }>({
+    products,
+    locationId: rowsLocationId,
+  });
+  useEffect(() => {
+    stockForBuildRef.current = { products, locationId: rowsLocationId };
+  }, [products, rowsLocationId]);
+  /** FR1-1 (f): the latest order read; an older one that resolves later is stale. */
+  const orderReadSeqRef = useRef(0);
+
   // P1-9: After a user maps an unmapped item inline, refetch the external
   // order and re-select it so the cart picks up the newly mapped item. Mapping
   // links an EXISTING product, so the current `products` snapshot is sufficient
@@ -661,95 +693,129 @@ export default function WorkbenchPage() {
   // F0-1 (e): it also rebuilds the order after a location change, so it answers
   // whether the order was actually rebuilt. Its failure toasts speak about
   // MAPPING, so that caller passes `quiet` and words its own failure.
+  //
+  // FR1-1 (f), LATEST WINS, for both callers: a read that is no longer the
+  // latest, or whose order is no longer the selected one (cleared, another order
+  // picked, switched to Manual), answers "stale" and does NOTHING — no select,
+  // no clear, no toast. A rebuild that lands on another order's selection would
+  // replace the operator's cart with the old order's lines.
   const refetchExternalOrder = useCallback(
-    async ({ quiet = false }: { quiet?: boolean } = {}): Promise<boolean> => {
-      if (!selectedExternalOrder?.id) return false;
+    async ({ quiet = false }: { quiet?: boolean } = {}): Promise<boolean | "stale"> => {
+      const orderId = selectedExternalOrder?.id;
+      if (!orderId) return false;
+      const seq = ++orderReadSeqRef.current;
+      const isStale = () =>
+        seq !== orderReadSeqRef.current ||
+        useWorkbench.getState().selectedExternalOrder?.id !== orderId;
       try {
-        const res = await fetch(
-          `/api/orders/external/${selectedExternalOrder.id}`,
-          { cache: "no-store" }
-        );
+        const res = await fetch(`/api/orders/external/${orderId}`, { cache: "no-store" });
+        if (isStale()) return "stale";
         if (!res.ok) {
           if (!quiet) toast.error("Could not refresh order after mapping. Please reselect.");
           return false;
         }
         const freshOrder = await res.json();
-        selectExternalOrder(freshOrder, products);
+        if (isStale()) return "stale";
+        const stock = stockForBuildRef.current;
+        selectExternalOrder(freshOrder, stock.products, stock.locationId);
         return true;
       } catch (err) {
+        if (isStale()) return "stale";
         console.error("Refetch external order error:", err);
         if (!quiet) toast.error("Could not refresh order after mapping.");
         return false;
       }
     },
-    [selectedExternalOrder?.id, selectExternalOrder, products]
+    [selectedExternalOrder?.id, selectExternalOrder]
   );
 
   /**
-   * F0-1 (e), OC1-1: THE LOCATION-CHANGE REBUILD. A selected store order's cart
-   * and its out-of-stock lines were built from the stock of the location chosen
-   * when it was selected. When the shell's location changes under it, the order
-   * is rebuilt once the NEW location's products have arrived (never from the
-   * old location's placeholder rows), and the operator is told — including that
-   * lines added by hand went with the old cart (the rebuild replaces it).
-   * A rebuild that FAILS clears the order (orchestrator ruling on F0a): a cart
-   * built from the previous location's stock must never stand under the new
-   * location's name.
+   * F0-1 (e), OC1-1, made a STATE by FR1-1 (b): THE REBUILD. A selected store
+   * order's cart and its out-of-stock lines describe the stock of the location
+   * that built them (`builtAtLocationId`). Whenever that is not the selected
+   * location — after a switch on this page, or on mount, because the order
+   * outlives the page in the store and the location can change on any page —
+   * the order is rebuilt ONCE this location's stock has arrived, and the
+   * operator is told, including that lines added by hand went with the old cart
+   * (the rebuild replaces it). Complete waits meanwhile (FR1-1 (d)).
    *
-   * The first effect only notices the change; the second waits for the stock.
-   * `rebuildForLocationId` is the pending rebuild, null when there is none, so
-   * the rebuild runs exactly once per change.
+   * A rebuild that FAILS, or a stock read that ends in error with nothing in
+   * flight (cached rows or not), clears the order (orchestrator ruling on F0a;
+   * FR1-1 (c) as ruled): a cart built from another location's stock must never
+   * stand under this location's name.
+   *
+   * `rebuildTargetRef` is the location a rebuild is in flight for, so a render
+   * while it is out never fires a second one for the same location.
+   * `rebuildingOrderId` is the order it is rebuilding: Complete waits for THAT
+   * order only — a rebuild left stale by another selection holds nothing up.
    */
-  const lastLocationIdRef = useRef(selectedLocationId);
-  const [rebuildForLocationId, setRebuildForLocationId] = useState<number | null>(null);
+  const rebuildPending =
+    selectedExternalOrder !== null && selectedExternalOrder.builtAtLocationId !== selectedLocationId;
+  const rebuildTargetRef = useRef<number | null>(null);
+  const [rebuildingOrderId, setRebuildingOrderId] = useState<string | null>(null);
+  const orderUpdating =
+    rebuildPending ||
+    (selectedExternalOrder !== null && rebuildingOrderId === selectedExternalOrder.id);
+  const locationName = selectedLocation?.name ?? "the selected location";
 
   useEffect(() => {
-    if (lastLocationIdRef.current === selectedLocationId) return;
-    lastLocationIdRef.current = selectedLocationId;
-    setRebuildForLocationId(selectedExternalOrder ? selectedLocationId : null);
-  }, [selectedLocationId, selectedExternalOrder]);
-
-  useEffect(() => {
-    if (rebuildForLocationId === null) return;
-    if (!selectedExternalOrder) {
-      // The order was cleared while the stock was on its way.
-      setRebuildForLocationId(null);
+    if (!rebuildPending || !selectedExternalOrder) return;
+    const { orderNumber } = selectedExternalOrder;
+    const failed = () => {
+      clearExternalOrder();
+      toast.error(
+        `Location changed to ${locationName} — order ${orderNumber} couldn't be reloaded, so it was cleared. Select it again.`
+      );
+    };
+    if (stockFailed) {
+      failed();
       return;
     }
     if (!stockArrived) return;
-    setRebuildForLocationId(null);
+    if (rebuildTargetRef.current === selectedLocationId) return;
+    const target = selectedLocationId;
+    rebuildTargetRef.current = target;
+    setRebuildingOrderId(selectedExternalOrder.id);
     // Manual lines are the ones the fulfil leg does not carry (the dialog's split).
     const handAdded = orderItems.some((item) => !item.fulfillmentItemId);
-    const locationName = selectedLocation?.name ?? "the selected location";
-    const { orderNumber } = selectedExternalOrder;
-    void refetchExternalOrder({ quiet: true }).then((rebuilt) => {
-      if (!rebuilt) {
-        clearExternalOrder();
-        toast.error(
-          `Location changed to ${locationName} — order ${orderNumber} couldn't be reloaded, so it was cleared. Select it again.`
-        );
+    void refetchExternalOrder({ quiet: true }).then((result) => {
+      if (rebuildTargetRef.current === target) {
+        rebuildTargetRef.current = null;
+        setRebuildingOrderId(null);
+      }
+      if (result === "stale") return;
+      if (!result) {
+        failed();
         return;
       }
+      // The toast says "rebuilt with this location's stock": only when it was.
+      // A build that read another location's rows (the location changed while
+      // the order was in flight) is still pending, and its own rebuild speaks.
+      if (useWorkbench.getState().selectedExternalOrder?.builtAtLocationId !== target) return;
       toast.info(
         `Location changed to ${locationName} — order ${orderNumber} was rebuilt with this location's stock.` +
           (handAdded ? " Items you added by hand were removed." : "")
       );
     });
   }, [
-    rebuildForLocationId,
+    rebuildPending,
+    rebuildingOrderId,
     selectedExternalOrder,
+    selectedLocationId,
     stockArrived,
+    stockFailed,
     orderItems,
-    selectedLocation,
+    locationName,
     refetchExternalOrder,
     clearExternalOrder,
   ]);
 
-  // F0-1 (e): the selection gate. The rows are disabled while stock is loading;
-  // the page refuses as well, so no path builds an order from the wrong rows.
+  // F0-1 (e), FR1-1 (e): the selection gate. The rows are disabled until this
+  // location's stock has arrived; the page refuses as well, so no path builds an
+  // order from the wrong rows.
   const handleOrderSelected = (order: ExternalOrder) => {
-    if (stockLoading) return;
-    selectExternalOrder(order, products);
+    if (!stockArrived) return;
+    selectExternalOrder(order, products, selectedLocationId);
   };
 
   const handleProductClick = (product: ProductWithQuantity) => {
@@ -767,6 +833,9 @@ export default function WorkbenchPage() {
   };
 
   const handleCompleteOrder = () => {
+    // FR1-1 (d): a cart that does not yet describe this location's stock is
+    // never completed. The button is disabled and says why; this is the belt.
+    if (orderUpdating) return;
     if (orderItems.length === 0) {
       toast.error("No items in order");
       return;
@@ -869,7 +938,8 @@ export default function WorkbenchPage() {
                         onOrderSelected={handleOrderSelected}
                         selectedOrder={selectedExternalOrder}
                         onClear={clearExternalOrder}
-                        stockLoading={stockLoading}
+                        stockLoading={!stockArrived && !productsError}
+                        stockFailed={productsError}
                       />
                       {unmappedExternalItems.length > 0 && (
                         <div className="mt-2">
@@ -1091,7 +1161,8 @@ export default function WorkbenchPage() {
                     onOrderSelected={handleOrderSelected}
                     selectedOrder={selectedExternalOrder}
                     onClear={clearExternalOrder}
-                    stockLoading={stockLoading}
+                    stockLoading={!stockArrived && !productsError}
+                    stockFailed={productsError}
                   />
                   {unmappedExternalItems.length > 0 && (
                     <div className="mt-2">
@@ -1122,6 +1193,13 @@ export default function WorkbenchPage() {
                 <span className="font-medium">{getTotalQuantity()} units</span>
               </div>
 
+              {/* FR1-1 (d): why Complete is waiting. */}
+              {orderUpdating && (
+                <p className="text-xs text-muted-foreground">
+                  {`Updating this order for ${locationName}…`}
+                </p>
+              )}
+
               <div className="flex gap-2 pt-2">
                 <Button
                   variant="outline"
@@ -1134,7 +1212,7 @@ export default function WorkbenchPage() {
                 </Button>
                 <Button
                   onClick={handleCompleteOrder}
-                  disabled={orderItems.length === 0 || !orderReference.trim()}
+                  disabled={orderItems.length === 0 || !orderReference.trim() || orderUpdating}
                   className="flex-1 disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100"
                 >
                   {completeButtonText}
@@ -1174,7 +1252,8 @@ export default function WorkbenchPage() {
           totalQuantity={getTotalQuantity()}
           onClearOrder={handleClearOrder}
           onCompleteOrder={handleCompleteOrder}
-          canComplete={orderItems.length > 0 && !!orderReference.trim()}
+          canComplete={orderItems.length > 0 && !!orderReference.trim() && !orderUpdating}
+          updatingNotice={orderUpdating ? `Updating this order for ${locationName}…` : null}
           queuePosition={getQueuePosition()}
           onItemMapped={refetchExternalOrder}
         />

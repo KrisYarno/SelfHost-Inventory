@@ -89,15 +89,16 @@ const makeOrder = (items: ExternalItem[]): ExternalOrder =>
 
 function seedOrder(items: ExternalItem[]) {
   act(() => {
-    useWorkbench.getState().selectExternalOrder(makeOrder(items), PRODUCTS);
+    useWorkbench.getState().selectExternalOrder(makeOrder(items), PRODUCTS, 1);
   });
 }
 
-function renderSheet() {
+function renderSheet(over: { canComplete?: boolean; updatingNotice?: string | null } = {}) {
   const props = {
     onOpenChange: jest.fn(),
     onClearOrder: jest.fn(),
     onItemMapped: jest.fn(),
+    onCompleteOrder: jest.fn(),
   };
   const state = useWorkbench.getState();
   render(
@@ -109,8 +110,9 @@ function renderSheet() {
       totalItems={state.orderItems.length}
       totalQuantity={state.getTotalQuantity()}
       onClearOrder={props.onClearOrder}
-      onCompleteOrder={jest.fn()}
-      canComplete={false}
+      onCompleteOrder={props.onCompleteOrder}
+      canComplete={over.canComplete ?? false}
+      updatingNotice={over.updatingNotice}
       queuePosition={null}
       onItemMapped={props.onItemMapped}
     />
@@ -259,5 +261,64 @@ describe("F0-1 — the manual sheet is unchanged", () => {
 
     await user.click(clearButton());
     expect(onClearOrder).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-2 — "can be deducted here" only when the build found nothing
+// ---------------------------------------------------------------------------
+
+describe("FR1-2 — the empty store-order sentence follows what the build produced", () => {
+  it("lines built and then binned: `Nothing from this order is in the cart.`, never `can be deducted here`", () => {
+    seedOrder([CART_LINE, OUT_OF_STOCK_LINE]);
+    act(() => {
+      useWorkbench.getState().removeItem(501, "it-cart");
+    });
+    expect(useWorkbench.getState().selectedExternalOrder?.builtCartCount).toBe(1);
+    renderSheet();
+
+    expect(screen.getByText("Nothing from this order is in the cart.")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing from this order can be deducted here.")).toBeNull();
+    // Clear is unchanged: enabled, and it clears the order.
+    expect(clearButton()).toBeEnabled();
+  });
+
+  it("a build with nothing deductible keeps `Nothing from this order can be deducted here.`", () => {
+    seedOrder([UNMAPPED_LINE, OUT_OF_STOCK_LINE]);
+    expect(useWorkbench.getState().selectedExternalOrder?.builtCartCount).toBe(0);
+    renderSheet();
+
+    expect(screen.getByText("Nothing from this order can be deducted here.")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing from this order is in the cart.")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-1 (d) — while the order is rebuilt for this location
+// ---------------------------------------------------------------------------
+
+describe("FR1-1 (d) — the sheet while the order is being updated", () => {
+  const NOTICE = "Updating this order for Overflow…";
+
+  it("a muted line above Complete says why, and Complete is disabled", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    seedOrder([CART_LINE]);
+    const { onCompleteOrder } = renderSheet({ canComplete: false, updatingNotice: NOTICE });
+
+    const notice = screen.getByText(NOTICE);
+    expect(notice).toHaveClass("text-muted-foreground");
+    const complete = screen.getByRole("button", { name: "Complete & Fulfill" });
+    expect(notice.compareDocumentPosition(complete) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(complete).toBeDisabled();
+    await user.click(complete);
+    expect(onCompleteOrder).not.toHaveBeenCalled();
+  });
+
+  it("no notice when nothing is pending", () => {
+    seedOrder([CART_LINE]);
+    renderSheet({ canComplete: true, updatingNotice: null });
+
+    expect(screen.queryByText(/^Updating this order/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Complete & Fulfill" })).toBeEnabled();
   });
 });

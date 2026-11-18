@@ -58,10 +58,16 @@ describe("F0-8 — the accordion", () => {
 
     const content = document.getElementById(trigger().getAttribute("aria-controls") as string) as HTMLElement;
     expect(content).not.toBeNull();
-    // Every element from the content down to a card: no max-height, no overflow clip.
+    // Every element from the content down to a card: no max-height, no overflow
+    // of any kind, no fixed height class and no inline height (FR1-11: a clip by
+    // ANY of these cuts a long group off as surely as the old `max-h-[2000px]`).
     for (let el: HTMLElement | null = cards[19].parentElement; el; el = el.parentElement) {
-      expect(el.className).not.toMatch(/max-h-/);
-      expect(el.className).not.toMatch(/overflow-hidden/);
+      expect(el.className).not.toMatch(/(^|\s)([\w-]+:)*max-h-/);
+      expect(el.className).not.toMatch(/(^|\s)([\w-]+:)*overflow-/);
+      expect(el.className).not.toMatch(/(^|\s)([\w-]+:)*h-\[/);
+      expect(el.style.height).toBe("");
+      expect(el.style.maxHeight).toBe("");
+      expect(el.style.overflow).toBe("");
       if (el === content) break;
     }
   });

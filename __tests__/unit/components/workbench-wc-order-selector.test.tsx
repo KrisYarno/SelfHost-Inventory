@@ -35,7 +35,7 @@ jest.mock("@/hooks/use-external-orders", () => ({
 
 import { WCOrderSelector } from "@/components/workbench/wc-order-selector";
 
-const renderSelector = (stockLoading: boolean) => {
+const renderSelector = (stockLoading: boolean, stockFailed?: boolean) => {
   const onOrderSelected = jest.fn();
   render(
     <WCOrderSelector
@@ -43,6 +43,7 @@ const renderSelector = (stockLoading: boolean) => {
       selectedOrder={null}
       onClear={jest.fn()}
       stockLoading={stockLoading}
+      stockFailed={stockFailed}
     />
   );
   return { onOrderSelected };
@@ -73,5 +74,23 @@ describe("F0-1 — order rows wait for this location's stock", () => {
 
     await user.click(orderRow());
     expect(onOrderSelected).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Facelift F0 FR1-1 (e): when the products read FAILED there is no stock to
+// build "in stock here" from, and "Loading stock…" would be untrue — nothing is
+// loading. The rows wait and say why.
+describe("FR1-1 (e) — order rows when the stock read failed", () => {
+  it("the rows are disabled and read `Stock couldn't be loaded — try again shortly.`", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const { onOrderSelected } = renderSelector(false, true);
+
+    expect(orderRow()).toBeDisabled();
+    expect(orderRow()).toHaveTextContent("Stock couldn't be loaded — try again shortly.");
+    expect(orderRow()).not.toHaveTextContent("Select");
+    expect(orderRow()).not.toHaveTextContent("Loading stock…");
+
+    await user.click(orderRow());
+    expect(onOrderSelected).not.toHaveBeenCalled();
   });
 });

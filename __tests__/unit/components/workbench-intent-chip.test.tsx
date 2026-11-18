@@ -98,7 +98,7 @@ beforeEach(() => {
  */
 function seedManualCart() {
   act(() => {
-    useWorkbench.getState().selectExternalOrder(makeOrder([MANUAL_LINE]), LOADED_PRODUCTS);
+    useWorkbench.getState().selectExternalOrder(makeOrder([MANUAL_LINE]), LOADED_PRODUCTS, 1);
     // Strip the fulfillment id so the line is a MANUAL deduction.
     useWorkbench.setState({
       orderItems: useWorkbench

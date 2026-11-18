@@ -137,7 +137,11 @@ export default function AdminReportsPage() {
       {
         metric: "Stockout Risk",
         value: metrics.stockoutRiskCount,
-        additional: `Avg ${metrics.daysOfSupplyAvg} days supply`,
+        // FR1-6: an unknown average is said, never written as "Avg null".
+        additional:
+          metrics.daysOfSupplyAvg === null
+            ? "Days of supply unknown"
+            : `Avg ${metrics.daysOfSupplyAvg} days supply`,
       },
       // Legacy metrics
       {
@@ -354,7 +358,7 @@ export default function AdminReportsPage() {
                 !metrics
                   ? undefined
                   : metrics.daysOfSupplyAvg === null
-                    ? "Days of supply unknown (no measured outflow) · trend tracks the low-stock count"
+                    ? "Days of supply unknown (no in-stock product with measured outflow) · trend tracks the low-stock count"
                     : `Avg ${metrics.daysOfSupplyAvg} days of supply (outflow-based — excludes transfers, includes corrections) · trend tracks the low-stock count`
               }
               icon={<AlertTriangle className="h-4 w-4" />}

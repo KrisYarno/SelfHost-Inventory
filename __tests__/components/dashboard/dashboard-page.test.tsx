@@ -14,7 +14,7 @@
 
 import * as React from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
 
 // recharts is lazy-loaded behind next/dynamic; the sparkline is not under test.
 jest.mock("@/components/ui/sparkline", () => ({ Sparkline: () => null }));
@@ -26,6 +26,8 @@ let mockLocation: {
   selectedLocation: Loc | null;
   isLoading: boolean;
   setSelectedLocationId: jest.Mock;
+  loadFailed: boolean;
+  retryLocations: jest.Mock;
 };
 jest.mock("@/contexts/location-context", () => ({ useLocation: () => mockLocation }));
 
@@ -41,6 +43,8 @@ function setLocation(over: Partial<typeof mockLocation> = {}) {
     selectedLocation: MAIN,
     isLoading: false,
     setSelectedLocationId: jest.fn(),
+    loadFailed: false,
+    retryLocations: jest.fn(),
     ...over,
   };
 }
@@ -132,14 +136,22 @@ describe("F0-2 — stock by location", () => {
   });
 
   it("a per-location read that THROWS gives that row `Couldn't load`; the card never says `No locations configured.`", async () => {
+    // FR1-4: one location's read throws, the other answers — a PARTIAL failure
+    // stays per row (every read failing is the card's failure, pinned below).
     mockFetch({
-      "/api/inventory/current-fast": () => Promise.reject(new Error("network down")),
+      "/api/inventory/current-fast": (url) =>
+        url.searchParams.get("locationId") === "2"
+          ? Promise.reject(new Error("network down"))
+          : { ok: true, body: { inventory: [{ quantity: 5 }, { quantity: 7 }] } },
     });
     renderPage();
 
     const card = cardOf("Stock by Location");
-    await waitFor(() => expect(within(card).getAllByText("Couldn't load")).toHaveLength(2));
+    await waitFor(() => expect(within(card).getAllByText("Couldn't load")).toHaveLength(1));
+    const backRow = within(card).getByText("Back").closest(".rounded-lg") as HTMLElement;
+    expect(within(backRow).getByText("Couldn't load")).toBeInTheDocument();
     expect(within(card).queryByText("No locations configured.")).toBeNull();
+    expect(within(card).queryByText("Couldn't load stock by location.")).toBeNull();
   });
 
   it("`No locations configured.` renders only when the location list is empty (and loaded)", async () => {
@@ -296,5 +308,177 @@ describe("F0-2 — the metrics tiles", () => {
     expect(await screen.findByText("in stock, at or below alert level")).toBeInTheDocument();
     expect(screen.queryByText("all stocked")).toBeNull();
     expect(screen.queryByText("products below threshold")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-3 — a failed locations read is not "no locations"
+// ---------------------------------------------------------------------------
+
+describe("FR1-3 — the location list failed to load", () => {
+  const failedLocations = () =>
+    setLocation({ locations: [], selectedLocationId: null, selectedLocation: null, loadFailed: true });
+
+  it("stock by location: `Couldn't load locations.` + Retry (retryLocations), never `No locations configured.`", () => {
+    failedLocations();
+    renderPage();
+    const card = cardOf("Stock by Location");
+    expect(within(card).getByText("Couldn't load locations.")).toBeInTheDocument();
+    expect(within(card).queryByText("No locations configured.")).toBeNull();
+
+    fireEvent.click(within(card).getByRole("button", { name: "Retry" }));
+    expect(mockLocation.retryLocations).toHaveBeenCalledTimes(1);
+  });
+
+  it("low stock: `Couldn't load locations.` + Retry (retryLocations), never `Choose a location to see low stock.`", () => {
+    failedLocations();
+    renderPage();
+    const card = cardOf("Below location minimum");
+    expect(within(card).getByText("Couldn't load locations.")).toBeInTheDocument();
+    expect(within(card).queryByText("Choose a location to see low stock.")).toBeNull();
+    expect(within(card).queryByText("All stocked up")).toBeNull();
+
+    fireEvent.click(within(card).getByRole("button", { name: "Retry" }));
+    expect(mockLocation.retryLocations).toHaveBeenCalledTimes(1);
+  });
+
+  it("a restored location id with the list failed: low stock still says the list failed; captions keep their fallback", async () => {
+    setLocation({ locations: [], selectedLocationId: 7, selectedLocation: null, loadFailed: true });
+    renderPage();
+    const card = cardOf("Below location minimum");
+    expect(within(card).getByText("Couldn't load locations.")).toBeInTheDocument();
+    expect(await screen.findByText("units at the selected location")).toBeInTheDocument();
+    expect(screen.getByText("changes at the selected location in the last 7 days")).toBeInTheDocument();
+  });
+
+  it("while a retry is loading: skeletons, not the failure sentence", () => {
+    setLocation({ locations: [], selectedLocationId: null, selectedLocation: null, loadFailed: true, isLoading: true });
+    renderPage();
+    expect(screen.queryByText("Couldn't load locations.")).toBeNull();
+    expect(cardOf("Below location minimum").querySelector(".animate-pulse")).not.toBeNull();
+  });
+
+  it("a failed refresh over a LOADED list keeps the list (no failure sentence)", async () => {
+    setLocation({ loadFailed: true });
+    renderPage();
+    const card = cardOf("Stock by Location");
+    expect(await within(card).findByText("Main")).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't load locations.")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-4 — every per-location read failed: the card says so once
+// ---------------------------------------------------------------------------
+
+describe("FR1-4 — stock by location when every read failed", () => {
+  it.each([
+    ["refused", () => ({ ok: false })],
+    ["thrown", () => Promise.reject(new Error("network down"))],
+  ])("every read %s: `Couldn't load stock by location.` + Retry that refetches, and no per-row unknowns", async (_label, responder) => {
+    mockFetch({ "/api/inventory/current-fast": responder as Responder });
+    renderPage();
+
+    const card = cardOf("Stock by Location");
+    expect(await within(card).findByText("Couldn't load stock by location.")).toBeInTheDocument();
+    expect(within(card).queryByText("Couldn't load")).toBeNull();
+    expect(within(card).queryByText(/units/)).toBeNull();
+
+    const before = callsTo("/api/inventory/current-fast").length;
+    fireEvent.click(within(card).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(callsTo("/api/inventory/current-fast").length).toBe(before + 2));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-5 — the empty copy only on an answer
+// ---------------------------------------------------------------------------
+
+describe("FR1-5 — the activity feed while the read is paused (offline)", () => {
+  afterEach(() => {
+    onlineManager.setOnline(true);
+  });
+
+  it("a paused read is pending: a skeleton, never `No recent activity to show.`", async () => {
+    onlineManager.setOnline(false);
+    renderPage();
+    const card = cardOf("Latest activity, all locations");
+    await act(async () => {});
+    expect(qc.getQueryState(["dashboard-activity"])?.fetchStatus).toBe("paused");
+    expect(within(card).queryByText("No recent activity to show.")).toBeNull();
+    expect(card.querySelector(".animate-pulse")).not.toBeNull();
+  });
+
+  it("a successful empty answer still reads `No recent activity to show.`", async () => {
+    mockFetch({ "/api/reports/activity": () => ({ ok: true, body: { activities: [] } }) });
+    renderPage();
+    expect(
+      await within(cardOf("Latest activity, all locations")).findByText("No recent activity to show."),
+    ).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-11 — a failed refresh keeps the data
+// ---------------------------------------------------------------------------
+
+describe("FR1-11 — a failed background refresh over loaded data keeps the data", () => {
+  /** Refetch `key` against a now-failing route; wait for the error to reach the page. */
+  async function failRefresh(key: unknown[], over: Record<string, Responder>) {
+    mockFetch(over);
+    await act(async () => {
+      await qc.refetchQueries({ queryKey: key });
+    });
+    expect(qc.getQueryState(key)?.status).toBe("error");
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+  }
+
+  it("the metrics tiles keep their numbers, with no `Couldn't load the summary.`", async () => {
+    renderPage();
+    expect(await screen.findByText("340")).toBeInTheDocument();
+
+    await failRefresh(["dashboard-metrics", 1], { "/api/reports/metrics": () => ({ ok: false }) });
+
+    expect(screen.getByText("340")).toBeInTheDocument();
+    expect(screen.getByText("Total Products").parentElement).toHaveTextContent("12");
+    expect(screen.queryByText("--")).toBeNull();
+    expect(screen.queryByText("Couldn't load the summary.")).toBeNull();
+  });
+
+  it("the low-stock list keeps its rows, with no `Couldn't load low stock.`", async () => {
+    mockFetch({
+      "/api/stocker/minimums": () => ({
+        ok: true,
+        body: {
+          items: [
+            { productId: 3, productName: "Gadget", locationId: 1, locationName: "Main", currentQuantity: 2, minQuantity: 10, shortage: 8 },
+          ],
+        },
+      }),
+    });
+    renderPage();
+    const card = cardOf("Below location minimum");
+    expect(await within(card).findByText("Gadget")).toBeInTheDocument();
+
+    await failRefresh(["dashboard-low-stock", 1], { "/api/stocker/minimums": () => ({ ok: false }) });
+
+    expect(within(card).getByText("Gadget")).toBeInTheDocument();
+    expect(within(card).queryByText("Couldn't load low stock.")).toBeNull();
+  });
+
+  it("stock by location keeps its rows, with no `Couldn't load stock by location.`", async () => {
+    renderPage();
+    const card = cardOf("Stock by Location");
+    const mainRow = (await within(card).findByText("Main")).closest(".rounded-lg") as HTMLElement;
+    await waitFor(() => expect(mainRow).toHaveTextContent("12units"));
+
+    await failRefresh(["dashboard-location-stock", "1,2"], {
+      "/api/inventory/current-fast": () => ({ ok: false }),
+    });
+
+    const row = within(card).getByText("Main").closest(".rounded-lg") as HTMLElement;
+    expect(row).toHaveTextContent("12units");
+    expect(within(card).queryByText("Couldn't load stock by location.")).toBeNull();
+    expect(within(card).queryByText("Couldn't load")).toBeNull();
   });
 });

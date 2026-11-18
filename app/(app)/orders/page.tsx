@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useLayoutEffect, useMemo } from "react";
 import Link from "next/link";
+import { toast } from "sonner";
 import { Package, RefreshCw, Loader2, Plug } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -25,6 +26,9 @@ export default function OrdersPage() {
   const [status, setStatus] = useState<InternalOrderStatus | "all">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [pageSize, setPageSize] = useState(ORDERS_PAGE_STEP);
+  // FR1-9 (ruled): the size the list had before the last Load More, until that
+  // bigger read answers. Null when no Load More is outstanding.
+  const [loadMoreFrom, setLoadMoreFrom] = useState<number | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<ExternalOrder | null>(null);
   const [isSheetOpen, setIsSheetOpen] = useState(false);
   const { token: csrfToken } = useCSRF();
@@ -65,7 +69,31 @@ export default function OrdersPage() {
 
   // Any change of what is listed starts again at the first 50. Reset in the
   // handlers (not an effect), so the new filter is never fetched at the old size.
-  const resetPageSize = () => setPageSize(ORDERS_PAGE_STEP);
+  const resetPageSize = () => {
+    setPageSize(ORDERS_PAGE_STEP);
+    setLoadMoreFrom(null);
+  };
+  const handleLoadMore = () => {
+    setLoadMoreFrom(pageSize);
+    setPageSize((size) => Math.min(size + ORDERS_PAGE_STEP, ORDERS_PAGE_CAP));
+  };
+
+  // FR1-9 (orchestrator ruling): Load More asks under a NEW query key, and when
+  // that read fails react-query drops the placeholder rows — the list would
+  // vanish behind the error panel. So a failed Load More puts the size back:
+  // the key returns to the last SUCCESSFUL list (still cached), the operator is
+  // told, and Load More is offered again. A layout effect, so the failed key's
+  // empty render is never painted. A failed POLL is not this: it keeps its rows.
+  useLayoutEffect(() => {
+    if (loadMoreFrom === null) return;
+    if (ordersError && ordersData === undefined) {
+      setPageSize(loadMoreFrom);
+      setLoadMoreFrom(null);
+      toast.error("Couldn't load more orders — try again.");
+    } else if (ordersData !== undefined && !isPlaceholderData) {
+      setLoadMoreFrom(null);
+    }
+  }, [loadMoreFrom, ordersError, ordersData, isPlaceholderData]);
   const handleCompanyChange = (companyId: string) => {
     setSelectedCompanyId(companyId);
     resetPageSize();
@@ -172,8 +200,9 @@ export default function OrdersPage() {
               <Skeleton key={i} className="h-32 w-full rounded-lg" />
             ))}
           </div>
-        ) : ordersError ? (
-          // Error state
+        ) : ordersError && ordersData === undefined ? (
+          // Error state — FR1-9: only when nothing is loaded. The list polls
+          // every 30 s, and a failed poll over loaded rows keeps the rows.
           <div className="flex flex-col items-center justify-center py-12 text-center">
             <Package className="h-12 w-12 text-muted-foreground/50 mb-4" />
             <h3 className="text-lg font-semibold mb-2">Failed to Load Orders</h3>
@@ -237,9 +266,7 @@ export default function OrdersPage() {
                     variant="outline"
                     size="sm"
                     disabled={isPlaceholderData}
-                    onClick={() =>
-                      setPageSize((size) => Math.min(size + ORDERS_PAGE_STEP, ORDERS_PAGE_CAP))
-                    }
+                    onClick={handleLoadMore}
                   >
                     {isPlaceholderData ? "Loading…" : "Load More"}
                   </Button>

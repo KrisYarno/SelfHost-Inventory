@@ -81,10 +81,12 @@ function ListSkeleton() {
 
 export default function AdminDashboardPage() {
   // 30s auto-refresh preserved inside the hook via refetchInterval.
-  const { data: metrics, isLoading, isError, errorUpdatedAt, refetch } = useAdminDashboard();
+  const { data: metrics, isLoading, isPending, isError, errorUpdatedAt, refetch } = useAdminDashboard();
   // The hook polls, so a failed POLL over loaded data must keep the data: the
   // error copy is only for a read that failed with nothing loaded (F0-4).
   const failed = isError && metrics === undefined;
+  // FR1-5: the lists' skeletons key on PENDING, not loading — a paused (offline)
+  // read is pending too, and an empty sentence is only for an answer.
   const topMovers = metrics?.topMovingProducts ?? [];
   const recentActivity = metrics?.recentActivity ?? [];
 
@@ -138,7 +140,7 @@ export default function AdminDashboardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {isLoading ? (
+            {isPending ? (
               <ListSkeleton />
             ) : failed ? (
               <ListLoadFailed message="Couldn't load product movement." onRetry={() => refetch()} />
@@ -173,7 +175,7 @@ export default function AdminDashboardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {isLoading ? (
+            {isPending ? (
               <ListSkeleton />
             ) : failed ? (
               <ListLoadFailed message="Couldn't load recent activity." onRetry={() => refetch()} />

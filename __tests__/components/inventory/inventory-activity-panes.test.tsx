@@ -13,7 +13,7 @@
 // empty answer.
 
 import * as React from "react";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -33,7 +33,7 @@ jest.mock("@/components/inventory/transfer-dialog", () => ({ TransferDialog: () 
 
 import InventoryPage from "@/app/(app)/inventory/page";
 
-type Mode = "pending" | "error" | "empty";
+type Mode = "pending" | "error" | "empty" | "rows";
 
 const variantsBody = {
   products: [
@@ -50,12 +50,41 @@ const variantsBody = {
   pagination: { page: 1, pageSize: 12, total: 1, totalPages: 1, hasMore: false },
 };
 
+/** One row each, for the failed-refresh pins (FR1-11). */
+const LOG_ROW = {
+  id: 41,
+  productId: 1,
+  locationId: 1,
+  userId: 1,
+  delta: -2,
+  changeTime: new Date("2026-11-17T12:00:00Z").toISOString(),
+  logType: "ADJUSTMENT",
+  transferId: null,
+  products: { id: 1, name: "Widget Prime", baseName: "Widget", variant: null },
+  locations: { id: 1, name: "Main" },
+  users: { id: 1, username: "kris", email: "k@example.test" },
+};
+const TRANSFER_ROW = {
+  id: 42,
+  createdAt: new Date("2026-11-17T12:00:00Z").toISOString(),
+  productName: "Widget Transferred",
+  quantity: 3,
+  fromLocationName: "Main",
+  toLocationName: "Back",
+  userName: "kris",
+  batchId: null,
+  transferId: null,
+};
+
 let fetchMock: jest.Mock;
 function mockFetch(logs: Mode, transfers: Mode) {
   const reply = (mode: Mode, key: "logs" | "transfers") => {
     if (mode === "pending") return new Promise<Response>(() => {});
     if (mode === "error") {
       return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: "boom" }) } as Response);
+    }
+    if (mode === "rows") {
+      return Promise.resolve({ ok: true, json: async () => ({ [key]: key === "logs" ? [LOG_ROW] : [TRANSFER_ROW] }) } as Response);
     }
     return Promise.resolve({ ok: true, json: async () => ({ [key]: [] }) } as Response);
   };
@@ -73,8 +102,9 @@ function mockFetch(logs: Mode, transfers: Mode) {
 
 const callsTo = (fragment: string) => fetchMock.mock.calls.filter(([u]) => String(u).includes(fragment));
 
+let qc: QueryClient;
 function renderPage() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <InventoryPage />
@@ -145,5 +175,54 @@ describe("F0-4 — the Transfers pane", () => {
     await openTransfersTab();
     expect(await screen.findByText("No transfer activity recorded yet.")).toBeInTheDocument();
     expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-11 — a failed background refresh over loaded rows keeps them
+// ---------------------------------------------------------------------------
+
+describe("FR1-11 — the panes after a failed refresh", () => {
+  async function failRefresh(key: string, fragment: string) {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const u = String(input);
+      if (u.includes(fragment)) {
+        return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: "boom" }) } as Response);
+      }
+      if (u.includes("/api/inventory/variants")) {
+        return Promise.resolve({ ok: true, json: async () => variantsBody } as Response);
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) } as Response);
+    });
+    await act(async () => {
+      await qc.refetchQueries({ queryKey: [key] });
+    });
+    expect(qc.getQueryCache().findAll({ queryKey: [key] }).map((q) => q.state.status)).toEqual(["error"]);
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+  }
+
+  it("Recent Activity keeps its rows, with no `Couldn't load activity.`", async () => {
+    mockFetch("rows", "empty");
+    renderPage();
+    expect((await screen.findAllByText("Widget Prime")).length).toBeGreaterThan(0);
+
+    await failRefresh("inventory-logs", "/api/inventory/logs");
+
+    expect(screen.getAllByText("Widget Prime").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Couldn't load activity.")).toBeNull();
+    expect(screen.queryByText("No inventory logs found")).toBeNull();
+  });
+
+  it("Transfers keeps its rows, with no `Couldn't load transfers.`", async () => {
+    mockFetch("empty", "rows");
+    renderPage();
+    await openTransfersTab();
+    expect((await screen.findAllByText("Widget Transferred")).length).toBeGreaterThan(0);
+
+    await failRefresh("inventory-transfers", "/api/inventory/transfers");
+
+    expect(screen.getAllByText("Widget Transferred").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Couldn't load transfers.")).toBeNull();
+    expect(screen.queryByText("No transfer activity recorded yet.")).toBeNull();
   });
 });

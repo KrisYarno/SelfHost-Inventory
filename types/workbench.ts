@@ -25,6 +25,14 @@ export interface SelectedExternalOrder {
   // P1-10: integrationId is needed by workbench to render the Map button in
   // UnmappedItemsAlert and to wire ProductMapDialog.
   integrationId?: string;
+  // Facelift F0 FR1-1 (a): the location whose stock built this cart, and how
+  // many deductible lines that build produced. The order outlives the page in
+  // this store and the shell's location can change on any page, so "built here"
+  // is recorded, never assumed: the page rebuilds while it differs from the
+  // selected location, and Complete waits. Null when the rows the build read
+  // were not known to be any one location's.
+  builtAtLocationId: number | null;
+  builtCartCount: number;
 }
 
 // Unmapped item from a WC order that couldn't be added to the cart.
@@ -93,7 +101,11 @@ export interface WorkbenchState {
 
   // WC order actions
   setOrderSource: (source: 'manual' | 'wc-order') => void;
-  selectExternalOrder: (order: ExternalOrder, products: ProductWithQuantity[]) => void;
+  selectExternalOrder: (
+    order: ExternalOrder,
+    products: ProductWithQuantity[],
+    locationId: number | null
+  ) => void;
   clearExternalOrder: () => void;
 
   // Computed values

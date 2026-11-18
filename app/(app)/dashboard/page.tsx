@@ -64,6 +64,12 @@ async function fetchLocationStock(
       }
     })
   );
+  // FR1-4: when EVERY read failed there is no stock by location to show, only
+  // unknowns — that is the card's failure, said once, with Retry. A partial
+  // failure stays per row.
+  if (results.length > 0 && results.every((r) => r.totalStock === null)) {
+    throw new Error("Failed to fetch stock by location");
+  }
   return results;
 }
 
@@ -188,7 +194,13 @@ export default function DashboardPage() {
     selectedLocationId,
     selectedLocation,
     isLoading: locationsLoading,
+    loadFailed: locationsLoadFailed,
+    retryLocations,
   } = useLocation();
+  // FR1-3: a failed /api/locations read is not "no locations". REV 2's rule
+  // holds: the failure is said only when nothing was loaded — a failed refresh
+  // over a loaded list keeps the list.
+  const locationsFailed = locationsLoadFailed && locations.length === 0;
 
   // Every caption keys on whether a location is SELECTED; its name may not be
   // known yet (the id is restored before the location list arrives).
@@ -245,7 +257,7 @@ export default function DashboardPage() {
   // --- Recent activity ---
   const {
     data: activityData,
-    isLoading: activityLoading,
+    isPending: activityPending,
     isError: activityError,
     refetch: refetchActivity,
   } = useQuery({
@@ -340,7 +352,9 @@ export default function DashboardPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                {!locationsLoading && locations.length === 0 ? (
+                {!locationsLoading && locationsFailed ? (
+                  <LoadFailed message="Couldn't load locations." onRetry={retryLocations} />
+                ) : !locationsLoading && locations.length === 0 ? (
                   <p className="text-sm text-muted-foreground py-4 text-center">
                     No locations configured.
                   </p>
@@ -405,7 +419,7 @@ export default function DashboardPage() {
                     <AlertTriangle className="h-4 w-4 text-muted-foreground" />
                     Below location minimum
                   </CardTitle>
-                  {!lowStockLoading && lowStockItems.length > 0 && (
+                  {!locationsFailed && !lowStockLoading && lowStockItems.length > 0 && (
                     <Badge variant="destructive" className="text-xs">
                       {lowStockItems.length}
                     </Badge>
@@ -413,7 +427,9 @@ export default function DashboardPage() {
                 </div>
               </CardHeader>
               <CardContent>
-                {locationsLoading || (hasLocation && !lowStockFailed && lowStockData === undefined) ? (
+                {!locationsLoading && locationsFailed ? (
+                  <LoadFailed message="Couldn't load locations." onRetry={retryLocations} />
+                ) : locationsLoading || (hasLocation && !lowStockFailed && lowStockData === undefined) ? (
                   <div className="space-y-3">
                     {[1, 2, 3].map((i) => (
                       <div key={i} className="flex items-center justify-between">
@@ -496,7 +512,9 @@ export default function DashboardPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {activityLoading ? (
+              {/* FR1-5: pending, not loading — a paused (offline) read is
+                  pending too, and must never show the empty copy. */}
+              {activityPending ? (
                 <div className="space-y-3">
                   {[1, 2, 3, 4, 5].map((i) => (
                     <div key={i} className="flex items-center gap-3">

@@ -218,7 +218,7 @@ beforeEach(() => {
 
 function seedOrder(items: ExternalItem[]) {
   act(() => {
-    useWorkbench.getState().selectExternalOrder(makeOrder(items), LOADED_PRODUCTS);
+    useWorkbench.getState().selectExternalOrder(makeOrder(items), LOADED_PRODUCTS, 1);
   });
 }
 
@@ -752,7 +752,7 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
   function seedWcCart(count: number, quantity = 1) {
     const { items, products } = wcOrderOf(count, quantity);
     act(() => {
-      useWorkbench.getState().selectExternalOrder(makeOrder(items), products);
+      useWorkbench.getState().selectExternalOrder(makeOrder(items), products, 1);
     });
   }
 
@@ -2226,7 +2226,7 @@ describe("complete-order dialog — F0-1: out-of-stock and short store lines", (
 
   function seedF01(items: ExternalItem[]) {
     act(() => {
-      useWorkbench.getState().selectExternalOrder(makeOrder(items), F01_PRODUCTS);
+      useWorkbench.getState().selectExternalOrder(makeOrder(items), F01_PRODUCTS, 1);
     });
   }
 

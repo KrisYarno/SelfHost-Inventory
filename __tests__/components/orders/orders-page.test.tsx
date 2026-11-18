@@ -13,7 +13,7 @@
 // starts again at 50.
 
 import * as React from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 jest.mock("next/link", () => {
@@ -27,6 +27,8 @@ jest.mock("next/link", () => {
   return { __esModule: true, default: MockLink };
 });
 jest.mock("@/hooks/use-csrf", () => ({ useCSRF: () => ({ token: null }) }));
+const mockToastError = jest.fn();
+jest.mock("sonner", () => ({ toast: { error: (...a: unknown[]) => mockToastError(...a) } }));
 jest.mock("@/components/orders/external-order-card", () => ({
   ExternalOrderCard: ({ order }: { order: { orderNumber: string } }) => (
     <div data-testid="order-card">{order.orderNumber}</div>
@@ -56,6 +58,8 @@ import OrdersPage from "@/app/(app)/orders/page";
 const CAP_MESSAGE = "Showing the newest 200 — search or filter to find older orders.";
 
 let totalOrders = 500;
+/** When set, every orders request is refused (500). */
+let refuseOrders = false;
 /** When set, the next orders request hangs until `release()` is called. */
 let holdNext = false;
 let release: () => void = () => {};
@@ -76,6 +80,8 @@ function ordersBody(url: URL) {
 beforeEach(() => {
   totalOrders = 500;
   holdNext = false;
+  refuseOrders = false;
+  mockToastError.mockReset();
   fetchMock = jest.fn((input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://x");
     if (url.pathname === "/api/companies/user") {
@@ -85,6 +91,9 @@ beforeEach(() => {
       } as Response);
     }
     if (url.pathname === "/api/orders/external") {
+      if (refuseOrders) {
+        return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: "boom" }) } as Response);
+      }
       const response = { ok: true, json: async () => ordersBody(url) } as Response;
       if (holdNext) {
         holdNext = false;
@@ -105,8 +114,9 @@ const orderRequests = () =>
     .filter((u) => u.pathname === "/api/orders/external");
 const lastOrderRequest = () => orderRequests()[orderRequests().length - 1];
 
+let qc: QueryClient;
 function renderPage() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <OrdersPage />
@@ -211,5 +221,94 @@ describe("F0-7 — Orders Load More", () => {
     for (const u of orderRequests().slice(before)) {
       expect(u.searchParams.get("pageSize")).toBe("50");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-9 — the error panel only when nothing is loaded
+// ---------------------------------------------------------------------------
+
+describe("FR1-9 — Orders after a failed poll", () => {
+  it("a failed poll over loaded rows keeps the rows, with no error panel", async () => {
+    renderPage();
+    await loaded(50);
+
+    refuseOrders = true;
+    await act(async () => {
+      await qc.refetchQueries({ queryKey: ["external-orders"], type: "active" });
+    });
+    const active = qc.getQueryCache().findAll({ queryKey: ["external-orders"], type: "active" });
+    expect(active.map((q) => q.state.status)).toEqual(["error"]);
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+
+    expect(screen.getAllByTestId("order-card")).toHaveLength(50);
+    expect(screen.getByText("Showing 50 of 500 orders")).toBeInTheDocument();
+    expect(screen.queryByText("Failed to Load Orders")).toBeNull();
+    // A failed POLL is not a failed Load More: no Load More toast.
+    expect(mockToastError).not.toHaveBeenCalled();
+  });
+
+  it("a failed first read with nothing loaded still shows the error panel and its Retry", async () => {
+    refuseOrders = true;
+    renderPage();
+    // The no-company read fails first, then the default company's: wait for that.
+    await waitFor(() => {
+      expect(lastOrderRequest().searchParams.get("companyId")).toBe("c1");
+      expect(screen.getByText("Failed to Load Orders")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.queryAllByTestId("order-card")).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-9, the orchestrator's ruling on the Load More half. Load More
+// changes the query key; when the bigger read fails, react-query drops the
+// placeholder rows, so the list used to vanish behind the error panel. Now the
+// size goes back to what it was (the last SUCCESSFUL list, still cached), the
+// operator is told, and Load More is offered again.
+// ---------------------------------------------------------------------------
+
+describe("FR1-9 ruling — a failed Load More", () => {
+  const activeKeyPageSize = () =>
+    (
+      qc.getQueryCache().findAll({ queryKey: ["external-orders"], type: "active" })[0]
+        ?.queryKey[1] as { pageSize?: number } | undefined
+    )?.pageSize;
+
+  it("puts the size back, keeps the previous rows, says so, and offers Load More again", async () => {
+    renderPage();
+    await loaded(50);
+
+    refuseOrders = true;
+    fireEvent.click(screen.getByRole("button", { name: "Load More" }));
+    await waitFor(() => expect(mockToastError).toHaveBeenCalledWith("Couldn't load more orders — try again."));
+    expect(mockToastError).toHaveBeenCalledTimes(1);
+
+    // The 100-row read was asked for, failed, and the list is back at 50.
+    expect(orderRequests().some((u) => u.searchParams.get("pageSize") === "100")).toBe(true);
+    expect(activeKeyPageSize()).toBe(50);
+    expect(screen.getAllByTestId("order-card")).toHaveLength(50);
+    expect(screen.getByText("Showing 50 of 500 orders")).toBeInTheDocument();
+    expect(screen.queryByText("Failed to Load Orders")).toBeNull();
+    const again = screen.getByRole("button", { name: "Load More" });
+    expect(again).toBeEnabled();
+
+    // The next click asks for 100 again (from 50), not 150.
+    refuseOrders = false;
+    fireEvent.click(again);
+    await loaded(100);
+    expect(lastOrderRequest().searchParams.get("pageSize")).toBe("100");
+    expect(mockToastError).toHaveBeenCalledTimes(1);
+  });
+
+  it("a successful Load More says nothing", async () => {
+    renderPage();
+    await loaded(50);
+    fireEvent.click(screen.getByRole("button", { name: "Load More" }));
+    await loaded(100);
+    await act(async () => {});
+    expect(mockToastError).not.toHaveBeenCalled();
+    expect(activeKeyPageSize()).toBe(100);
   });
 });

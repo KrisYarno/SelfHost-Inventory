@@ -73,3 +73,90 @@ describe("LocationContext value memoization (P2)", () => {
     expect(after).toBe(before);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-3: a failed `/api/locations` read is not "no locations". The
+// context says it failed (`loadFailed`, cleared by a successful read) and can
+// read again (`retryLocations`).
+// ---------------------------------------------------------------------------
+
+describe("LocationContext — loadFailed and retryLocations (FR1-3)", () => {
+  let latest: ReturnType<typeof useLocation> | null;
+
+  function Probe() {
+    latest = useLocation();
+    return null;
+  }
+
+  beforeEach(() => {
+    latest = null;
+    jest.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  async function mount() {
+    await act(async () => {
+      render(
+        <LocationProvider>
+          <Probe />
+        </LocationProvider>
+      );
+    });
+    await waitFor(() => expect(latest?.isLoading).toBe(false));
+  }
+
+  test.each([
+    ["answers non-ok", async () => ({ ok: false, json: async () => ({ error: "boom" }) })],
+    [
+      "throws",
+      async () => {
+        throw new TypeError("Failed to fetch");
+      },
+    ],
+  ])("a read that %s sets loadFailed, with no locations", async (_label, answer) => {
+    global.fetch = jest.fn(answer) as unknown as typeof fetch;
+    await mount();
+    expect(latest?.loadFailed).toBe(true);
+    expect(latest?.locations).toEqual([]);
+  });
+
+  test("a successful read leaves loadFailed false", async () => {
+    global.fetch = jest.fn(async () => ({ ok: true, json: async () => [] })) as unknown as typeof fetch;
+    await mount();
+    expect(latest?.loadFailed).toBe(false);
+  });
+
+  test("retryLocations reads again; a successful retry clears loadFailed and loads the list", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({ ok: false, json: async () => ({ error: "boom" }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => [{ id: 1, name: "Main" }] });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    await mount();
+    expect(latest?.loadFailed).toBe(true);
+
+    await act(async () => {
+      latest!.retryLocations();
+    });
+    await waitFor(() => expect(latest?.loadFailed).toBe(false));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(latest?.locations).toEqual([{ id: 1, name: "Main" }]);
+    expect(latest?.isLoading).toBe(false);
+  });
+
+  test("a retry that fails again keeps loadFailed", async () => {
+    const fetchMock = jest.fn(async () => ({ ok: false, json: async () => ({ error: "boom" }) }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    await mount();
+
+    await act(async () => {
+      latest!.retryLocations();
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(latest?.isLoading).toBe(false));
+    expect(latest?.loadFailed).toBe(true);
+  });
+});

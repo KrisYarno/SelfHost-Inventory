@@ -14,7 +14,8 @@
 // days-of-supply into 0.
 
 import * as React from "react";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // The page's children each fetch their own data; none is under test here.
@@ -32,6 +33,13 @@ jest.mock("@/components/reports/combined-minimums", () => ({ CombinedMinimumsRep
 jest.mock("@/components/ui/date-range-picker", () => ({ DateRangePicker: () => null }));
 jest.mock("@/contexts/location-context", () => ({
   useLocation: () => ({ selectedLocationId: 1 }),
+}));
+// FR1-6: the CSV rows are read where they are handed over, not from a download.
+const mockExportToCSV = jest.fn();
+jest.mock("@/lib/export-utils", () => ({
+  exportToCSV: (...args: unknown[]) => mockExportToCSV(...args),
+  exportChartAsImage: jest.fn(),
+  generateExportFilename: () => "metrics.csv",
 }));
 
 import AdminReportsPage from "@/app/(app)/admin/reports/page";
@@ -81,8 +89,9 @@ function mockFetch(metrics: MetricsReply) {
 const metricsCalls = () =>
   fetchMock.mock.calls.filter(([u]) => new URL(String(u), "http://x").pathname === "/api/reports/metrics");
 
+let qc: QueryClient;
 function renderPage() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <AdminReportsPage />
@@ -144,9 +153,13 @@ describe("F0-3 — Admin Reports tiles", () => {
     mockFetch({ ok: true, metrics: { daysOfSupplyAvg: null } });
     renderPage();
 
+    // FR1-6: the null average means no IN-STOCK product has measured outflow.
     expect(
-      await screen.findByText("Days of supply unknown (no measured outflow) · trend tracks the low-stock count"),
+      await screen.findByText(
+        "Days of supply unknown (no in-stock product with measured outflow) · trend tracks the low-stock count",
+      ),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/\(no measured outflow\)/)).toBeNull();
     expect(screen.queryByText(/Avg 0 days/)).toBeNull();
   });
 
@@ -178,5 +191,64 @@ describe("F0-3 — Admin Reports tiles", () => {
     const line = screen.getByText("Couldn't load the report.").parentElement as HTMLElement;
     fireEvent.click(within(line).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(metricsCalls().length).toBe(before + 1));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-6 — the CSV never writes "Avg null days supply"
+// ---------------------------------------------------------------------------
+
+describe("FR1-6 — the metrics CSV's Stockout Risk row", () => {
+  async function exportMetrics() {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await waitFor(() => expect(within(tile("Order Now")).getByText("4")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Export" }));
+    await user.click(await screen.findByRole("menuitem", { name: /Export Metrics \(CSV\)/ }));
+    expect(mockExportToCSV).toHaveBeenCalledTimes(1);
+    const rows = mockExportToCSV.mock.calls[0][0] as { metric: string; additional: string }[];
+    return rows.find((r) => r.metric === "Stockout Risk");
+  }
+
+  beforeEach(() => mockExportToCSV.mockReset());
+
+  it("a null average writes `Days of supply unknown`", async () => {
+    mockFetch({ ok: true, metrics: { daysOfSupplyAvg: null } });
+    renderPage();
+    const row = await exportMetrics();
+    expect(row?.additional).toBe("Days of supply unknown");
+  });
+
+  it("a known average writes today's `Avg ${n} days supply`", async () => {
+    mockFetch({ ok: true, metrics: { daysOfSupplyAvg: 12 } });
+    renderPage();
+    const row = await exportMetrics();
+    expect(row?.additional).toBe("Avg 12 days supply");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift F0 FR1-11 — a failed refresh keeps the data
+// ---------------------------------------------------------------------------
+
+describe("FR1-11 — Admin Reports after a failed background refresh", () => {
+  it("the tiles keep their values, with no `--` and no `Couldn't load the report.`", async () => {
+    mockFetch({ ok: true, metrics: {} });
+    renderPage();
+    await waitFor(() => expect(within(tile("Order Now")).getByText("4")).toBeInTheDocument());
+
+    mockFetch({ ok: false });
+    await act(async () => {
+      await qc.refetchQueries({ queryKey: ["reports"] });
+    });
+    const metricsQuery = qc.getQueryCache().findAll({ queryKey: ["reports"] })
+      .find((q) => JSON.stringify(q.queryKey).includes("metrics"));
+    expect(metricsQuery?.state.status).toBe("error");
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+
+    expect(within(tile("Order Now")).getByText("4")).toBeInTheDocument();
+    expect(within(tile("Health Score")).getByText("85%")).toBeInTheDocument();
+    expect(within(tile("Stockout Risk")).getByText("3")).toBeInTheDocument();
+    expect(screen.queryByText("--")).toBeNull();
+    expect(screen.queryByText("Couldn't load the report.")).toBeNull();
   });
 });

@@ -79,7 +79,8 @@ it("stamps the structural class on all three push sites", () => {
         // never mapped
         orderItem({ id: "it-unmapped", externalProductId: "wc-p-777" }),
       ]),
-      LOADED_PRODUCTS
+      LOADED_PRODUCTS,
+      1
     );
   });
 
@@ -122,7 +123,7 @@ const STOCKED = [
 
 const select = (items: ExternalItem[]) =>
   act(() => {
-    useWorkbench.getState().selectExternalOrder(makeOrder(items), STOCKED);
+    useWorkbench.getState().selectExternalOrder(makeOrder(items), STOCKED, 1);
   });
 
 describe("F0-1 — an ordered line is never dropped", () => {
