@@ -31,14 +31,32 @@ import { shouldAutoLoad, AUTO_LOAD_PAGE_LIMIT } from "@/lib/inventory-page-utils
 import type { DialogProduct } from "@/types/inventory";
 
 // Lazy-mounted tab panes (design A5): each fetches only once its tab mounts.
+// Each passes its query state through (F0-4), so a table shows its empty copy
+// only for a SUCCESSFUL empty answer — never while loading or after a failed
+// read. "Failed" means failed with nothing loaded: a failed background refresh
+// keeps the rows it has.
 function LogsTabContent() {
   const logsQuery = useInventoryLogs();
-  return <SimpleInventoryLogTable logs={logsQuery.data ?? []} />;
+  return (
+    <SimpleInventoryLogTable
+      logs={logsQuery.data ?? []}
+      isLoading={logsQuery.isPending}
+      isError={logsQuery.isError && logsQuery.data === undefined}
+      onRetry={() => logsQuery.refetch()}
+    />
+  );
 }
 
 function TransfersTabContent() {
   const transfersQuery = useInventoryTransfers();
-  return <TransferLogTable logs={transfersQuery.data ?? []} />;
+  return (
+    <TransferLogTable
+      logs={transfersQuery.data ?? []}
+      isLoading={transfersQuery.isPending}
+      isError={transfersQuery.isError && transfersQuery.data === undefined}
+      onRetry={() => transfersQuery.refetch()}
+    />
+  );
 }
 
 export default function InventoryPage() {

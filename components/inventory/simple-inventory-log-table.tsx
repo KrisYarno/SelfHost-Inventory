@@ -14,6 +14,7 @@ import { StatusBadge, type StatusBadgeProps } from '@/components/ui/status-badge
 import { ValueChip } from '@/components/ui/value-chip';
 import { getInventoryLogTone } from '@/components/logs/log-style';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import { inventory_logs, Product, Location, User } from '@prisma/client';
 
 // Narrowed to the relation fields the API selects (and this table renders):
@@ -32,6 +33,14 @@ interface SimpleInventoryLogTableProps {
   showProduct?: boolean;
   showLocation?: boolean;
   showUser?: boolean;
+  /**
+   * The read has not answered yet (F0-4). The empty copy is for a SUCCESSFUL
+   * empty answer only; while loading the table says it is loading.
+   */
+  isLoading?: boolean;
+  /** The read failed with nothing loaded (F0-4): say so, and offer Retry. */
+  isError?: boolean;
+  onRetry?: () => void;
 }
 
 export function SimpleInventoryLogTable({
@@ -40,6 +49,9 @@ export function SimpleInventoryLogTable({
   showProduct = true,
   showLocation = true,
   showUser = true,
+  isLoading = false,
+  isError = false,
+  onRetry,
 }: SimpleInventoryLogTableProps) {
   // Group transfer pairs (one negative, one positive) into a single row
   type TransferRow = { kind: 'transfer'; from: SimpleInventoryLog; to: SimpleInventoryLog };
@@ -136,6 +148,32 @@ export function SimpleInventoryLogTable({
   // ledger table and the admin logs page never disagree (renders "Stock In", not "STOCK_IN").
   const getLogLabel = (log: SimpleInventoryLog): string =>
     getInventoryLogTone(log.logType, log.delta).label;
+
+  if (isLoading || isError) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>{title}</CardTitle>
+        </CardHeader>
+        <CardContent className="px-0 md:px-6">
+          {isLoading ? (
+            <p role="status" className="text-center text-muted-foreground py-8 px-6">
+              Loading activity…
+            </p>
+          ) : (
+            <div className="flex flex-col items-center gap-3 py-8 px-6 text-center">
+              <p className="text-sm text-destructive">{"Couldn't load activity."}</p>
+              {onRetry && (
+                <Button variant="outline" size="sm" onClick={onRetry}>
+                  Retry
+                </Button>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    );
+  }
 
   return (
     <Card>

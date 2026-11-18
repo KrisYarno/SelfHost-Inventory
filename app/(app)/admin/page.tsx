@@ -12,11 +12,15 @@ import { RateLimitMonitor } from "@/components/admin/rate-limit-monitor";
 import { OpsHealthSection } from "@/components/admin/ops-health-section";
 import { useAdminDashboard } from "@/hooks/use-admin";
 
-/** Compact, borderless metric strip (D-L1): the demoted 4-KPI grid. */
+/**
+ * Compact, borderless metric strip (D-L1): the demoted 4-KPI grid. With no
+ * metrics (the read failed and nothing was loaded) every value is `--` and the
+ * counted sub-lines are left out — never a 0 that was not read (F0-4).
+ */
 function MetricStrip({
   metrics,
 }: {
-  metrics: {
+  metrics?: {
     totalProducts?: number;
     activeUsers?: number;
     pendingUsers?: number;
@@ -25,20 +29,51 @@ function MetricStrip({
     recentTransactions?: number;
   };
 }) {
-  const items = [
-    { label: "Total products", value: metrics.totalProducts ?? 0, sub: "Across all locations" },
-    { label: "Active users", value: metrics.activeUsers ?? 0, sub: `${metrics.pendingUsers ?? 0} pending approval` },
-    { label: "Low stock", value: metrics.lowStockProducts ?? 0, sub: `${metrics.outOfStockProducts ?? 0} out of stock` },
-    { label: "Activity (24h)", value: metrics.recentTransactions ?? 0, sub: "Inventory movements" },
-  ];
+  const items = metrics
+    ? [
+        { label: "Total products", value: metrics.totalProducts ?? 0, sub: "Across all locations" },
+        { label: "Active users", value: metrics.activeUsers ?? 0, sub: `${metrics.pendingUsers ?? 0} pending approval` },
+        { label: "Low stock", value: metrics.lowStockProducts ?? 0, sub: `${metrics.outOfStockProducts ?? 0} out of stock` },
+        { label: "Activity (24h)", value: metrics.recentTransactions ?? 0, sub: "Inventory movements" },
+      ]
+    : [
+        { label: "Total products", value: null, sub: "Across all locations" },
+        { label: "Active users", value: null, sub: null },
+        { label: "Low stock", value: null, sub: null },
+        { label: "Activity (24h)", value: null, sub: "Inventory movements" },
+      ];
   return (
     <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4 sm:divide-x sm:divide-border">
       {items.map((it) => (
         <div key={it.label} className="sm:pl-6 sm:first:pl-0">
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{it.label}</p>
-          <p className="mt-1 text-2xl font-bold tabular-nums">{formatNumber(it.value)}</p>
-          <p className="text-xs text-muted-foreground">{it.sub}</p>
+          <p className="mt-1 text-2xl font-bold tabular-nums">
+            {it.value === null ? "--" : formatNumber(it.value)}
+          </p>
+          {it.sub !== null && <p className="text-xs text-muted-foreground">{it.sub}</p>}
         </div>
+      ))}
+    </div>
+  );
+}
+
+/** A list's failed read (F0-4): says so, and offers Retry. */
+function ListLoadFailed({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="flex flex-col items-start gap-3">
+      <p className="text-sm text-destructive">{message}</p>
+      <Button variant="outline" size="sm" onClick={onRetry}>
+        Retry
+      </Button>
+    </div>
+  );
+}
+
+function ListSkeleton() {
+  return (
+    <div className="space-y-4">
+      {[...Array(3)].map((_, i) => (
+        <Skeleton key={i} className="h-5 w-full" />
       ))}
     </div>
   );
@@ -46,7 +81,12 @@ function MetricStrip({
 
 export default function AdminDashboardPage() {
   // 30s auto-refresh preserved inside the hook via refetchInterval.
-  const { data: metrics, isLoading, isError, errorUpdatedAt } = useAdminDashboard();
+  const { data: metrics, isLoading, isError, errorUpdatedAt, refetch } = useAdminDashboard();
+  // The hook polls, so a failed POLL over loaded data must keep the data: the
+  // error copy is only for a read that failed with nothing loaded (F0-4).
+  const failed = isError && metrics === undefined;
+  const topMovers = metrics?.topMovingProducts ?? [];
+  const recentActivity = metrics?.recentActivity ?? [];
 
   // Preserve the original toast on each failed (poll) fetch.
   useEffect(() => {
@@ -80,7 +120,7 @@ export default function AdminDashboardPage() {
           ))}
         </div>
       ) : (
-        <MetricStrip metrics={metrics ?? {}} />
+        <MetricStrip metrics={metrics} />
       )}
 
       <div className="grid gap-6 md:grid-cols-2">
@@ -98,16 +138,24 @@ export default function AdminDashboardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4">
-              {metrics?.topMovingProducts?.slice(0, 5).map((product) => (
-                <div key={product.id} className="flex items-center justify-between">
-                  <div className="font-medium">{product.name}</div>
-                  <div className="text-sm text-muted-foreground">
-                    {formatNumber(product.movement)} units
+            {isLoading ? (
+              <ListSkeleton />
+            ) : failed ? (
+              <ListLoadFailed message="Couldn't load product movement." onRetry={() => refetch()} />
+            ) : topMovers.length === 0 ? (
+              <p className="text-muted-foreground">No product movement in the last 7 days.</p>
+            ) : (
+              <div className="space-y-4">
+                {topMovers.slice(0, 5).map((product) => (
+                  <div key={product.id} className="flex items-center justify-between">
+                    <div className="font-medium">{product.name}</div>
+                    <div className="text-sm text-muted-foreground">
+                      {formatNumber(product.movement)} units
+                    </div>
                   </div>
-                </div>
-              )) || <p className="text-muted-foreground">No product movement data</p>}
-            </div>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -125,31 +173,39 @@ export default function AdminDashboardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4">
-              {metrics?.recentActivity?.slice(0, 5).map((activity) => (
-                <div key={activity.id} className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium">{activity.user}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {activity.action} {activity.product}
-                    </p>
+            {isLoading ? (
+              <ListSkeleton />
+            ) : failed ? (
+              <ListLoadFailed message="Couldn't load recent activity." onRetry={() => refetch()} />
+            ) : recentActivity.length === 0 ? (
+              <p className="text-muted-foreground">No recent activity.</p>
+            ) : (
+              <div className="space-y-4">
+                {recentActivity.slice(0, 5).map((activity) => (
+                  <div key={activity.id} className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium">{activity.user}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {activity.action} {activity.product}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p
+                        className={`text-sm font-medium ${
+                          activity.quantity > 0 ? "text-positive" : "text-negative"
+                        }`}
+                      >
+                        {activity.quantity > 0 ? "+" : ""}
+                        {activity.quantity}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {new Date(activity.timestamp).toLocaleTimeString()}
+                      </p>
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <p
-                      className={`text-sm font-medium ${
-                        activity.quantity > 0 ? "text-positive" : "text-negative"
-                      }`}
-                    >
-                      {activity.quantity > 0 ? "+" : ""}
-                      {activity.quantity}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {new Date(activity.timestamp).toLocaleTimeString()}
-                    </p>
-                  </div>
-                </div>
-              )) || <p className="text-muted-foreground">No recent activity</p>}
-            </div>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

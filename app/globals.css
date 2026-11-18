@@ -27,6 +27,11 @@
     --warning-foreground: 25 70% 12%;
     --destructive: 348 75% 52%; /* softer red */
     --destructive-foreground: 0 0% 100%;
+    /* The colour `text-destructive` paints (tailwind textColor.destructive).
+       Light: the --destructive value. Dark mode overrides it below, because the
+       dark --destructive is a FILL colour, about 1.5-1.8:1 as text on the dark
+       background. Fills (bg-/border-destructive) keep --destructive. */
+    --destructive-text: 348 75% 52%;
     --info: 210 65% 48%; /* calmer blue */
     --info-foreground: 210 65% 25%;
     --error: 348 75% 52%; /* alias for destructive */
@@ -181,6 +186,9 @@
     --card-foreground: 210 40% 98%;
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 210 40% 98%;
+    /* Error TEXT in dark mode: the dark --negative, readable on navy. The dark
+       --destructive above is a fill colour, about 1.5-1.8:1 as text. */
+    --destructive-text: 0 91% 71%;
     --secondary: 217 33% 17%;
     --secondary-foreground: 210 40% 98%;
   }
@@ -455,12 +463,6 @@
   
   /* Mobile Performance Optimizations */
   @media (max-width: 640px) {
-    /* Reduce animations on mobile for performance */
-    *, *::before, *::after {
-      animation-duration: 200ms !important;
-      transition-duration: 200ms !important;
-    }
-    
     /* Optimize hover states for touch */
     @media (hover: none) {
       .hover-scale:hover {

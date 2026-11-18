@@ -10,6 +10,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Package,
@@ -21,7 +22,7 @@ import {
   MapPin,
   Clock,
 } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
+import { formatDistanceToNow, subDays } from "date-fns";
 import type { MetricsResponse, ActivityResponse } from "@/types/reports";
 import { Sparkline } from "@/components/ui/sparkline";
 
@@ -32,6 +33,10 @@ import { Sparkline } from "@/components/ui/sparkline";
 async function fetchMetrics(locationId: number | null): Promise<MetricsResponse> {
   const params = new URLSearchParams();
   if (locationId) params.set("locationId", String(locationId));
+  // F0-2: the Recent Activity tile counts the last 7 days, not every log ever
+  // written. Computed here, at fetch time, and never in the query key (a
+  // timestamp in the key would make every render a new query).
+  params.set("startDate", subDays(new Date(), 7).toISOString());
   const res = await fetch(`/api/reports/metrics?${params}`);
   if (!res.ok) throw new Error("Failed to fetch metrics");
   return res.json();
@@ -39,18 +44,24 @@ async function fetchMetrics(locationId: number | null): Promise<MetricsResponse>
 
 async function fetchLocationStock(
   locations: { id: number; name: string }[]
-): Promise<{ id: number; name: string; totalStock: number }[]> {
-  // Fetch inventory for each location in parallel
+): Promise<{ id: number; name: string; totalStock: number | null }[]> {
+  // Fetch inventory for each location in parallel. A location whose read throws
+  // or answers non-ok is UNKNOWN (null), never 0 units (F0-2): one bad read must
+  // neither invent an empty location nor sink the other rows.
   const results = await Promise.all(
     locations.map(async (loc) => {
-      const res = await fetch(`/api/inventory/current-fast?locationId=${loc.id}`);
-      if (!res.ok) return { id: loc.id, name: loc.name, totalStock: 0 };
-      const data = await res.json();
-      const totalStock = (data.inventory || []).reduce(
-        (sum: number, item: { quantity: number }) => sum + item.quantity,
-        0
-      );
-      return { id: loc.id, name: loc.name, totalStock };
+      try {
+        const res = await fetch(`/api/inventory/current-fast?locationId=${loc.id}`);
+        if (!res.ok) return { id: loc.id, name: loc.name, totalStock: null };
+        const data = await res.json();
+        const totalStock: number = (data.inventory || []).reduce(
+          (sum: number, item: { quantity: number }) => sum + item.quantity,
+          0
+        );
+        return { id: loc.id, name: loc.name, totalStock };
+      } catch {
+        return { id: loc.id, name: loc.name, totalStock: null };
+      }
     })
   );
   return results;
@@ -152,42 +163,76 @@ function StatCard({
 }
 
 // ---------------------------------------------------------------------------
+// A failed read: says so, and offers Retry (F0-2). Shown only when the read
+// failed with NO data — a failed background refresh keeps what was loaded.
+// ---------------------------------------------------------------------------
+
+function LoadFailed({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="flex flex-col items-center gap-3 py-6 text-center">
+      <p className="text-sm text-destructive">{message}</p>
+      <Button variant="outline" size="sm" onClick={onRetry}>
+        Retry
+      </Button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard Page
 // ---------------------------------------------------------------------------
 
 export default function DashboardPage() {
-  const { locations, selectedLocationId, selectedLocation } = useLocation();
+  const {
+    locations,
+    selectedLocationId,
+    selectedLocation,
+    isLoading: locationsLoading,
+  } = useLocation();
+
+  // Every caption keys on whether a location is SELECTED; its name may not be
+  // known yet (the id is restored before the location list arrives).
+  const hasLocation = selectedLocationId !== null;
+  const locationName = selectedLocation?.name ?? "the selected location";
 
   // --- Metrics ---
   const {
     data: metricsData,
     isLoading: metricsLoading,
+    isError: metricsError,
+    refetch: refetchMetrics,
   } = useQuery({
     queryKey: ["dashboard-metrics", selectedLocationId],
     queryFn: () => fetchMetrics(selectedLocationId),
   });
 
   const metrics = metricsData?.metrics;
+  const metricsFailed = metricsError && metricsData === undefined;
 
   // --- Location stock overview ---
   const {
     data: locationStock,
-    isLoading: locationStockLoading,
+    isError: locationStockError,
+    refetch: refetchLocationStock,
   } = useQuery({
     queryKey: ["dashboard-location-stock", locations.map((l) => l.id).join(",")],
     queryFn: () => fetchLocationStock(locations),
     enabled: locations.length > 0,
   });
+  const locationStockFailed = locationStockError && locationStock === undefined;
 
   // --- Low stock alerts (per-location, using stocker minimums) ---
   const {
     data: lowStockData,
     isLoading: lowStockLoading,
+    isError: lowStockError,
+    refetch: refetchLowStock,
   } = useQuery({
     queryKey: ["dashboard-low-stock", selectedLocationId],
     queryFn: () => fetchLowStock(selectedLocationId),
     enabled: !!selectedLocationId,
   });
+  const lowStockFailed = lowStockError && lowStockData === undefined;
 
   // --- Trend data (7-day sparkline) ---
   const { data: trendData } = useQuery({
@@ -201,10 +246,13 @@ export default function DashboardPage() {
   const {
     data: activityData,
     isLoading: activityLoading,
+    isError: activityError,
+    refetch: refetchActivity,
   } = useQuery({
     queryKey: ["dashboard-activity"],
     queryFn: fetchActivity,
   });
+  const activityFailed = activityError && activityData === undefined;
 
   const lowStockItems = lowStockData?.items ?? [];
   const activities = activityData?.activities ?? [];
@@ -240,7 +288,7 @@ export default function DashboardPage() {
               }
               icon={Layers}
               accent="hsl(199, 89%, 48%)"
-              subtitle="units across all locations"
+              subtitle={hasLocation ? `units at ${locationName}` : "units across all locations"}
               loading={metricsLoading}
               sparklineData={sparklineValues}
             />
@@ -248,16 +296,15 @@ export default function DashboardPage() {
               title="Low Stock Alerts"
               value={metrics?.lowStockProducts ?? "--"}
               icon={AlertTriangle}
+              // Red when products are low; otherwise the neutral default — never
+              // a green "all good" before (or without) a loaded answer.
               accent={
                 metrics && metrics.lowStockProducts > 0
                   ? "hsl(0, 84%, 60%)"
-                  : "hsl(142, 71%, 45%)"
+                  : undefined
               }
-              subtitle={
-                metrics && metrics.lowStockProducts > 0
-                  ? "products below threshold"
-                  : "all stocked"
-              }
+              // isLowStock is `quantity > 0 && quantity <= threshold`.
+              subtitle="in stock, at or below alert level"
               loading={metricsLoading}
             />
             <StatCard
@@ -265,10 +312,22 @@ export default function DashboardPage() {
               value={metrics?.recentActivityCount ?? "--"}
               icon={Activity}
               accent="hsl(262, 83%, 58%)"
-              subtitle="inventory changes"
+              subtitle={
+                hasLocation
+                  ? `changes at ${locationName} in the last 7 days`
+                  : "changes in the last 7 days, all locations"
+              }
               loading={metricsLoading}
             />
           </div>
+          {metricsFailed && (
+            <div className="flex items-center gap-3 text-sm">
+              <span className="text-destructive">{"Couldn't load the summary."}</span>
+              <Button variant="outline" size="sm" onClick={() => refetchMetrics()}>
+                Retry
+              </Button>
+            </div>
+          )}
 
           {/* ── Row 2: Location Stock + Low Stock Alerts ── */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -281,16 +340,16 @@ export default function DashboardPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                {locationStockLoading ? (
-                  <div className="space-y-3">
-                    {[1, 2, 3].map((i) => (
-                      <div key={i} className="flex items-center justify-between">
-                        <Skeleton className="h-4 w-32" />
-                        <Skeleton className="h-4 w-16" />
-                      </div>
-                    ))}
-                  </div>
-                ) : locationStock && locationStock.length > 0 ? (
+                {!locationsLoading && locations.length === 0 ? (
+                  <p className="text-sm text-muted-foreground py-4 text-center">
+                    No locations configured.
+                  </p>
+                ) : locationStockFailed ? (
+                  <LoadFailed
+                    message="Couldn't load stock by location."
+                    onRetry={() => refetchLocationStock()}
+                  />
+                ) : !locationsLoading && locationStock ? (
                   <div className="space-y-2">
                     {locationStock.map((loc) => {
                       const isSelected = loc.id === selectedLocationId;
@@ -311,18 +370,29 @@ export default function DashboardPage() {
                               </Badge>
                             )}
                           </div>
-                          <span className="text-sm font-semibold tabular-nums">
-                            {loc.totalStock.toLocaleString()}
-                            <span className="text-muted-foreground font-normal ml-1">units</span>
-                          </span>
+                          {loc.totalStock === null ? (
+                            <span className="text-sm text-muted-foreground">
+                              {"Couldn't load"}
+                            </span>
+                          ) : (
+                            <span className="text-sm font-semibold tabular-nums">
+                              {loc.totalStock.toLocaleString()}
+                              <span className="text-muted-foreground font-normal ml-1">units</span>
+                            </span>
+                          )}
                         </div>
                       );
                     })}
                   </div>
                 ) : (
-                  <p className="text-sm text-muted-foreground py-4 text-center">
-                    No locations configured.
-                  </p>
+                  <div className="space-y-3">
+                    {[1, 2, 3].map((i) => (
+                      <div key={i} className="flex items-center justify-between">
+                        <Skeleton className="h-4 w-32" />
+                        <Skeleton className="h-4 w-16" />
+                      </div>
+                    ))}
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -333,7 +403,7 @@ export default function DashboardPage() {
                 <div className="flex items-center justify-between">
                   <CardTitle className="flex items-center gap-2 text-base">
                     <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-                    Low Stock Alerts
+                    Below location minimum
                   </CardTitle>
                   {!lowStockLoading && lowStockItems.length > 0 && (
                     <Badge variant="destructive" className="text-xs">
@@ -343,7 +413,7 @@ export default function DashboardPage() {
                 </div>
               </CardHeader>
               <CardContent>
-                {lowStockLoading ? (
+                {locationsLoading || (hasLocation && !lowStockFailed && lowStockData === undefined) ? (
                   <div className="space-y-3">
                     {[1, 2, 3].map((i) => (
                       <div key={i} className="flex items-center justify-between">
@@ -352,6 +422,12 @@ export default function DashboardPage() {
                       </div>
                     ))}
                   </div>
+                ) : !hasLocation ? (
+                  <p className="text-sm text-muted-foreground py-6 text-center">
+                    Choose a location to see low stock.
+                  </p>
+                ) : lowStockFailed ? (
+                  <LoadFailed message="Couldn't load low stock." onRetry={() => refetchLowStock()} />
                 ) : lowStockItems.length > 0 ? (
                   <div className="space-y-2 max-h-[300px] overflow-y-auto">
                     {lowStockItems.map((item) => {
@@ -416,7 +492,7 @@ export default function DashboardPage() {
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Clock className="h-4 w-4 text-muted-foreground" />
-                Recent Activity
+                Latest activity, all locations
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -432,6 +508,11 @@ export default function DashboardPage() {
                     </div>
                   ))}
                 </div>
+              ) : activityFailed ? (
+                <LoadFailed
+                  message="Couldn't load recent activity."
+                  onRetry={() => refetchActivity()}
+                />
               ) : activities.length > 0 ? (
                 <div className="space-y-1">
                   {activities.map((item) => {

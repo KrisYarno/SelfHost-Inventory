@@ -87,6 +87,16 @@ const config: Config = {
           border: "hsl(var(--negative-border))",
         },
       },
+      // `text-destructive` reads its own token (F0-10): the dark --destructive is
+      // a fill colour and unreadable as text. Every prefixed use (hover:, focus:,
+      // [&>svg]:) and any opacity modifier follows it; bg-/border-destructive
+      // keep colors.destructive. Class names are unchanged.
+      textColor: {
+        destructive: {
+          DEFAULT: "hsl(var(--destructive-text) / <alpha-value>)",
+          foreground: "hsl(var(--destructive-foreground))",
+        },
+      },
       fontFamily: {
         sans: ["var(--font-sans)", "system-ui", "sans-serif"],
         mono: ["var(--font-mono)", "Consolas", "monospace"],

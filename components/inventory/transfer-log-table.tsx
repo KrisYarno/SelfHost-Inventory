@@ -12,6 +12,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import { StatusBadge } from '@/components/ui/status-badge';
 import { ValueChip } from '@/components/ui/value-chip';
 
@@ -29,6 +30,14 @@ export interface TransferLogRow {
 
 interface TransferLogTableProps {
   logs: TransferLogRow[];
+  /**
+   * The read has not answered yet (F0-4). The empty copy is for a SUCCESSFUL
+   * empty answer only; while loading the table says it is loading.
+   */
+  isLoading?: boolean;
+  /** The read failed with nothing loaded (F0-4): say so, and offer Retry. */
+  isError?: boolean;
+  onRetry?: () => void;
 }
 
 /** A monospace id truncated with a copy-to-clipboard affordance. */
@@ -61,7 +70,36 @@ function CopyableId({ value, label = "Copy id" }: { value: string; label?: strin
   );
 }
 
-export function TransferLogTable({ logs }: TransferLogTableProps) {
+export function TransferLogTable({
+  logs,
+  isLoading = false,
+  isError = false,
+  onRetry,
+}: TransferLogTableProps) {
+  if (isLoading || isError) {
+    return (
+      <Card className="mt-4">
+        <CardHeader>
+          <CardTitle>Transfers</CardTitle>
+        </CardHeader>
+        <CardContent className="text-sm text-muted-foreground">
+          {isLoading ? (
+            <p role="status">Loading transfers…</p>
+          ) : (
+            <div className="flex flex-col items-start gap-3">
+              <p className="text-destructive">{"Couldn't load transfers."}</p>
+              {onRetry && (
+                <Button variant="outline" size="sm" onClick={onRetry}>
+                  Retry
+                </Button>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    );
+  }
+
   if (!logs.length) {
     return (
       <Card className="mt-4">

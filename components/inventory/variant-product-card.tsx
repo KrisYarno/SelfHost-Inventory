@@ -81,35 +81,36 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
           </div>
         </div>
 
-        {/* Quick actions - always visible on mobile, hover on desktop */}
-        <div className="flex gap-2 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 transition-opacity">
+        {/* Quick actions - always visible (F0-8). Three equal columns whose buttons
+            may shrink, so none is clipped at phone widths; icons only from xl. */}
+        <div className="grid grid-cols-3 gap-2">
           <Button
             size="sm"
             variant="outline"
-            className="flex-1 h-11 min-h-[44px]"
+            className="min-w-0 overflow-hidden px-2 h-11 min-h-[44px]"
             onClick={() => onStockIn(product.id)}
           >
-            <Plus className="h-4 w-4 mr-1" />
-            Stock In
+            <Plus className="hidden xl:inline-block h-4 w-4 mr-1" />
+            <span className="truncate">Stock In</span>
           </Button>
           <Button
             size="sm"
             variant="outline"
-            className="flex-1 h-11 min-h-[44px]"
+            className="min-w-0 overflow-hidden px-2 h-11 min-h-[44px]"
             onClick={() => onAdjust(product.id)}
           >
-            <Edit className="h-4 w-4 mr-1" />
-            Adjust
+            <Edit className="hidden xl:inline-block h-4 w-4 mr-1" />
+            <span className="truncate">Adjust</span>
           </Button>
           {onTransfer && (
             <Button
               size="sm"
               variant="outline"
-              className="flex-1 h-11 min-h-[44px]"
+              className="min-w-0 overflow-hidden px-2 h-11 min-h-[44px]"
               onClick={() => onTransfer(product.id)}
             >
-              <ArrowLeftRight className="h-4 w-4 mr-1" />
-              Transfer
+              <ArrowLeftRight className="hidden xl:inline-block h-4 w-4 mr-1" />
+              <span className="truncate">Transfer</span>
             </Button>
           )}
         </div>
@@ -131,12 +132,8 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
             )}
           </button>
 
-          <div
-            className={cn(
-              "overflow-hidden transition-all duration-200",
-              isExpanded ? "max-h-96" : "max-h-0"
-            )}
-          >
+          {/* No height clip, and not rendered while collapsed (F0-8). */}
+          {isExpanded && (
             <div className="space-y-2">
               {product.locations.length > 0 ? (
                 product.locations
@@ -198,7 +195,7 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
                 </div>
               )}
             </div>
-          </div>
+          )}
         </div>
 
       </div>

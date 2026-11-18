@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useMemo, useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { toast } from "sonner";
 import { ProductWithQuantity } from "@/types/product";
 import { ProductCard } from "./product-card";
 import { ProductCardMobile } from "./product-card-mobile";
@@ -35,7 +37,14 @@ export function ProductListOptimized({
   showInventoryActions = false,
   className,
 }: ProductListProps) {
-  const [search, setSearch] = useState("");
+  // F0-6: the search box follows the `search` URL value (global search links
+  // here with `?search=<name>`). The initialiser reads it on first mount, so
+  // there is no unfiltered first fetch; the effect below re-seeds it whenever
+  // the VALUE changes while the list is mounted. Typing never writes the URL.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const urlSearch = searchParams?.get("search") ?? "";
+  const [search, setSearch] = useState(urlSearch);
   const [page, setPage] = useState(1);
   const [stockFilter, setStockFilter] = useState<StockFilter>("all");
   const [isScrolled, setIsScrolled] = useState(false);
@@ -51,6 +60,11 @@ export function ProductListOptimized({
     sortOrder: 'asc',
   });
 
+  useEffect(() => {
+    setSearch(urlSearch);
+    setPage(1);
+  }, [urlSearch]);
+
   // Handle scroll for collapsing search bar on mobile
   useEffect(() => {
     const handleScroll = () => {
@@ -63,6 +77,9 @@ export function ProductListOptimized({
   const clearSearch = () => {
     setSearch("");
     setPage(1);
+    // Clearing the box drops a `search` param, so the URL never re-seeds a box
+    // the user just emptied.
+    if (searchParams?.has("search")) router.replace("/products");
   };
 
   const clearFilters = () => {
@@ -72,6 +89,12 @@ export function ProductListOptimized({
   };
 
   const total = data?.total || 0;
+  // F0-5: the list shows ONE page; every count says so. `from`/`to` come from
+  // the RESPONSE's page and pageSize, and the page's own row count.
+  const rowsOnPage = data?.products.length ?? 0;
+  const from = data ? (data.page - 1) * data.pageSize + 1 : 0;
+  const to = data ? (data.page - 1) * data.pageSize + rowsOnPage : 0;
+  const pageCount = data && data.pageSize > 0 ? Math.ceil(data.total / data.pageSize) : 0;
 
   // Apply client-side stock filtering
   const filteredProducts = useMemo(() => {
@@ -93,24 +116,6 @@ export function ProductListOptimized({
     });
   }, [data?.products, stockFilter, lowStockDefault]);
 
-  // Memoize filtered categories (case-insensitive keys, preserving first label)
-  const categories = useMemo(() => {
-    const categoryMap = new Map<string, { label: string; count: number }>();
-    filteredProducts.forEach((product) => {
-      const raw = product.baseName || "Uncategorized";
-      const key = raw.trim().toLowerCase() || "uncategorized";
-      const existing = categoryMap.get(key);
-      if (existing) {
-        existing.count += 1;
-      } else {
-        categoryMap.set(key, { label: raw, count: 1 });
-      }
-    });
-    return Array.from(categoryMap.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([, value]) => [value.label, value.count] as [string, number]);
-  }, [filteredProducts]);
-
   const handleExportCSV = () => {
     if (filteredProducts.length === 0) return;
     exportToCSV(
@@ -126,6 +131,7 @@ export function ProductListOptimized({
       ],
       `products-${new Date().toISOString().split("T")[0]}.csv`
     );
+    toast.success(`Exported ${filteredProducts.length} products from this page.`);
   };
 
   const activeFilterCount = stockFilter !== "all" ? 1 : 0;
@@ -184,27 +190,32 @@ export function ProductListOptimized({
             />
           )}
           {filteredProducts.length > 0 && (
-            <Button variant="outline" size="sm" onClick={handleExportCSV} className="shrink-0">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleExportCSV}
+              className="shrink-0"
+              aria-label="Export this page"
+            >
               <Download className="h-4 w-4" />
-              <span className="hidden sm:inline ml-1">Export CSV</span>
+              <span className="hidden sm:inline ml-1">Export this page</span>
             </Button>
           )}
         </div>
       </div>
 
-      {/* Results Summary */}
-      {(search || categories.length > 0 || stockFilter !== "all") && (
+      {/* Results Summary — this page out of the response's total; with a stock
+          filter on, how many of THIS page's rows match (the filter is
+          client-side, over one page). */}
+      {data && total > 0 && (
         <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground px-1 md:px-0">
           <span>
-            {filteredProducts.length} {filteredProducts.length === 1 ? "product" : "products"}
-            {(search || stockFilter !== "all") && " found"}
+            {stockFilter === "all"
+              ? `Showing ${from}–${to} of ${total} products`
+              : filteredProducts.length === 1
+                ? `1 of the ${rowsOnPage} products on this page matches`
+                : `${filteredProducts.length} of the ${rowsOnPage} products on this page match`}
           </span>
-          {categories.length > 0 && (
-            <>
-              <span>•</span>
-              <span>{categories.length} categories</span>
-            </>
-          )}
         </div>
       )}
 
@@ -217,6 +228,14 @@ export function ProductListOptimized({
           {[...Array(8)].map((_, i) => (
             <Skeleton key={i} className={isMobile ? "aspect-[3/4] sm:aspect-square" : "h-[180px]"} />
           ))}
+        </div>
+      ) : rowsOnPage > 0 && filteredProducts.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <p className="text-sm text-muted-foreground">
+            {pageCount > 1
+              ? "No products on this page match — try another page or clear the filter."
+              : "No products match — clear the filter."}
+          </p>
         </div>
       ) : filteredProducts.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12 text-center">

@@ -1,6 +1,7 @@
 "use client";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { ArrowDown, ArrowUp, Minus } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -16,6 +17,8 @@ interface MetricsCardProps {
   className?: string;
   unconfigured?: boolean;
   unconfiguredMessage?: string;
+  /** No answer yet: skeletons stand in for the value and sub-line (F0-3). */
+  loading?: boolean;
 }
 
 export function MetricsCard({
@@ -27,6 +30,7 @@ export function MetricsCard({
   className,
   unconfigured,
   unconfiguredMessage,
+  loading,
 }: MetricsCardProps) {
   return (
     <Card className={cn("", className)}>
@@ -39,7 +43,12 @@ export function MetricsCard({
         )}
       </CardHeader>
       <CardContent>
-        {unconfigured ? (
+        {loading ? (
+          <div className="space-y-2">
+            <Skeleton className="h-8 w-20" />
+            <Skeleton className="h-3 w-28" />
+          </div>
+        ) : unconfigured ? (
           <div>
             <div className="text-body-lg text-muted-foreground italic">Not configured</div>
             {unconfiguredMessage && (

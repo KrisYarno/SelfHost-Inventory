@@ -51,6 +51,9 @@ const currencyFormatter = new Intl.NumberFormat("en-US", {
 
 const formatCurrency = (value?: number) => currencyFormatter.format(value ?? 0);
 
+/** A tile with no answer (the read failed and nothing was loaded). */
+const NO_VALUE = "--";
+
 export default function AdminReportsPage() {
   const [dateRange, setDateRange] = useState<DateRange | undefined>({
     from: startOfDay(subDays(new Date(), 6)),
@@ -81,6 +84,10 @@ export default function AdminReportsPage() {
   const dailyActivityQuery = useReportsDailyActivity(scope);
 
   const metrics = metricsQuery.data?.metrics ?? null;
+  // F0-3: no tile shows a number before the answer. Skeletons while the query is
+  // pending; `--` and one Retry line when it failed with nothing loaded.
+  const metricsPending = metricsQuery.isPending;
+  const metricsFailed = metricsQuery.isError && metricsQuery.data === undefined;
   const inventoryTrends = inventoryTrendsQuery.data ?? [];
   const dailyActivity = dailyActivityQuery.data ?? [];
   // Preserve prior default: true until metrics load reporting zero recent activity.
@@ -275,8 +282,9 @@ export default function AdminReportsPage() {
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
             <MetricsCard
               title="Order Now"
-              value={metrics?.orderNowCount || 0}
-              subtitle={`${metrics?.orderSoonCount || 0} order soon`}
+              loading={metricsPending}
+              value={metrics ? metrics.orderNowCount || 0 : NO_VALUE}
+              subtitle={metrics ? `${metrics.orderSoonCount || 0} order soon` : undefined}
               icon={<ShoppingCart className="h-4 w-4" />}
               className={
                 metrics?.orderNowCount && metrics.orderNowCount > 0
@@ -286,8 +294,9 @@ export default function AdminReportsPage() {
             />
             <MetricsCard
               title="Health Score"
-              value={`${metrics?.reorderHealthScore || 0}%`}
-              subtitle="products in healthy stock"
+              loading={metricsPending}
+              value={metrics ? `${metrics.reorderHealthScore || 0}%` : NO_VALUE}
+              subtitle={metrics ? "products in healthy stock" : undefined}
               icon={<Activity className="h-4 w-4" />}
               className={
                 metrics?.reorderHealthScore !== undefined
@@ -301,19 +310,28 @@ export default function AdminReportsPage() {
             />
             <MetricsCard
               title="Monthly Carrying Cost"
-              value={formatCurrency(metrics?.monthlyCarryingCost)}
-              subtitle={`${formatCurrency(metrics?.totalInventoryCostValue)} total value`}
+              loading={metricsPending}
+              value={metrics ? formatCurrency(metrics.monthlyCarryingCost) : NO_VALUE}
+              subtitle={
+                metrics ? `${formatCurrency(metrics.totalInventoryCostValue)} total value` : undefined
+              }
               icon={<DollarSign className="h-4 w-4" />}
-              unconfigured={!metrics?.totalInventoryCostValue || metrics.totalInventoryCostValue === 0}
+              unconfigured={
+                !!metrics &&
+                (!metrics.totalInventoryCostValue || metrics.totalInventoryCostValue === 0)
+              }
               unconfiguredMessage="Set product costs to enable this metric"
             />
             <MetricsCard
               title="Dead Stock Value"
-              value={formatCurrency(metrics?.deadStockValue)}
+              loading={metricsPending}
+              value={metrics ? formatCurrency(metrics.deadStockValue) : NO_VALUE}
               subtitle={
-                metrics?.totalInventoryCostValue && metrics.totalInventoryCostValue > 0
-                  ? `${Math.round(((metrics.deadStockValue || 0) / metrics.totalInventoryCostValue) * 100)}% of inventory`
-                  : "No movement in 90 days"
+                !metrics
+                  ? undefined
+                  : metrics.totalInventoryCostValue && metrics.totalInventoryCostValue > 0
+                    ? `${Math.round(((metrics.deadStockValue || 0) / metrics.totalInventoryCostValue) * 100)}% of inventory`
+                    : "No movement in 90 days"
               }
               icon={<Archive className="h-4 w-4" />}
               className={
@@ -321,17 +339,36 @@ export default function AdminReportsPage() {
                   ? "border-orange-500 bg-orange-50 dark:bg-orange-950/20"
                   : ""
               }
-              unconfigured={(!metrics?.deadStockValue || metrics.deadStockValue === 0) && (!metrics?.totalInventoryCostValue || metrics.totalInventoryCostValue === 0)}
+              unconfigured={
+                !!metrics &&
+                (!metrics.deadStockValue || metrics.deadStockValue === 0) &&
+                (!metrics.totalInventoryCostValue || metrics.totalInventoryCostValue === 0)
+              }
               unconfiguredMessage="Set product costs to enable this metric"
             />
             <MetricsCard
               title="Stockout Risk"
-              value={metrics?.stockoutRiskCount || 0}
-              subtitle={`Avg ${metrics?.daysOfSupplyAvg || 0} days of supply (outflow-based — includes transfers and corrections) · trend tracks the low-stock count`}
+              loading={metricsPending}
+              value={metrics ? metrics.stockoutRiskCount || 0 : NO_VALUE}
+              subtitle={
+                !metrics
+                  ? undefined
+                  : metrics.daysOfSupplyAvg === null
+                    ? "Days of supply unknown (no measured outflow) · trend tracks the low-stock count"
+                    : `Avg ${metrics.daysOfSupplyAvg} days of supply (outflow-based — excludes transfers, includes corrections) · trend tracks the low-stock count`
+              }
               icon={<AlertTriangle className="h-4 w-4" />}
               trend={metrics?.lowStockTrend}
             />
           </div>
+          {metricsFailed && (
+            <div className="flex items-center gap-3 text-sm">
+              <span className="text-destructive">{"Couldn't load the report."}</span>
+              <Button variant="outline" size="sm" onClick={() => metricsQuery.refetch()}>
+                Retry
+              </Button>
+            </div>
+          )}
           {!hasRecentActivity && metrics && (
             <div className="flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 dark:border-blue-900 dark:bg-blue-950/30 px-4 py-3 text-sm text-blue-800 dark:text-blue-300">
               <Info className="h-4 w-4 shrink-0" />

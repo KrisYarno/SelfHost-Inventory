@@ -13,12 +13,18 @@ import { useCSRF } from "@/hooks/use-csrf";
 import { cn } from "@/lib/utils";
 import type { ExternalOrder, PlatformType, InternalOrderStatus } from "@/types/external-orders";
 
+// "Load More" asks for 50 more (F0-7). The API's pageSize is unbounded, so the
+// client caps it: past 200, search or filter narrows the list instead.
+const ORDERS_PAGE_STEP = 50;
+const ORDERS_PAGE_CAP = 200;
+
 export default function OrdersPage() {
   // State for filters
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [platform, setPlatform] = useState<PlatformType | "ALL">("ALL");
   const [status, setStatus] = useState<InternalOrderStatus | "all">("all");
   const [searchQuery, setSearchQuery] = useState("");
+  const [pageSize, setPageSize] = useState(ORDERS_PAGE_STEP);
   const [selectedOrder, setSelectedOrder] = useState<ExternalOrder | null>(null);
   const [isSheetOpen, setIsSheetOpen] = useState(false);
   const { token: csrfToken } = useCSRF();
@@ -41,19 +47,41 @@ export default function OrdersPage() {
     error: ordersError,
     refetch,
     isFetching,
+    isPlaceholderData,
   } = useExternalOrders({
     companyId: selectedCompanyId || undefined,
     platform,
     status,
     search: searchQuery,
     page: 1,
-    pageSize: 50,
+    pageSize,
   });
 
   // Memoized so the identity is stable across renders — the rebind effect below
   // depends on `orders`, and a fresh array each render would re-run it endlessly.
   const orders = useMemo(() => ordersData?.orders || [], [ordersData?.orders]);
   const hasMore = ordersData?.hasMore || false;
+  const atCap = pageSize >= ORDERS_PAGE_CAP;
+
+  // Any change of what is listed starts again at the first 50. Reset in the
+  // handlers (not an effect), so the new filter is never fetched at the old size.
+  const resetPageSize = () => setPageSize(ORDERS_PAGE_STEP);
+  const handleCompanyChange = (companyId: string) => {
+    setSelectedCompanyId(companyId);
+    resetPageSize();
+  };
+  const handlePlatformChange = (next: PlatformType | "ALL") => {
+    setPlatform(next);
+    resetPageSize();
+  };
+  const handleStatusChange = (next: InternalOrderStatus | "all") => {
+    setStatus(next);
+    resetPageSize();
+  };
+  const handleSearchChange = (query: string) => {
+    setSearchQuery(query);
+    resetPageSize();
+  };
 
   // Handle order selection
   const handleOrderSelect = useCallback((order: ExternalOrder) => {
@@ -126,13 +154,13 @@ export default function OrdersPage() {
       <OrderFilters
         companies={companies}
         selectedCompanyId={selectedCompanyId}
-        onCompanyChange={setSelectedCompanyId}
+        onCompanyChange={handleCompanyChange}
         platform={platform}
-        onPlatformChange={setPlatform}
+        onPlatformChange={handlePlatformChange}
         status={status}
-        onStatusChange={setStatus}
+        onStatusChange={handleStatusChange}
         searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
+        onSearchChange={handleSearchChange}
       />
 
       {/* Orders List */}
@@ -196,14 +224,27 @@ export default function OrdersPage() {
               ))}
             </div>
 
-            {/* Load More (if needed) */}
-            {hasMore && (
-              <div className="flex justify-center pt-4">
-                <Button variant="outline" size="sm">
-                  Load More
-                </Button>
-              </div>
-            )}
+            {/* Load More: 50 more per click, the current list kept on screen
+                while the bigger page loads; at the cap, a sentence instead. */}
+            {hasMore &&
+              (atCap && !isPlaceholderData ? (
+                <p className="pt-4 text-center text-sm text-muted-foreground">
+                  Showing the newest 200 — search or filter to find older orders.
+                </p>
+              ) : (
+                <div className="flex justify-center pt-4">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isPlaceholderData}
+                    onClick={() =>
+                      setPageSize((size) => Math.min(size + ORDERS_PAGE_STEP, ORDERS_PAGE_CAP))
+                    }
+                  >
+                    {isPlaceholderData ? "Loading…" : "Load More"}
+                  </Button>
+                </div>
+              ))}
 
             {/* Results summary */}
             <div className="text-center text-sm text-muted-foreground py-4">

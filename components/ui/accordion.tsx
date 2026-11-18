@@ -80,6 +80,8 @@ export function AccordionItem({ value, children, className }: AccordionItemProps
   }
 
   const isOpen = context.value.includes(value);
+  // Names the content for the trigger's aria-controls (F0-8).
+  const contentId = React.useId();
 
   return (
     <div
@@ -94,6 +96,7 @@ export function AccordionItem({ value, children, className }: AccordionItemProps
           return React.cloneElement(child as React.ReactElement<any>, {
             isOpen,
             value,
+            contentId,
           });
         }
         return child;
@@ -107,6 +110,7 @@ interface AccordionTriggerProps {
   className?: string;
   isOpen?: boolean;
   value?: string;
+  contentId?: string;
 }
 
 export function AccordionTrigger({ 
@@ -114,6 +118,7 @@ export function AccordionTrigger({
   className,
   isOpen: isOpenProp,
   value,
+  contentId,
 }: AccordionTriggerProps) {
   const context = React.useContext(AccordionContext);
   const isOpen = isOpenProp ?? false;
@@ -131,6 +136,9 @@ export function AccordionTrigger({
         className
       )}
       onClick={handleClick}
+      aria-expanded={isOpen}
+      // Collapsed content is not rendered, so there is nothing to point at then.
+      aria-controls={isOpen ? contentId : undefined}
     >
       {children}
       <ChevronDown
@@ -147,20 +155,23 @@ interface AccordionContentProps {
   children: React.ReactNode;
   className?: string;
   isOpen?: boolean;
+  contentId?: string;
 }
 
+/**
+ * Open content renders at its full height — no max-height clip, so a long group
+ * is never cut off (F0-8). Collapsed content is not rendered at all, so nothing
+ * hidden stays focusable.
+ */
 export function AccordionContent({ 
   children, 
   className,
   isOpen = false,
+  contentId,
 }: AccordionContentProps) {
+  if (!isOpen) return null;
   return (
-    <div
-      className={cn(
-        'overflow-hidden transition-all duration-300 ease-in-out',
-        isOpen ? 'max-h-[2000px]' : 'max-h-0'
-      )}
-    >
+    <div id={contentId}>
       <div className={cn('px-4 pb-4', className)}>
         {children}
       </div>

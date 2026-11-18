@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { Search, Package, Loader2 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -78,7 +79,13 @@ export function GlobalSearch() {
   }, [open]);
 
   // Search products
-  const { data: productData, isFetching } = useQuery({
+  const {
+    data: productData,
+    isFetching,
+    isSuccess,
+    isError,
+    refetch,
+  } = useQuery({
     queryKey: ["global-search-products", debouncedQuery],
     queryFn: async () => {
       if (!debouncedQuery.trim()) return { products: [] };
@@ -104,7 +111,7 @@ export function GlobalSearch() {
           id: `product-${p.id}`,
           label: p.name,
           description: p.sku || undefined,
-          href: `/products`,
+          href: `/products?search=${encodeURIComponent(p.name)}`,
           type: "product",
           icon: Package,
         });
@@ -146,8 +153,11 @@ export function GlobalSearch() {
     [results, selectedIndex, navigateToResult]
   );
 
+  // "No results" is an ANSWER: only a search that succeeded may give it. A failed
+  // search says so instead (F0-6).
   const showEmpty =
-    debouncedQuery.trim().length > 0 && !isFetching && results.length === 0;
+    debouncedQuery.trim().length > 0 && isSuccess && !isFetching && results.length === 0;
+  const showError = debouncedQuery.trim().length > 0 && isError && !isFetching;
 
   return (
     <>
@@ -169,7 +179,8 @@ export function GlobalSearch() {
         <DialogContent className="sm:max-w-lg p-0 gap-0 overflow-hidden">
           <DialogTitle className="sr-only">Search</DialogTitle>
           {/* Search input */}
-          <div className="flex items-center border-b border-border px-3">
+          {/* pr-10 keeps the spinner and the text clear of the dialog's close button. */}
+          <div className="flex items-center border-b border-border pl-3 pr-10">
             <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
             <Input
               ref={inputRef}
@@ -190,6 +201,16 @@ export function GlobalSearch() {
             {showEmpty && (
               <div className="py-8 text-center text-sm text-muted-foreground">
                 No results found for &ldquo;{debouncedQuery}&rdquo;
+              </div>
+            )}
+
+            {/* Error state */}
+            {showError && (
+              <div className="flex flex-col items-center gap-3 py-8 text-center text-sm">
+                <p className="text-muted-foreground">Search unavailable — try again.</p>
+                <Button variant="outline" size="sm" onClick={() => refetch()}>
+                  Retry
+                </Button>
               </div>
             )}
 
