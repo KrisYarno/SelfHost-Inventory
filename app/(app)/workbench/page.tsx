@@ -23,7 +23,7 @@ import {
   type MoveResponse,
   type MoveTarget,
 } from "@/components/workbench/move-batch-dialog";
-import { WCOrderSelector } from "@/components/workbench/wc-order-selector";
+import { WCOrderSelector, noLocationSentence } from "@/components/workbench/wc-order-selector";
 import { UnmappedItemsAlert } from "@/components/workbench/unmapped-items-alert";
 import { FloatingCartButton } from "@/components/workbench/floating-cart-button";
 import { MobileCartSheet } from "@/components/workbench/mobile-cart-sheet";
@@ -100,7 +100,23 @@ export default function WorkbenchPage() {
   // `selectedLocation` rides beside the id (R7-14): the toast names the LEDGER
   // location the completion deducted at, and a name read inside a callback would
   // be read from a render this callback no longer belongs to.
-  const { selectedLocationId, selectedLocation } = useLocation();
+  const {
+    selectedLocationId,
+    selectedLocation,
+    locations,
+    isLoading: locationsLoading,
+    loadFailed: locationsLoadFailed,
+  } = useLocation();
+  /**
+   * Facelift F1-9 / F1-15 (F0 FD2-3): with no location selected, the list's
+   * state says why — still loading, failed, none configured, or none chosen
+   * (`noLocationSentence`, the location chip's own states).
+   */
+  const locationList = {
+    isLoading: locationsLoading,
+    loadFailed: locationsLoadFailed,
+    count: locations.length,
+  };
   const { token: csrfToken } = useCSRF();
   const lowStockDefault = useLowStockDefault();
   const queryClient = useQueryClient();
@@ -779,8 +795,12 @@ export default function WorkbenchPage() {
    * is still the current one (FR2-1) — a rebuild whose selection has moved on,
    * including a clear-and-reselect of the SAME order, holds nothing up.
    */
+  // F1-10 (F0 FD2-4): a build that read no one location's rows (null) is not
+  // built here either — even with no location selected (null/null).
   const rebuildPending =
-    selectedExternalOrder !== null && selectedExternalOrder.builtAtLocationId !== selectedLocationId;
+    selectedExternalOrder !== null &&
+    (selectedExternalOrder.builtAtLocationId !== selectedLocationId ||
+      selectedExternalOrder.builtAtLocationId === null);
   const rebuildInFlightRef = useRef<{ target: number | null; seq: number } | null>(null);
   const [rebuildSeq, setRebuildSeq] = useState<number | null>(null);
   const rebuildLive = rebuildSeq !== null && rebuildSeq === selectionSeq;
@@ -875,7 +895,11 @@ export default function WorkbenchPage() {
   };
 
   const handleQuantityConfirm = (quantity: number) => {
-    if (orderUpdating) return;
+    // F1-11 (F0 FD2-5): the picker closes either way, so a refused add says why.
+    if (orderUpdating) {
+      toast.info("This order is updating — add items once it's done.");
+      return;
+    }
     if (selectedProduct) {
       // Manual additions always use 'manual' source
       addItem(selectedProduct, quantity, 'manual');
@@ -990,6 +1014,7 @@ export default function WorkbenchPage() {
                         selectedOrder={selectedExternalOrder}
                         onClear={clearExternalOrder}
                         noLocation={selectedLocationId === null}
+                        locationList={locationList}
                         stockLoading={!stockArrived && !stockFailed}
                         stockFailed={stockFailed}
                         onRetryStock={refetchProducts}
@@ -1123,11 +1148,28 @@ export default function WorkbenchPage() {
                 </div>
               )}
             </div>
-            {loading ? (
+            {/* F1-15 (F0 FD1-3): with no location there is no stock to show —
+                the location ladder says why (never another location's rows).
+                A failed read with nothing loaded says so, with Retry; a failed
+                refresh over loaded rows keeps the rows. */}
+            {selectedLocationId === null ? (
+              <div className="text-center py-12">
+                <p className="text-muted-foreground">
+                  {noLocationSentence(locationList, "Choose a location to see products.")}
+                </p>
+              </div>
+            ) : loading ? (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
                 {Array.from({ length: 12 }).map((_, i) => (
                   <Skeleton key={i} className="h-40 rounded-lg" />
                 ))}
+              </div>
+            ) : productsError && productsData === undefined ? (
+              <div className="flex flex-col items-center gap-3 py-12 text-center">
+                <p className="text-sm text-destructive">{"Couldn't load products."}</p>
+                <Button variant="outline" size="sm" onClick={() => void refetchProducts()}>
+                  Retry
+                </Button>
               </div>
             ) : filteredProducts.length === 0 ? (
               <div className="text-center py-12">
@@ -1215,6 +1257,7 @@ export default function WorkbenchPage() {
                     selectedOrder={selectedExternalOrder}
                     onClear={clearExternalOrder}
                     noLocation={selectedLocationId === null}
+                    locationList={locationList}
                     stockLoading={!stockArrived && !stockFailed}
                     stockFailed={stockFailed}
                     onRetryStock={refetchProducts}

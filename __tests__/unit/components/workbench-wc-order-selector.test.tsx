@@ -33,7 +33,7 @@ jest.mock("@/hooks/use-external-orders", () => ({
   }),
 }));
 
-import { WCOrderSelector } from "@/components/workbench/wc-order-selector";
+import { WCOrderSelector, noLocationSentence } from "@/components/workbench/wc-order-selector";
 
 const renderSelector = (stockLoading: boolean, stockFailed?: boolean) => {
   const onOrderSelected = jest.fn();
@@ -97,9 +97,11 @@ describe("FR1-1 (e) — order rows when the stock read failed", () => {
 
 // Facelift F0 FR2-6 (REV 7, QA-3): with no location selected there is no
 // "here" and no stock read in flight, so "Loading stock…" was untrue — it would
-// never finish. The rows wait and say where to choose one.
+// never finish. The rows wait and say why. F1-9 replaced F0's sentence (`Choose
+// a location at the top of the page.`, false on desktop, where the chip is in
+// the sidebar) with the loaded-list one: `Choose a location first.`
 describe("FR2-6 — order rows with no location selected", () => {
-  it("the rows are disabled and read `Choose a location at the top of the page.`", async () => {
+  it("the rows are disabled and read `Choose a location first.`", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     const onOrderSelected = jest.fn();
     render(
@@ -116,7 +118,7 @@ describe("FR2-6 — order rows with no location selected", () => {
     );
 
     expect(orderRow()).toBeDisabled();
-    expect(orderRow()).toHaveTextContent("Choose a location at the top of the page.");
+    expect(orderRow()).toHaveTextContent("Choose a location first.");
     expect(orderRow()).not.toHaveTextContent("Loading stock…");
     expect(orderRow()).not.toHaveTextContent("Select");
 
@@ -130,7 +132,7 @@ describe("FR2-6 — order rows with no location selected", () => {
     );
 
     expect(orderRow()).toBeDisabled();
-    expect(orderRow()).toHaveTextContent("Choose a location at the top of the page.");
+    expect(orderRow()).toHaveTextContent("Choose a location first.");
   });
 
   it("over a failed stock read too, the location comes first", () => {
@@ -145,7 +147,7 @@ describe("FR2-6 — order rows with no location selected", () => {
     );
 
     expect(orderRow()).toBeDisabled();
-    expect(orderRow()).toHaveTextContent("Choose a location at the top of the page.");
+    expect(orderRow()).toHaveTextContent("Choose a location first.");
     expect(orderRow()).not.toHaveTextContent("Stock couldn't be loaded");
   });
 });
@@ -202,5 +204,78 @@ describe("FR2-5 — the stock-failed line and its Retry", () => {
     renderWith(over);
     expect(lineSentences()).toHaveLength(0);
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+});
+
+// Facelift F1-9 (plan 2026-11-18-facelift-f1, F0 FD2-3; G1-18): with no
+// location, the rows say WHY — the location chip's own states, first match
+// wins. F0's one sentence also showed while the locations were still loading
+// or had failed, where there was nothing to choose from yet.
+describe("F1-9 — the order rows' location states", () => {
+  type List = { isLoading: boolean; loadFailed: boolean; count: number };
+  const renderWithList = (locationList: List) =>
+    render(
+      <WCOrderSelector
+        onOrderSelected={jest.fn()}
+        selectedOrder={null}
+        onClear={jest.fn()}
+        noLocation
+        locationList={locationList}
+      />
+    );
+
+  it.each<[string, List, string]>([
+    ["loading", { isLoading: true, loadFailed: false, count: 0 }, "Loading locations…"],
+    // A retry of a failed read is loading: the first match wins.
+    ["loading over a failed read", { isLoading: true, loadFailed: true, count: 0 }, "Loading locations…"],
+    ["failed, nothing loaded", { isLoading: false, loadFailed: true, count: 0 }, "Couldn't load locations."],
+    ["zero locations", { isLoading: false, loadFailed: false, count: 0 }, "No locations configured."],
+    ["loaded, none selected", { isLoading: false, loadFailed: false, count: 2 }, "Choose a location first."],
+    // A failed refresh over a LOADED list keeps the list, as the chip does.
+    ["a failed refresh over a loaded list", { isLoading: false, loadFailed: true, count: 2 }, "Choose a location first."],
+  ])("%s: the rows are disabled and read the state's sentence", (_label, list, sentence) => {
+    renderWithList(list);
+    expect(orderRow()).toBeDisabled();
+    expect(orderRow()).toHaveTextContent(sentence);
+    for (const other of [
+      "Loading locations…",
+      "Couldn't load locations.",
+      "No locations configured.",
+      "Choose a location first.",
+      "Choose a location at the top of the page.",
+      "Loading stock…",
+      "Select",
+    ].filter((s) => s !== sentence)) {
+      expect(orderRow()).not.toHaveTextContent(other);
+    }
+  });
+
+  it("with a location, the list's state is not read: the rows read the stock state", () => {
+    render(
+      <WCOrderSelector
+        onOrderSelected={jest.fn()}
+        selectedOrder={null}
+        onClear={jest.fn()}
+        locationList={{ isLoading: true, loadFailed: false, count: 0 }}
+      />
+    );
+    expect(orderRow()).toBeEnabled();
+    expect(orderRow()).toHaveTextContent("Select");
+    expect(orderRow()).not.toHaveTextContent("Loading locations…");
+  });
+});
+
+describe("F1-9 — `noLocationSentence`, the ladder the rows and the workbench grid share", () => {
+  it("first match wins: loading, failed with nothing loaded, zero, then the caller's sentence", () => {
+    const unselected = "Choose a location to see products.";
+    expect(noLocationSentence({ isLoading: true, loadFailed: true, count: 0 }, unselected)).toBe("Loading locations…");
+    expect(noLocationSentence({ isLoading: false, loadFailed: true, count: 0 }, unselected)).toBe(
+      "Couldn't load locations."
+    );
+    expect(noLocationSentence({ isLoading: false, loadFailed: false, count: 0 }, unselected)).toBe(
+      "No locations configured."
+    );
+    expect(noLocationSentence({ isLoading: false, loadFailed: false, count: 3 }, unselected)).toBe(unselected);
+    expect(noLocationSentence({ isLoading: false, loadFailed: true, count: 3 }, unselected)).toBe(unselected);
   });
 });

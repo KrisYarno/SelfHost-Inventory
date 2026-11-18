@@ -221,6 +221,34 @@ describe("F0-5 — the stock filter is a count of this page", () => {
   });
 });
 
+// Facelift F1-13 (plan 2026-11-18-facelift-f1; F0 QA-6.1): a page of ONE row
+// whose one row matches read `1 of the 1 products on this page matches`.
+describe("F1-13 — the one product on this page", () => {
+  beforeEach(() => {
+    mockIsMobile = true;
+  });
+
+  it("a one-row page whose row matches: `The one product on this page matches`", async () => {
+    rows = catalogue(1, [1]);
+    renderList();
+    await screen.findByText("Showing 1–1 of 1 product");
+    fireEvent.click(screen.getByRole("button", { name: "filter: out of stock" }));
+    expect(screen.getByText("The one product on this page matches")).toBeInTheDocument();
+    expect(screen.queryByText(/of the 1 products/)).toBeNull();
+  });
+
+  it("the last page holding one row reads the same", async () => {
+    rows = catalogue(26, [26]);
+    renderList();
+    await screen.findByText("Showing 1–25 of 26 products");
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await screen.findByText("Showing 26–26 of 26 products");
+    fireEvent.click(screen.getByRole("button", { name: "filter: out of stock" }));
+    expect(screen.getByText("The one product on this page matches")).toBeInTheDocument();
+    expect(screen.queryByText(/of the 1 products/)).toBeNull();
+  });
+});
+
 describe("F0-5 — export says it is this page", () => {
   it("the button reads `Export this page` (and carries that aria-label); the toast names the count", async () => {
     renderList();

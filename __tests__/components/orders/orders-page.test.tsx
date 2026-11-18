@@ -412,3 +412,53 @@ describe("F1-7 — the orders list", () => {
     expect(await screen.findByText("No Orders Found")).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Facelift F1-17 (plan 2026-11-18-facelift-f1; F0 GR-10 note, G1-14) — the
+// Orders search reset. The page debounces its own search (300 ms) and passes
+// the debounced value with `debounceSearch: false`; a NEW search starts again
+// at the first 50 in the same render its debounced value changes. Before, each
+// keystroke reset the size at once (the list shrank before the search applied),
+// and a Load More inside the debounce window sent the new search at the bigger
+// size.
+// ---------------------------------------------------------------------------
+
+describe("F1-17 — the Orders search reset", () => {
+  it("no request carries the new search at the old size (a Load More inside the debounce window)", async () => {
+    renderPage();
+    await loaded(50);
+
+    // Type, then Load More before the 300 ms debounce has run.
+    fireEvent.click(screen.getByRole("button", { name: "change search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Load More" }));
+    await waitFor(() => expect(lastOrderRequest().searchParams.get("search")).toBe("10"));
+    await act(async () => {});
+
+    const withNewSearch = orderRequests().filter((u) => u.searchParams.get("search") === "10");
+    expect(withNewSearch.length).toBeGreaterThan(0);
+    for (const u of withNewSearch) {
+      expect(u.searchParams.get("pageSize")).toBe("50");
+    }
+    await loaded(50);
+  });
+
+  it("a keystroke does not shrink the list before the search applies", async () => {
+    renderPage();
+    await loaded(50);
+    fireEvent.click(screen.getByRole("button", { name: "Load More" }));
+    await loaded(100);
+    const before = orderRequests().length;
+
+    fireEvent.click(screen.getByRole("button", { name: "change search" }));
+    // Still the 100 listed under the old search: nothing has changed yet.
+    expect(screen.getAllByTestId("order-card")).toHaveLength(100);
+    expect(orderRequests()).toHaveLength(before);
+
+    // The debounced search applies at the first 50, in one request.
+    await waitFor(() => expect(lastOrderRequest().searchParams.get("search")).toBe("10"));
+    expect(orderRequests().slice(before).map((u) => [u.searchParams.get("search"), u.searchParams.get("pageSize")])).toEqual([
+      ["10", "50"],
+    ]);
+    await loaded(50);
+  });
+});

@@ -13,9 +13,17 @@ import type {
 /**
  * Custom hook for fetching external orders with filtering and pagination
  * Follows the same pattern as use-products.ts
+ *
+ * Facelift F1-17: `debounceSearch: false` reads `filters.search` as given, for a
+ * caller that debounces it itself (the Orders page, which resets its page size
+ * in the same render its debounced search changes).
  */
-export function useExternalOrders(filters: ExternalOrderFilters) {
-  const debouncedSearch = useDebounce(filters.search || "", 300);
+export function useExternalOrders(
+  filters: ExternalOrderFilters,
+  { debounceSearch = true }: { debounceSearch?: boolean } = {}
+) {
+  const debounced = useDebounce(filters.search || "", 300);
+  const debouncedSearch = debounceSearch ? debounced : filters.search || "";
 
   const queryKey = [
     "external-orders",

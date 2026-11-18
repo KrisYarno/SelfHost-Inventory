@@ -191,7 +191,7 @@ export function QuickAdjustDialog({
 
   const blockers: string[] = [];
   if (selectedLocationId === null) {
-    blockers.push("Close this and choose a location at the top of the page.");
+    blockers.push("Close this and choose a location first.");
   }
   if (q === null || q === 0) blockers.push("Enter how many units.");
   if (isRemove && knownStock !== null && q !== null && q > knownStock) {
@@ -294,7 +294,7 @@ export function QuickAdjustDialog({
   // Offline is a wait, not an error: MUTED, like the read in flight.
   const countMessage: { text: string; tone: "destructive" | "muted" | "warning" } | null =
     selectedLocationId === null
-      ? { text: "Close this and choose a location at the top of the page.", tone: "destructive" }
+      ? { text: "Close this and choose a location first.", tone: "destructive" }
       : countRead === "reading"
         ? { text: "Reading stock…", tone: "muted" }
         : countRead === "offline"

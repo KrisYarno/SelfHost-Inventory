@@ -47,9 +47,10 @@ export function FloatingCartButton({
         {itemCount > 0 ? (itemCount > 99 ? "99+" : itemCount) : "!"}
       </Badge>
       <span className="sr-only">
+        {/* F1-12 (F0 QA-6.5): singular forms. */}
         {skippedCount === 0
-          ? `View cart (${itemCount} items)`
-          : `View order (${itemCount} items, ${skippedCount} not deducted)`}
+          ? `View cart (${itemCount} ${itemCount === 1 ? "item" : "items"})`
+          : `View order (${itemCount} ${itemCount === 1 ? "item" : "items"}, ${skippedCount} not deducted)`}
       </span>
     </Button>
   );

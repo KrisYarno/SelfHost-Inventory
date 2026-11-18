@@ -42,8 +42,10 @@ const MAIN: Loc = { id: 1, name: "Main" };
 const OVERFLOW: Loc = { id: 2, name: "Overflow" };
 const BACK: Loc = { id: 3, name: "Back" };
 let locationContext: { selectedLocationId: number | null; selectedLocation: Loc | null };
+// Facelift F1-9 / F1-15: the page also reads the location LIST's state (why
+// there is no location). Here the list has loaded, with these three.
 jest.mock("@/contexts/location-context", () => ({
-  useLocation: () => locationContext,
+  useLocation: () => ({ locations: [MAIN, OVERFLOW, BACK], isLoading: false, loadFailed: false, ...locationContext }),
 }));
 jest.mock("@/hooks/use-low-stock-default", () => ({ useLowStockDefault: () => 10 }));
 
@@ -78,6 +80,8 @@ type SelectorProps = {
 };
 let selectorProps: SelectorProps | null;
 jest.mock("@/components/workbench/wc-order-selector", () => ({
+  // Facelift F1-15: the page's grid reads the REAL location ladder.
+  noLocationSentence: jest.requireActual("@/components/workbench/wc-order-selector").noLocationSentence,
   WCOrderSelector: (props: SelectorProps) => {
     selectorProps = props;
     return null;

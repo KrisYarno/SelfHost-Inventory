@@ -373,7 +373,7 @@ describe("the stock chip", () => {
     renderHost();
     expect(stockChip()).toHaveTextContent("No location selected.");
     await user.type(quantityField(), "3");
-    expect(message()).toBe("Close this and choose a location at the top of the page.");
+    expect(message()).toBe("Close this and choose a location first.");
     expect(actionButton()).toBeDisabled();
     expect(summary()).toBe("Remove 3 units of AOD 2mg");
     // No location, no stock read.
@@ -808,9 +808,9 @@ describe("the blockers", () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     mockLocation.selectedLocationId = null;
     renderHost();
-    expect(message()).toBe("Close this and choose a location at the top of the page.");
+    expect(message()).toBe("Close this and choose a location first.");
     await user.type(quantityField(), "3");
-    expect(message()).toBe("Close this and choose a location at the top of the page.");
+    expect(message()).toBe("Close this and choose a location first.");
     expect(screen.getAllByTestId("adjust-message")).toHaveLength(1);
   });
 });
@@ -2108,7 +2108,7 @@ describe("the count's stock line and messages (first that applies)", () => {
     renderHost();
     await tapCount(user);
     expect(stockChip()).toHaveTextContent("No location selected.");
-    expect(message()).toBe("Close this and choose a location at the top of the page.");
+    expect(message()).toBe("Close this and choose a location first.");
     expect(screen.getByTestId("adjust-message")).toHaveClass("text-destructive");
     expect(summary()).toBe("Count AOD 2mg");
     // Row 128 (2): no record can be known with no location, so nothing can be typed.
@@ -2132,7 +2132,7 @@ describe("the count's stock line and messages (first that applies)", () => {
       mockLocation.selectedLocationId = null;
     });
     expect(stockChip()).toHaveTextContent("No location selected.");
-    expect(message()).toBe("Close this and choose a location at the top of the page.");
+    expect(message()).toBe("Close this and choose a location first.");
     expect(summary()).toBe("Count 3 units of AOD 2mg");
     expect(actionButton()).toHaveTextContent(/^Save count$/);
     expect(actionButton()).toBeDisabled();

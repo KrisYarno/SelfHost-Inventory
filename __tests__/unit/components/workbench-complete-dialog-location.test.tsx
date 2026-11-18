@@ -181,6 +181,32 @@ describe("FR2-2 — the dialog checks the location itself", () => {
     expect(screen.getByText("This order is being updated for Main — wait a moment.")).toBeInTheDocument();
   });
 
+  // Facelift F1-10 (F0 FD2-4): the null/null edge — a build that read no one
+  // location's rows, with no location selected. `null !== null` is false, so the
+  // check used to call that cart built here; it is stated outright now.
+  it("F1-10 — null/null: a build from no one location's rows, with no location selected, is not built here", async () => {
+    act(() => {
+      useWorkbench.getState().selectExternalOrder(ORDER, ROWS, null);
+    });
+    mockLocation = { selectedLocationId: null, selectedLocation: null };
+    renderDialog();
+
+    expect(action("Complete & Fulfill")).toBeDisabled();
+    expect(
+      screen.getByText("This order is being updated for the selected location — wait a moment.")
+    ).toBeInTheDocument();
+
+    // The submit handler refuses as well, past the disabled action.
+    const node = action("Complete & Fulfill") as unknown as Record<string, unknown>;
+    const propsKey = Object.keys(node).find((key) => key.startsWith("__reactProps$"));
+    const props = node[propsKey!] as { onClick: (e: { preventDefault: () => void }) => void };
+    await act(async () => {
+      props.onClick({ preventDefault: () => {} });
+    });
+    await act(async () => {});
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("the location's name falls back as the page's does while it is unknown", () => {
     act(() => {
       useWorkbench.getState().selectExternalOrder(ORDER, ROWS, 1);

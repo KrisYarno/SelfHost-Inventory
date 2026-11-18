@@ -191,8 +191,12 @@ export function CompleteOrderDialog({
   // the selected location the page is rebuilding it, and completing now would
   // deduct here a cart read somewhere else. The page's own gate is not the
   // only one: the dialog's action waits too, and its submit handler refuses.
+  // F1-10 (F0 FD2-4): a build that read no one location's rows (null) is not
+  // built here either — even with no location selected (null/null).
   const notBuiltHere =
-    selectedExternalOrder !== null && selectedExternalOrder.builtAtLocationId !== selectedLocationId;
+    selectedExternalOrder !== null &&
+    (selectedExternalOrder.builtAtLocationId !== selectedLocationId ||
+      selectedExternalOrder.builtAtLocationId === null);
   const locationName = selectedLocation?.name ?? "the selected location";
 
   // Amendment 2: Split cart items by source for dual API calls

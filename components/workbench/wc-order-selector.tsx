@@ -40,9 +40,16 @@ interface WCOrderSelectorProps {
   /**
    * Facelift F0 FR2-6: no location is selected, so there is no "here" and no
    * stock read in flight — "Loading stock…" would be untrue. The rows wait and
-   * say where to choose one.
+   * say why (F1-9: `noLocationSentence`).
    */
   noLocation?: boolean;
+  /**
+   * Facelift F1-9 (F0 FD2-3): the location list's state, which says WHY there
+   * is no location — still loading, failed, none configured, or none chosen.
+   * Read only with `noLocation`. Absent, the rows read the "none chosen"
+   * sentence.
+   */
+  locationList?: LocationListState;
   /**
    * Facelift F0 FR2-5 (orchestrator ruling (a)): reads the page's stock again.
    * The failure sentence sits inside each (disabled) row, where no button can
@@ -55,6 +62,30 @@ interface WCOrderSelectorProps {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** The location list as the location chip reads it (`useLocation`). */
+interface LocationListState {
+  isLoading: boolean;
+  loadFailed: boolean;
+  count: number;
+}
+
+/** F1-9: the order rows' sentence for a loaded list with nothing chosen. */
+const NO_LOCATION_CHOSEN = "Choose a location first.";
+
+/**
+ * Facelift F1-9 (F0 FD2-3): why there is no location to work at, first match
+ * wins. The states are the location chip's own (`LocationSwitcher`), so the
+ * two never disagree: a failure is said only when nothing loaded, and a failed
+ * refresh over a loaded list is still a list to choose from. `unselected` is
+ * the caller's sentence for a loaded list with nothing chosen.
+ */
+export function noLocationSentence(list: LocationListState, unselected: string): string {
+  if (list.isLoading) return "Loading locations…";
+  if (list.loadFailed && list.count === 0) return "Couldn't load locations.";
+  if (list.count === 0) return "No locations configured.";
+  return unselected;
+}
 
 function formatCurrency(amount: number): string {
   return new Intl.NumberFormat("en-US", {
@@ -90,6 +121,7 @@ export function WCOrderSelector({
   stockLoading = false,
   stockFailed = false,
   noLocation = false,
+  locationList,
   onRetryStock,
 }: WCOrderSelectorProps) {
   const [search, setSearch] = useState("");
@@ -273,7 +305,9 @@ export function WCOrderSelector({
                 </div>
                 <span className="text-xs text-muted-foreground shrink-0">
                   {noLocation
-                    ? "Choose a location at the top of the page."
+                    ? locationList
+                      ? noLocationSentence(locationList, NO_LOCATION_CHOSEN)
+                      : NO_LOCATION_CHOSEN
                     : stockFailed
                       ? "Stock couldn't be loaded — try again shortly."
                       : stockLoading

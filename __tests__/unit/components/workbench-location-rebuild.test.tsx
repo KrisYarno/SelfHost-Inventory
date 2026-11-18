@@ -29,8 +29,18 @@ jest.mock("next-auth/react", () => ({
 }));
 
 let locationContext: { selectedLocationId: number | null; selectedLocation: { name: string } | null };
+// Facelift F1-9 / F1-15: the page also reads the location LIST's state (why
+// there is no location). Here the list has loaded, with Main and Overflow.
 jest.mock("@/contexts/location-context", () => ({
-  useLocation: () => locationContext,
+  useLocation: () => ({
+    locations: [
+      { id: 1, name: "Main" },
+      { id: 2, name: "Overflow" },
+    ],
+    isLoading: false,
+    loadFailed: false,
+    ...locationContext,
+  }),
 }));
 jest.mock("@/hooks/use-locations", () => ({
   useLocations: () => ({ data: [], isLoading: false }),
@@ -419,7 +429,8 @@ describe("F0-1 (d) — the phone", () => {
     });
     renderPage();
 
-    const label = await screen.findByText("View cart (1 items)");
+    // Facelift F1-12: one line reads `item` (it read `(1 items)`).
+    const label = await screen.findByText("View cart (1 item)");
     expect(label.closest("button")).toHaveTextContent(/^1View cart/);
   });
 

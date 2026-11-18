@@ -209,6 +209,49 @@ describe("F0-2 — the low-stock card", () => {
   });
 });
 
+// Facelift F1-14 (plan 2026-11-18-facelift-f1; F0 QA-6.2): a list that LOADED
+// empty was said two ways — `No locations configured.` beside `Choose a
+// location to see low stock.`, with nothing to choose. Both cards now say it
+// the same way; loading and a failed read keep their own states.
+describe("F1-14 — the low-stock card with zero locations", () => {
+  it("a list loaded empty: `No locations configured.`, never `Choose a location…` nor `All stocked up`", () => {
+    setLocation({ locations: [], selectedLocationId: null, selectedLocation: null });
+    renderPage();
+    const card = cardOf("Below location minimum");
+    expect(within(card).getByText("No locations configured.")).toBeInTheDocument();
+    expect(within(card).queryByText("Choose a location to see low stock.")).toBeNull();
+    expect(within(card).queryByText("All stocked up")).toBeNull();
+    expect(card.querySelector(".animate-pulse")).toBeNull();
+    // Said once per card: Stock by Location says the same.
+    expect(screen.getAllByText("No locations configured.")).toHaveLength(2);
+    expect(within(cardOf("Stock by Location")).getByText("No locations configured.")).toBeInTheDocument();
+  });
+
+  it("still loading: a skeleton, not `No locations configured.`", () => {
+    setLocation({ locations: [], selectedLocationId: null, selectedLocation: null, isLoading: true });
+    renderPage();
+    const card = cardOf("Below location minimum");
+    expect(within(card).queryByText("No locations configured.")).toBeNull();
+    expect(card.querySelector(".animate-pulse")).not.toBeNull();
+  });
+
+  it("failed with nothing loaded: `Couldn't load locations.`, not `No locations configured.`", () => {
+    setLocation({ locations: [], selectedLocationId: null, selectedLocation: null, loadFailed: true });
+    renderPage();
+    const card = cardOf("Below location minimum");
+    expect(within(card).getByText("Couldn't load locations.")).toBeInTheDocument();
+    expect(within(card).queryByText("No locations configured.")).toBeNull();
+  });
+
+  it("locations loaded, none selected: still `Choose a location to see low stock.`", () => {
+    setLocation({ selectedLocationId: null, selectedLocation: null });
+    renderPage();
+    const card = cardOf("Below location minimum");
+    expect(within(card).getByText("Choose a location to see low stock.")).toBeInTheDocument();
+    expect(within(card).queryByText("No locations configured.")).toBeNull();
+  });
+});
+
 describe("F0-2 — the activity feed", () => {
   it("is titled `Latest activity, all locations`", () => {
     renderPage();

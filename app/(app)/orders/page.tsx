@@ -13,6 +13,7 @@ import { OrderFilters } from "@/components/orders/order-filters";
 import { ExternalOrderDetailsSheet } from "@/components/orders/external-order-details-sheet";
 import { useExternalOrders, useUserCompanies } from "@/hooks/use-external-orders";
 import { useCSRF } from "@/hooks/use-csrf";
+import { useDebounce } from "@/hooks/use-debounce";
 import { cn } from "@/lib/utils";
 import type { ExternalOrder, PlatformType, InternalOrderStatus } from "@/types/external-orders";
 
@@ -47,15 +48,31 @@ export default function OrdersPage() {
     }
   }, [companies, selectedCompanyId]);
 
+  // Facelift F1-17 (F0 GR-10): the page debounces its own search, and a NEW
+  // search starts again at the first 50 in the SAME render its debounced value
+  // changes (the stored-previous-value pattern) — a keystroke no longer shrinks
+  // the list before the search applies, and no request ever carries the new
+  // search at the old size.
+  const debouncedSearch = useDebounce(searchQuery, 300);
+  const [listedSearch, setListedSearch] = useState(debouncedSearch);
+  if (debouncedSearch !== listedSearch) {
+    setListedSearch(debouncedSearch);
+    setPageSize(ORDERS_PAGE_STEP);
+    setLoadMoreFrom(null);
+  }
+
   // Fetch orders with filters
-  const ordersQuery = useExternalOrders({
-    companyId: selectedCompanyId || undefined,
-    platform,
-    status,
-    search: searchQuery,
-    page: 1,
-    pageSize,
-  });
+  const ordersQuery = useExternalOrders(
+    {
+      companyId: selectedCompanyId || undefined,
+      platform,
+      status,
+      search: debouncedSearch,
+      page: 1,
+      pageSize,
+    },
+    { debounceSearch: false }
+  );
   const { data: ordersData, error: ordersError, refetch, isFetching, isPlaceholderData } = ordersQuery;
 
   // Memoized so the identity is stable across renders — the rebind effect below
@@ -103,9 +120,9 @@ export default function OrdersPage() {
     setStatus(next);
     resetPageSize();
   };
+  // F1-17: the size resets when the DEBOUNCED search changes (above), not here.
   const handleSearchChange = (query: string) => {
     setSearchQuery(query);
-    resetPageSize();
   };
 
   // Handle order selection

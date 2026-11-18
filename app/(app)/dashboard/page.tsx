@@ -429,6 +429,12 @@ export default function DashboardPage() {
               <CardContent>
                 {!locationsLoading && locationsFailed ? (
                   <LoadFailed message="Couldn't load locations." onRetry={retryLocations} />
+                ) : !locationsLoading && locations.length === 0 ? (
+                  // F1-14 (F0 QA-6.2): a list loaded empty is said as Stock by
+                  // Location says it — not "Choose a location…" with none to choose.
+                  <p className="text-sm text-muted-foreground py-6 text-center">
+                    No locations configured.
+                  </p>
                 ) : locationsLoading || (hasLocation && !lowStockFailed && lowStockData === undefined) ? (
                   <div className="space-y-3">
                     {[1, 2, 3].map((i) => (

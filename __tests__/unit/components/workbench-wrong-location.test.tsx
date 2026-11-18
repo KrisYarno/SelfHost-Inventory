@@ -35,8 +35,18 @@ jest.mock("@/hooks/use-csrf", () => ({
 
 /** The location context, per test — `selectedLocationId` can be null. */
 let locationContext: { selectedLocationId: number | null; selectedLocation: { name: string } | null };
+// Facelift F1-9 / F1-15: the page also reads the location LIST's state (why
+// there is no location). Here the list has loaded, with Main and Overflow.
 jest.mock("@/contexts/location-context", () => ({
-  useLocation: () => locationContext,
+  useLocation: () => ({
+    locations: [
+      { id: 1, name: "Main" },
+      { id: 2, name: "Overflow" },
+    ],
+    isLoading: false,
+    loadFailed: false,
+    ...locationContext,
+  }),
 }));
 jest.mock("@/hooks/use-locations", () => ({
   useLocations: () => ({
@@ -76,7 +86,11 @@ jest.mock("@/components/workbench/complete-order-dialog", () => ({
     return null;
   },
 }));
-jest.mock("@/components/workbench/wc-order-selector", () => ({ WCOrderSelector: () => null }));
+jest.mock("@/components/workbench/wc-order-selector", () => ({
+  // Facelift F1-15: the page's grid reads the REAL location ladder.
+  noLocationSentence: jest.requireActual("@/components/workbench/wc-order-selector").noLocationSentence,
+  WCOrderSelector: () => null,
+}));
 jest.mock("@/components/workbench/order-queue", () => ({ OrderQueue: () => null }));
 
 import WorkbenchPage from "@/app/(app)/workbench/page";

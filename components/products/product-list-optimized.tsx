@@ -236,9 +236,12 @@ export function ProductListOptimized({
           <span>
             {stockFilter === "all"
               ? `Showing ${from}–${to} of ${total} ${total === 1 ? "product" : "products"}`
-              : filteredProducts.length === 1
-                ? `1 of the ${rowsOnPage} products on this page matches`
-                : `${filteredProducts.length} of the ${rowsOnPage} products on this page match`}
+              : rowsOnPage === 1 && filteredProducts.length === 1
+                ? // F1-13 (F0 QA-6.1): never "1 of the 1 products".
+                  "The one product on this page matches"
+                : filteredProducts.length === 1
+                  ? `1 of the ${rowsOnPage} products on this page matches`
+                  : `${filteredProducts.length} of the ${rowsOnPage} products on this page match`}
           </span>
         </div>
       )}

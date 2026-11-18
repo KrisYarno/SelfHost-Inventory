@@ -55,3 +55,25 @@ describe("F0-1 — the floating cart button", () => {
     expect(button).toHaveTextContent(/^2View order/);
   });
 });
+
+// Facelift F1-12 (plan 2026-11-18-facelift-f1; F0 QA-6.5, G1-22): the
+// screen-reader label said `(1 items`. One line reads `item`; every other count
+// keeps `items` (the plural pins above are unchanged).
+describe("F1-12 — singular forms on the cart button's label", () => {
+  it("a manual cart of one line: `View cart (1 item)`", () => {
+    renderButton(1, 0);
+    const button = srLabel("View cart (1 item)");
+    expect(button).toHaveTextContent(/^1View cart \(1 item\)$/);
+  });
+
+  it("a store order with one cart line: `View order (1 item, N not deducted)`", () => {
+    renderButton(1, 2);
+    const button = srLabel("View order (1 item, 2 not deducted)");
+    expect(button).toHaveTextContent(/^1View order \(1 item, 2 not deducted\)$/);
+  });
+
+  it("zero cart lines stay plural: `View order (0 items, 1 not deducted)`", () => {
+    renderButton(0, 1);
+    srLabel("View order (0 items, 1 not deducted)");
+  });
+});
