@@ -107,8 +107,14 @@ export default function InventoryPage() {
   // so the sentinel) kept after a failed next page (FR1-8), an open gate read
   // that page again on every render. A failed next page closes the gate until
   // its Retry succeeds.
+  //
+  // Facelift FR3-1 (FD2-1): and it waits for ANY in-flight read, not just a
+  // next page. An invalidation's refetch of the loaded pages overwrites the
+  // failed page's direction, so mid-refetch the gate read open — and
+  // `fetchNextPage` cancels an in-flight refetch, so page 1's new stock never
+  // landed.
   const { loadMoreRef } = useInfiniteScroll({
-    loading: variants.isFetchingNextPage,
+    loading: variants.isFetching,
     hasMore:
       shouldAutoLoad(pagesLoaded, !!variants.hasNextPage, autoLoadLimit) &&
       !variants.isFetchNextPageError,

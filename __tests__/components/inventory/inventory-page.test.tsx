@@ -385,4 +385,79 @@ describe("FR2-1 — a failed next page stops auto-load and says so", () => {
     expect(pageReads(3)).toBe(1);
     expect(pageReads(4)).toBe(0);
   });
+
+  // Facelift FR3-1 (REV 11, FD2-1): auto-load waits for ANY in-flight read.
+  //
+  // Before: the gate waited only for a NEXT-page read. An invalidation (every
+  // write on the page, and Refresh) refetches the loaded pages, and that
+  // refetch overwrites the failed next page's direction — so mid-refetch the
+  // gate read open, the sentinel's observer asked for page 2, and
+  // `fetchNextPage` CANCELLED the refetch (react-query's `cancelRefetch`
+  // default): page 1's new stock never landed, and page 2 was read again.
+  describe("FR3-1 — auto-load waits for ANY in-flight read", () => {
+    let page1Qty: number;
+    let holdPage1: boolean;
+    let releasePage1: (() => void) | null;
+    function mockHeldPages() {
+      page2Ok = false;
+      page1Qty = 1;
+      holdPage1 = false;
+      releasePage1 = null;
+      global.fetch = jest.fn(async (url: RequestInfo | URL) => {
+        const u = String(url);
+        if (u.includes("/api/inventory/variants")) {
+          const page = Number(new URL(u, "http://x").searchParams.get("page") || 1);
+          if (page === 2 && !page2Ok) return { ok: false, status: 500, json: async () => ({ error: "boom" }) } as Response;
+          const body = variantsPage(page, 10);
+          if (page === 1) {
+            body.products[0].totalQuantity = page1Qty;
+            body.products[0].locations[0].quantity = page1Qty;
+            if (holdPage1) await new Promise<void>((resolve) => (releasePage1 = resolve));
+          }
+          return { ok: true, json: async () => body } as Response;
+        }
+        return { ok: true, json: async () => ({ logs: [], transfers: [] }) } as Response;
+      }) as unknown as typeof fetch;
+    }
+    afterEach(() => {
+      releasePage1?.();
+    });
+
+    it("a failed page 2, then a refetch-all HELD on page 1: no next-page read while it is held; on release page 1's new stock shows, then exactly one page-2 read", async () => {
+      mockHeldPages();
+      wrap();
+      expect(await screen.findByText(FAILED)).toBeInTheDocument();
+      expect(pageReads(1)).toBe(1);
+      expect(pageReads(2)).toBe(1);
+      expect(screen.getByRole("button", { name: /Cat1/ })).toHaveTextContent("1 units");
+
+      // A write elsewhere: the server now holds 7, and the page-1 read is slow.
+      page1Qty = 7;
+      holdPage1 = true;
+      fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+      await waitFor(() => expect(pageReads(1)).toBe(2));
+
+      // Held: the sentinel stays in view, and every render's fresh observer
+      // reports it — and no next-page read is issued.
+      for (let i = 0; i < 4; i++) {
+        fireEvent.click(screen.getByRole("button", { name: /Cat1/ }));
+        await settle();
+      }
+      expect(pageReads(2)).toBe(1);
+      expect(releasePage1).not.toBeNull();
+
+      // Released: page 1's new quantity shows…
+      await act(async () => {
+        releasePage1!();
+        releasePage1 = null;
+      });
+      await waitFor(() => expect(screen.getByRole("button", { name: /Cat1/ })).toHaveTextContent("7 units"));
+      // …then exactly ONE page-2 read follows (it fails again, and the gate holds).
+      await waitFor(() => expect(pageReads(2)).toBe(2));
+      expect(await screen.findByText(FAILED)).toBeInTheDocument();
+      for (let i = 0; i < 3; i++) await settle();
+      expect(pageReads(1)).toBe(2);
+      expect(pageReads(2)).toBe(2);
+    });
+  });
 });

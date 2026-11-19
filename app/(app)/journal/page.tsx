@@ -95,9 +95,17 @@ export default function JournalPage() {
     getTotalChanges,
   } = useJournalStore();
 
-  const { data: products = [], isLoading, refetch: refetchProducts } = useInventoryProducts({
+  // Facelift FR3-3 (FD2-4): `data` is not defaulted — a failed read with
+  // nothing loaded is "no answer", not an empty list. The derived list defaults.
+  const {
+    data: productsData,
+    isLoading,
+    isError: productsReadFailed,
+    refetch: refetchProducts,
+  } = useInventoryProducts({
     locationId: selectedLocationId,
   });
+  const products = useMemo(() => productsData ?? [], [productsData]);
 
   // Redirect unauthenticated users
   useEffect(() => {
@@ -533,6 +541,24 @@ export default function JournalPage() {
                   aria-live="polite"
                 >
                   <span aria-label="Loading products">Loading products...</span>
+                </div>
+              ) : productsReadFailed && productsData === undefined ? (
+                // Facelift FR3-3 (FD2-4): a failed read with nothing loaded says
+                // so, never "No products found"; a failed refresh keeps the rows.
+                <div
+                  className="text-center py-8 text-muted-foreground"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <p className="text-sm text-destructive">{"Couldn't load products."}</p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void refetchProducts()}
+                    className="mt-3"
+                  >
+                    Retry
+                  </Button>
                 </div>
               ) : filteredProducts.length === 0 ? (
                 <div

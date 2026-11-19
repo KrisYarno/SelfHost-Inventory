@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 
 interface User {
   id: number;
@@ -90,9 +91,11 @@ export function UserApprovalCard({ user, onApprove, onReject, isSelected, onTogg
         </div>
       </div>
 
-      {/* Reject Dialog */}
-      {showRejectDialog && (
-        <div className="fixed inset-0 bg-background/80 dark:bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      {/* Reject Dialog. Facelift FR3-5 (QA-4): portaled to the body at z-[60],
+          above the dock's z-50 (FR2-5's pattern), so the dock is covered and
+          can't navigate away mid-decision. */}
+      {showRejectDialog && createPortal(
+        <div className="fixed inset-0 bg-background/80 dark:bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-[60]">
           <div className="rounded-2xl p-6 max-w-md w-full border border-border/70 bg-surface shadow-xl">
             <h3 className="text-lg font-semibold mb-4">Reject User Application</h3>
             <p className="text-sm text-muted-foreground mb-4">
@@ -131,7 +134,8 @@ export function UserApprovalCard({ user, onApprove, onReject, isSelected, onTogg
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );

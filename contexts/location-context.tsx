@@ -57,20 +57,41 @@ export function LocationProvider({ children }: { children: ReactNode }) {
   // Set once a stale id's discard has been announced, until an id is kept: the
   // warning shows ONCE per discard.
   const staleWarnedRef = useRef(false);
-
-  // Fetch locations once per signed-in user (FR2-3), and again on Retry. The
-  // read only loads the list: which location is selected is decided by the
-  // rules below, never here. A location added elsewhere shows after a reload or
-  // a Retry; one deleted elsewhere is refused by the server and discarded at
-  // the next read.
+  // Facelift FR3-2: the read below makes the first-visit pick, and its deps stay
+  // `[userId, reloadKey]` — so it reads the user's default through a ref.
+  const defaultLocationIdRef = useRef(defaultLocationId);
   useEffect(() => {
+    defaultLocationIdRef.current = defaultLocationId;
+  }, [defaultLocationId]);
+
+  // Fetch locations once per signed-in user (FR2-3), and again on Retry. A
+  // location added elsewhere shows after a reload or a Retry; one deleted
+  // elsewhere is refused by the server and discarded at the next read.
+  //
+  // Facelift FR3-2 (QA-1): a successful read sets the list AND the first-visit
+  // pick in the same batch, so no render hands consumers a loaded list with
+  // nothing selected — a consumer that decides once when the list resolves
+  // (the Fulfill dialog's seed) decided on that render, and seeded nothing.
+  // Only an EMPTY selection is filled: a restored saved id is kept, and the
+  // rules below confirm or discard it as before; a discarded id, while the chip
+  // asks, is never filled in. The rules stay the backstop.
+  useEffect(() => {
+    // Nothing saved: the user's default when it is in the list, otherwise the
+    // first location (F1-5).
+    const firstVisitPick = (list: Location[]) => {
+      const preferred = defaultLocationIdRef.current;
+      if (preferred !== null && list.some((loc) => loc.id === preferred)) return preferred;
+      return list[0]?.id ?? null;
+    };
+
     async function fetchLocations() {
       try {
         const response = await fetch('/api/locations');
         if (response.ok) {
-          const data = await response.json();
+          const data: Location[] = await response.json();
           setLocations(data);
           setLoadFailed(false);
+          setRawLocationId((cur) => cur ?? (awaitingChoiceRef.current ? null : firstVisitPick(data)));
         } else {
           setLoadFailed(true);
         }
@@ -106,7 +127,8 @@ export function LocationProvider({ children }: { children: ReactNode }) {
   //     target on its own: not the user's default, not the first location
   //     (FR1-2, reversing REV 4 (A));
   //   - nothing saved (first visit): the default when it is in the list,
-  //     otherwise the first location.
+  //     otherwise the first location. The read above already made this pick
+  //     with its answer (FR3-2); here it is the backstop.
   // The updaters only apply to the id the decision was made about, so a choice
   // the user made in between is never overwritten.
   useEffect(() => {

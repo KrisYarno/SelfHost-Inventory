@@ -19,7 +19,7 @@
 // these pins cover the page -> store -> dialog seam, not just a renderer.
 
 import * as React from "react";
-import { render, screen, act, waitFor } from "@testing-library/react";
+import { render, screen, act, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -492,5 +492,74 @@ describe("Journal page — landmarks (F1-8)", () => {
       "href",
       "#products-heading"
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift FR3-3 (plan 2026-11-18-facelift-f1 REV 11; FD2-4) — the products
+// list states a failed read. The page defaulted the hook's `data` to `[]`, so
+// a failed `/api/products` (or stock) read with nothing loaded looked exactly
+// like an empty answer: the list said `No products found`, and offered no way
+// to read again. Now, after the no-location and loading rungs, a failed read
+// with no data says `Couldn't load products.` with a Retry, in the list's own
+// status block; a failed REFRESH over loaded rows keeps them.
+// ---------------------------------------------------------------------------
+describe("Journal page — a failed products read is said, never `No products found` (FR3-3)", () => {
+  const FAILED = "Couldn't load products.";
+  const productsList = () => screen.getByRole("region", { name: "Products" });
+  const productReads = () => fetchMock.mock.calls.filter((c) => String(c[0]).includes("/api/products")).length;
+
+  it("a failed read: the sentence and an outline Retry in the list's status block — never `No products found`", async () => {
+    productsOk = false;
+    renderJournal();
+    const sentence = await within(productsList()).findByText(FAILED);
+    const status = sentence.closest('[role="status"]') as HTMLElement;
+    expect(status).not.toBeNull();
+    expect(status).toHaveAttribute("aria-live", "polite");
+    const retry = within(status).getByRole("button", { name: "Retry" });
+    expect(retry).toHaveClass("border", "border-input", "h-8", "text-xs");
+    expect(within(productsList()).queryByText("No products found")).toBeNull();
+    expect(within(productsList()).queryByText("Loading products...")).toBeNull();
+  });
+
+  it("Retry re-reads; when the read answers, the rows", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    productsOk = false;
+    renderJournal();
+    await within(productsList()).findByText(FAILED);
+    const before = productReads();
+
+    productsOk = true;
+    await user.click(within(productsList()).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(productReads()).toBe(before + 1));
+    await waitFor(() => expect(within(productsList()).getAllByText("Widget A").length).toBeGreaterThan(0));
+    expect(within(productsList()).queryByText(FAILED)).toBeNull();
+    expect(within(productsList()).queryByText("No products found")).toBeNull();
+  });
+
+  it("a failed REFRESH over loaded rows keeps them: no failure sentence", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <JournalPage />
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(within(productsList()).getAllByText("Widget A").length).toBeGreaterThan(0));
+    const before = productReads();
+
+    productsOk = false;
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["inventory-products"] });
+    });
+    await waitFor(() => expect(productReads()).toBe(before + 1));
+    await act(async () => {});
+    // The refresh did fail…
+    expect(queryClient.getQueryState(["inventory-products", 1, "name", "asc"])?.status).toBe("error");
+    // …and the rows it had stay on screen.
+    expect(within(productsList()).getAllByText("Widget A").length).toBeGreaterThan(0);
+    expect(within(productsList()).queryByText(FAILED)).toBeNull();
+    expect(within(productsList()).queryByText("No products found")).toBeNull();
   });
 });

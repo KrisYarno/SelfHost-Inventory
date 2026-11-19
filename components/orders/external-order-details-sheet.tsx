@@ -284,21 +284,33 @@ export function ExternalOrderDetailsSheet({
                                 To Fill: {remainingQty}
                               </Badge>
                             )}
-                            {/* Show live stock at user's location for mapped items */}
+                            {/* Show live stock at user's location for mapped items.
+                                Facelift FR3-4 (QA-3): the badge states its read —
+                                no answer yet, or a failed one, is never a red
+                                `In Stock: 0`. A product missing from a successful
+                                answer is 0: no inventory row, no units. */}
                             {item.isMapped && item.productLink?.internalProductId && selectedLocationId && (
-                              <Badge
-                                variant="outline"
-                                className={cn(
-                                  "text-xs",
-                                  (stockByProductId[item.productLink.internalProductId] ?? 0) <= 0
-                                    ? "border-red-300 text-red-700 dark:text-red-400"
-                                    : (stockByProductId[item.productLink.internalProductId] ?? 0) < remainingQty
-                                    ? "border-amber-300 text-amber-700 dark:text-amber-400"
-                                    : "border-green-300 text-green-700 dark:text-green-400"
-                                )}
-                              >
-                                In Stock: {stockByProductId[item.productLink.internalProductId] ?? 0}
-                              </Badge>
+                              stockQuery.data === undefined ? (
+                                stockQuery.isError ? (
+                                  <Badge variant="outline" className="text-xs text-destructive">{"Couldn't read stock."}</Badge>
+                                ) : (
+                                  <Badge variant="outline" className="text-xs">Reading stock…</Badge>
+                                )
+                              ) : (
+                                <Badge
+                                  variant="outline"
+                                  className={cn(
+                                    "text-xs",
+                                    (stockByProductId[item.productLink.internalProductId] ?? 0) <= 0
+                                      ? "border-red-300 text-red-700 dark:text-red-400"
+                                      : (stockByProductId[item.productLink.internalProductId] ?? 0) < remainingQty
+                                      ? "border-amber-300 text-amber-700 dark:text-amber-400"
+                                      : "border-green-300 text-green-700 dark:text-green-400"
+                                  )}
+                                >
+                                  In Stock: {stockByProductId[item.productLink.internalProductId] ?? 0}
+                                </Badge>
+                              )
                             )}
                           </div>
 
