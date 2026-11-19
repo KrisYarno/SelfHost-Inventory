@@ -66,3 +66,24 @@ export function isLowStock(quantity: number, effectiveThreshold: number): boolea
   if (effectiveThreshold <= 0) return false;
   return quantity > 0 && quantity <= effectiveThreshold;
 }
+
+/** Facelift F2-2: a product's stock state, judged on its all-locations total. */
+export type StockState = 'ok' | 'low' | 'out' | 'below-zero' | 'no-record';
+
+/**
+ * Facelift F2-2: the ONLY place the five stock states are decided. The products
+ * route computes it from each product's total; every UI reads it from the
+ * response and never recomputes it.
+ *   - null  -> 'no-record' (the product has NO stock row; structural, never 0)
+ *   - < 0   -> 'below-zero'
+ *   - 0     -> 'out'
+ *   - low under `isLowStock` (INCLUSIVE; a threshold <= 0 disables) -> 'low'
+ *   - otherwise 'ok'
+ */
+export function stockState(total: number | null, effectiveThreshold: number): StockState {
+  if (total === null) return 'no-record';
+  if (total < 0) return 'below-zero';
+  if (total === 0) return 'out';
+  if (isLowStock(total, effectiveThreshold)) return 'low';
+  return 'ok';
+}

@@ -3,14 +3,36 @@ import { ProductWithQuantity, ProductFilters } from '@/types/product';
 import { useDebounce } from './use-debounce';
 import { useCSRF, withCSRFHeaders } from './use-csrf';
 
+/** Facelift F2-3: the server-side stock filter (`all` = no filter). */
+type StockFilter = 'all' | 'in-stock' | 'low' | 'out';
+
 interface ProductsResponse {
   products: ProductWithQuantity[];
   total: number;
   page: number;
   pageSize: number;
+  /** Facelift F2-1: the location every `hereQuantity` describes (the request's `hereLocationId`), or null. */
+  hereLocationId: number | null;
+  /** Facelift F2 B5: the stock filter this answer describes (the request's `stock`, or `all`). */
+  stock: StockFilter;
 }
 
-export function useProducts(filters: ProductFilters) {
+/**
+ * Facelift F2-3 (A18): the Products page's server-side filters. LOCAL to this
+ * hook: the shared `ProductFilters` (lib/products.ts) is untouched. Each is sent
+ * only when set (`stock` only when not `all`), so a caller passing neither sends
+ * today's exact request. Both ride in the query key with the other filters.
+ */
+interface UseProductsFilters extends ProductFilters {
+  stock?: StockFilter;
+  hereLocationId?: number | null;
+}
+
+/**
+ * Facelift F2 B1: `options.enabled` (default `true`) lets a caller wait (the
+ * Products page waits for the locations read). It is NOT part of the query key.
+ */
+export function useProducts(filters: UseProductsFilters, options?: { enabled?: boolean }) {
   const debouncedSearch = useDebounce(filters.search || '', 300);
   
   const queryKey = ['products', {
@@ -27,6 +49,8 @@ export function useProducts(filters: ProductFilters) {
       if (filters.sortOrder) params.set('sortOrder', filters.sortOrder);
       if (filters.page) params.set('page', filters.page.toString());
       if (filters.pageSize) params.set('pageSize', filters.pageSize.toString());
+      if (filters.stock && filters.stock !== 'all') params.set('stock', filters.stock);
+      if (filters.hereLocationId != null) params.set('hereLocationId', filters.hereLocationId.toString());
       
       const response = await fetch(`/api/products/optimized?${params}`);
       if (!response.ok) throw new Error('Failed to fetch products');
@@ -34,6 +58,7 @@ export function useProducts(filters: ProductFilters) {
     },
     // Keep previous data while fetching new data
     placeholderData: (previousData) => previousData,
+    enabled: options?.enabled ?? true,
   });
 }
 

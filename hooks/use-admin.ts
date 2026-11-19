@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { getJSON, type ApiError } from "@/hooks/get-json";
 import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
+import { useLocation } from "@/contexts/location-context";
 import type { User } from "@/components/admin/user-table";
 // Reconciliation Part 2 (seam S-B18): the move dialog OWNS the 200 body's shape,
 // because it is the one surface that renders it. TYPE-ONLY — nothing of the
@@ -541,23 +542,33 @@ export function useAdminSettings() {
   });
 }
 
+// Facelift F2-13: creating or deleting a location also re-reads the app-wide list
+// (the chip, every stock writer), so the change shows without a reload.
 export function useAddLocation() {
   const queryClient = useQueryClient();
   const { token: csrfToken } = useCSRF();
+  const { retryLocations } = useLocation();
   return useMutation({
     mutationFn: (name: string) =>
       mutateJSON("/api/admin/locations", "POST", { name }, csrfToken),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin", "settings"] }),
+    onSuccess: () => {
+      retryLocations();
+      return queryClient.invalidateQueries({ queryKey: ["admin", "settings"] });
+    },
   });
 }
 
 export function useDeleteSettingsLocation() {
   const queryClient = useQueryClient();
   const { token: csrfToken } = useCSRF();
+  const { retryLocations } = useLocation();
   return useMutation({
     mutationFn: (locationId: number) =>
       mutateJSON(`/api/admin/locations/${locationId}`, "DELETE", undefined, csrfToken),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin", "settings"] }),
+    onSuccess: () => {
+      retryLocations();
+      return queryClient.invalidateQueries({ queryKey: ["admin", "settings"] });
+    },
   });
 }
 

@@ -8,6 +8,9 @@ import { Location } from '@prisma/client';
 /** Where the chosen location is remembered between visits. */
 const SELECTED_LOCATION_KEY = 'selectedLocationId';
 
+/** Facelift F2-13 / B8: a tab coming back re-reads once the last read attempt is this old. */
+const LOCATIONS_STALE_MS = 5 * 60 * 1000;
+
 interface LocationContextType {
   locations: Location[];
   /**
@@ -64,9 +67,14 @@ export function LocationProvider({ children }: { children: ReactNode }) {
     defaultLocationIdRef.current = defaultLocationId;
   }, [defaultLocationId]);
 
-  // Fetch locations once per signed-in user (FR2-3), and again on Retry. A
-  // location added elsewhere shows after a reload or a Retry; one deleted
-  // elsewhere is refused by the server and discarded at the next read.
+  // Facelift F2-13 (B8): when the last read ATTEMPT started (`Date.now()`),
+  // success or failure; null until one has.
+  const lastAttemptAtRef = useRef<number | null>(null);
+
+  // Fetch locations once per signed-in user (FR2-3), again on Retry, and again
+  // when a tab comes back 5 minutes or more after the last read (F2-13, below). A
+  // location added elsewhere shows after one of those; one deleted elsewhere is
+  // refused by the server and discarded at the next read.
   //
   // Facelift FR3-2 (QA-1): a successful read sets the list AND the first-visit
   // pick in the same batch, so no render hands consumers a loaded list with
@@ -85,6 +93,7 @@ export function LocationProvider({ children }: { children: ReactNode }) {
     };
 
     async function fetchLocations() {
+      lastAttemptAtRef.current = Date.now();
       try {
         const response = await fetch('/api/locations');
         if (response.ok) {
@@ -114,6 +123,28 @@ export function LocationProvider({ children }: { children: ReactNode }) {
     if (userId === null) return;
     setIsLoading(true);
     setReloadKey((key) => key + 1);
+  }, [userId]);
+
+  // Facelift F2-13 (A1, amended by B8): the list stays fresh across a
+  // long-lived tab. When the page becomes visible again, signed in, and the last
+  // read ATTEMPT (success or failure) started at least 5 minutes ago, the fetch
+  // above runs again — one more reader on the shared per-IP `/api/locations`
+  // bucket, at most once per device per 5 minutes, failures included. Before
+  // any attempt the mount read covers it. Unlike `retryLocations`, it only bumps
+  // the read and never sets `isLoading`, so nothing waiting on the list is held
+  // back by a background re-read; the answer goes through the same rules as any
+  // read, so the published id only ever changes on a successful read (FR1-1) and
+  // a discarded one still asks (FR1-2).
+  useEffect(() => {
+    if (userId === null) return;
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      const lastAttemptAt = lastAttemptAtRef.current;
+      if (lastAttemptAt === null || Date.now() - lastAttemptAt < LOCATIONS_STALE_MS) return;
+      setReloadKey((key) => key + 1);
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [userId]);
 
   // Facelift F1-5 — which location every stock write targets. The rules run on

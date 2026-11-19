@@ -5,6 +5,9 @@
  * Inheritance: NULL = inherit / 0 = disabled / >0 = override; INCLUSIVE compare.
  */
 
+import fs from 'fs';
+import path from 'path';
+
 jest.mock('@/lib/prisma', () => ({
   __esModule: true,
   default: { systemSetting: { findUnique: jest.fn() } },
@@ -16,6 +19,8 @@ import {
   getLowStockDefault,
   effectiveLowStockThreshold,
   isLowStock,
+  stockState,
+  type StockState,
 } from '@/lib/stock-threshold';
 
 const m = prisma as unknown as { systemSetting: { findUnique: jest.Mock } };
@@ -86,6 +91,82 @@ describe('getLowStockDefault (SystemSetting lowStockDefaultThreshold)', () => {
     for (const bad of ['abc', '', '-5', '1.5foo']) {
       m.systemSetting.findUnique.mockResolvedValue({ value: bad });
       await expect(getLowStockDefault()).resolves.toBe(10);
+    }
+  });
+});
+
+// Facelift F2-2: the ONE place the five stock states are decided, on a product's
+// all-locations total (null = no stock row at all).
+describe('stockState (facelift F2-2)', () => {
+  it('null -> no-record (no stock row), at any threshold', () => {
+    expect(stockState(null, 10)).toBe('no-record');
+    expect(stockState(null, 0)).toBe('no-record');
+    expect(stockState(null, -1)).toBe('no-record');
+  });
+
+  it('a negative total -> below-zero, at any threshold', () => {
+    expect(stockState(-1, 10)).toBe('below-zero');
+    expect(stockState(-40, 0)).toBe('below-zero');
+    expect(stockState(-3, -5)).toBe('below-zero');
+  });
+
+  it('0 -> out (a 0 row is not "no record"), at any threshold', () => {
+    expect(stockState(0, 10)).toBe('out');
+    expect(stockState(0, 0)).toBe('out');
+    expect(stockState(0, -5)).toBe('out');
+  });
+
+  it('low is INCLUSIVE under isLowStock: 1..threshold is low, above is ok', () => {
+    expect(stockState(1, 10)).toBe('low');
+    expect(stockState(10, 10)).toBe('low');
+    expect(stockState(11, 10)).toBe('ok');
+    expect(stockState(1, 1)).toBe('low');
+    expect(stockState(2, 1)).toBe('ok');
+  });
+
+  it('a threshold of 0 (disabled) is never low: any positive total is ok', () => {
+    for (const total of [1, 5, 10, 9999]) expect(stockState(total, 0)).toBe('ok');
+  });
+
+  it('a negative threshold is disabled too: any positive total is ok', () => {
+    for (const total of [1, 5, 10, 9999]) expect(stockState(total, -3)).toBe('ok');
+  });
+
+  it('an inherited threshold reads through effectiveLowStockThreshold', () => {
+    expect(stockState(8, effectiveLowStockThreshold(null, 10))).toBe('low');
+    expect(stockState(8, effectiveLowStockThreshold(0, 10))).toBe('ok');
+    expect(stockState(8, effectiveLowStockThreshold(5, 10))).toBe('ok');
+  });
+
+  it('answers exactly the five states', () => {
+    const seen = new Set<StockState>([
+      stockState(null, 10),
+      stockState(-1, 10),
+      stockState(0, 10),
+      stockState(5, 10),
+      stockState(50, 10),
+    ]);
+    expect(Array.from(seen).sort()).toEqual(['below-zero', 'low', 'no-record', 'ok', 'out']);
+  });
+});
+
+// Facelift F2 A17: the helper's module reads prisma, so the shared product type
+// reaches it TYPE-ONLY — nothing of it may land in a client bundle through
+// `types/product.ts` (or the hook that re-uses that type).
+describe('A17 — StockState reaches the shared types type-only', () => {
+  const read = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+  const importsOfHelper = (src: string) =>
+    src.split('\n').filter((line) => /from\s*['"]@\/lib\/stock-threshold['"]/.test(line));
+
+  it('types/product.ts: `import type { StockState }` and no value import', () => {
+    const lines = importsOfHelper(read('types/product.ts'));
+    expect(lines).toEqual(['import type { StockState } from "@/lib/stock-threshold";']);
+    expect(read('types/product.ts')).toMatch(/stockState\?: StockState;/);
+  });
+
+  it('hooks/use-products.ts does not value-import the helper', () => {
+    for (const line of importsOfHelper(read('hooks/use-products.ts'))) {
+      expect(line).toMatch(/^import type /);
     }
   });
 });

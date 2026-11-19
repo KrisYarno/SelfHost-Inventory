@@ -7,6 +7,9 @@
 // Google Sheets; it is prefixed with a single quote (') so the spreadsheet treats
 // the whole cell as literal text. One implementation, both paths (server routes +
 // client exportToCSV re-export it), so every export surface is neutralized.
+// A finite NUMBER is the one exception (facelift F2 A16): its text is only ever
+// digits, a sign, a point or an exponent, never a formula, so a stock total below
+// zero stays `-3` and still reads as a number. Strings are always guarded.
 
 // Leading characters that turn a cell into an executable formula / DDE payload.
 const CSV_FORMULA_LEAD = /^[=+\-@\t\r]/;
@@ -16,7 +19,8 @@ const CSV_FORMULA_LEAD = /^[=+\-@\t\r]/;
  * - null/undefined => "" (empty field)
  * - prefixes `'` when the first char is = + - @ TAB or CR (formula neutralization),
  *   applied BEFORE quoting so a prefixed value that also contains a delimiter is
- *   still wrapped correctly.
+ *   still wrapped correctly. A finite number skips it (`-3` -> `-3`; the string
+ *   `"-3"` -> `'-3`).
  * - wraps in double quotes and doubles interior quotes when the value contains a
  *   comma, double-quote, CR, or LF (the newline case is the bug the mass-update
  *   route's hand-rolled escaper missed).
@@ -26,7 +30,8 @@ const CSV_FORMULA_LEAD = /^[=+\-@\t\r]/;
 export function escapeCSVCell(value: unknown, alwaysQuote = false): string {
   if (value === null || value === undefined) return "";
   let str = String(value);
-  if (CSV_FORMULA_LEAD.test(str)) {
+  const isFiniteNumber = typeof value === "number" && Number.isFinite(value);
+  if (!isFiniteNumber && CSV_FORMULA_LEAD.test(str)) {
     str = `'${str}`;
   }
   if (

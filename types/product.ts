@@ -1,4 +1,6 @@
 import { Product as PrismaProduct, inventory_logs, ProductApprovalStatus } from "@prisma/client";
+// TYPE-ONLY (facelift F2 A17): nothing of the helper's module reaches a client bundle.
+import type { StockState } from "@/lib/stock-threshold";
 
 // Base product type from Prisma
 export type Product = PrismaProduct;
@@ -10,7 +12,14 @@ export interface ProductWithQuantity extends Omit<Product, "quantity"> {
   currentQuantity: number;
   lastUpdated?: Date;
   locationQuantities?: Map<number, number>; // Optional: quantities per location
-  totalQuantity?: number; // Optional: total across all locations
+  // Optional: total across all locations. Facelift F2-1: `/api/products/optimized`
+  // sends `null` when the product has NO stock row at all (never shown as 0).
+  totalQuantity?: number | null;
+  // Facelift F2-1: the stock at the request's `hereLocationId`; `null` when that
+  // row doesn't exist or no location was asked for.
+  hereQuantity?: number | null;
+  // Facelift F2-2: decided on the server from `totalQuantity`; never recomputed.
+  stockState?: StockState;
   version?: number; // Optional: version for optimistic locking
 }
 

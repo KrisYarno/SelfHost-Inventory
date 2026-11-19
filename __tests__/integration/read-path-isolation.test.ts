@@ -295,6 +295,36 @@ describe('SHOW route: GET /api/products/optimized does not exclude provisional',
     expect(countWhere).not.toHaveProperty('approvalStatus');
     expect(findWhere).toMatchObject({ deletedAt: null });
   });
+
+  // Facelift F2 A9: the stock-filtered path reads every match itself (no count)
+  // under the SAME where — a provisional product stays listed, and the same map
+  // strips the retired mirror.
+  it('?stock=low: the where has deletedAt: null and NO approvalStatus; a provisional row is listed; the mirror is stripped', async () => {
+    db.product.findMany.mockResolvedValue([
+      {
+        id: 5,
+        name: 'Provisional',
+        quantity: 949,
+        lowStockThreshold: null,
+        approvalStatus: 'PENDING_REVIEW',
+        product_locations: [{ quantity: 3, locationId: 1 }],
+      },
+    ] as any);
+
+    const resp = await optimizedGET(mkReq('http://t/api/products/optimized?stock=low'));
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect(db.product.findMany).toHaveBeenCalledTimes(1);
+    const findWhere = (db.product.findMany.mock.calls[0][0] as any).where;
+    expect(findWhere).not.toHaveProperty('approvalStatus');
+    expect(findWhere).toMatchObject({ deletedAt: null });
+
+    expect(body.products).toHaveLength(1);
+    expect(body.products[0]).toMatchObject({ id: 5, approvalStatus: 'PENDING_REVIEW', stockState: 'low' });
+    expect(Object.prototype.hasOwnProperty.call(body.products[0], 'quantity')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(body.products[0], 'product_locations')).toBe(false);
+  });
 });
 
 describe('SHOW route: GET /api/inventory/variants does not exclude provisional', () => {
@@ -373,6 +403,37 @@ describe('the retired mirror never reaches the wire (pack CB2.5b.1)', () => {
     expect(body.products[0].currentQuantity).toBe(10);
     // The rest of the row is untouched.
     expect(body.products[0]).toMatchObject({ id: 3, name: 'Widget', location: 1 });
+  });
+
+  // Facelift F2 A9: the include always reads EVERY row, so the legacy
+  // `?locationId=` reads its own row's quantity in code while `totalQuantity`
+  // still sums them all — and the mirror stays stripped.
+  it('GET /api/products/optimized?locationId=: currentQuantity is that row, beside totalQuantity; no `quantity` at the root', async () => {
+    db.product.findMany.mockResolvedValue([
+      {
+        id: 3,
+        name: 'Widget',
+        quantity: 949,
+        location: 1,
+        lowStockThreshold: null,
+        product_locations: [
+          { quantity: 4, locationId: 1 },
+          { quantity: 6, locationId: 2 },
+        ],
+      },
+    ] as any);
+    db.product.count.mockResolvedValue(1 as any);
+
+    const resp = await optimizedGET(mkReq('http://t/api/products/optimized?locationId=2'));
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect((db.product.findMany.mock.calls[0][0] as any).include).toEqual({
+      product_locations: { select: { quantity: true, locationId: true } },
+    });
+    expect(body.products).toHaveLength(1);
+    expect(Object.prototype.hasOwnProperty.call(body.products[0], 'quantity')).toBe(false);
+    expect(body.products[0]).toMatchObject({ id: 3, currentQuantity: 6, totalQuantity: 10 });
   });
 
   it('GET /api/admin/products: no `quantity` at the product root; currentQuantity is the sum', async () => {

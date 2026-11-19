@@ -52,6 +52,23 @@ describe("escapeCSVCell (RFC 4180)", () => {
     expect(escapeCSVCell("\rboom")).toBe("\"'\rboom\"");
   });
 
+  // Facelift F2 A16: a stock total below zero is a NUMBER and must read as one.
+  test("a finite NUMBER skips the formula guard: -3 -> -3 (A16)", () => {
+    expect(escapeCSVCell(-3)).toBe("-3");
+    expect(escapeCSVCell(-0.5)).toBe("-0.5");
+    expect(escapeCSVCell(-3, true)).toBe('"-3"');
+  });
+
+  test("the same text as a STRING stays guarded: \"-3\" -> '-3, \"=1+1\" -> '=1+1 (A16)", () => {
+    expect(escapeCSVCell("-3")).toBe("'-3");
+    expect(escapeCSVCell("=1+1")).toBe("'=1+1");
+    expect(escapeCSVCell("+3")).toBe("'+3");
+  });
+
+  test("a non-finite number is not exempt (A16 exempts FINITE numbers only)", () => {
+    expect(escapeCSVCell(-Infinity)).toBe("'-Infinity");
+  });
+
   test("safe leading characters are untouched", () => {
     expect(escapeCSVCell("Widget")).toBe("Widget");
     expect(escapeCSVCell("3.5mg")).toBe("3.5mg");
@@ -72,6 +89,10 @@ describe("rowsToCSV", () => {
   test("alwaysQuote quotes every cell", () => {
     const csv = rowsToCSV([["Name", "Qty"], ["Widget", "5"]], { alwaysQuote: true });
     expect(csv).toBe('"Name","Qty"\n"Widget","5"');
+  });
+
+  test("a negative number cell is written as a number (A16)", () => {
+    expect(rowsToCSV([["Total (all locations)"], [-3], ["-3"]])).toBe("Total (all locations)\n-3\n'-3");
   });
 
   test("newline inside a data cell is quoted, keeping the CSV well-formed", () => {

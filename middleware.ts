@@ -50,19 +50,23 @@ const rateLimitedRoutes = ["/api/", "/auth/"];
 //   every 2 s office-wide; the save and each refresh get 120 (variants 480). The
 //   adjust route keeps its own per-user 30/min; the four list reads have no
 //   per-user limit, so this bucket is their only throttle (they are read-only
-//   and page-capped, except `/api/products/optimized`'s pageSize — registered).
+//   and page-capped; `/api/products/optimized`'s pageSize is capped at 500 since
+//   facelift F2, which closes the C2-9 registration).
 //   And `/api/csrf`, 240: a tab whose full page load found no CSRF cookie has no
 //   token meta tag for its whole life, so `useCSRF` fetches a token on EVERY
 //   mount of a writing dialog (one per open on /inventory; two on /products,
 //   where Adjust and Stock In mount together) — refused, the save then fails its
 //   CSRF check. Public, no database; cheap to serve.
 // - The LOCATIONS list (facelift F1, Kris 2026-11-19): read once per signed-in
-//   user per page load and on a Retry (FR2-3), on every device behind the office
-//   IP. A refused first read now blocks every stock write until a read succeeds
-//   (FR1-1: writers only see a confirmed location), so 120. The same bucket also
-//   serves the Fulfill dialog's and `useLocations`' / the admin user editor's
-//   cached reads (5-min staleTime). The route has NO per-user limit, so this
-//   bucket is its only throttle (read-only, a small table).
+//   user per page load, on a Retry (FR2-3), after an admin adds or deletes a
+//   location, and on a return to the tab after 5 minutes (facelift F2-13: at
+//   most once per device per 5 minutes, failed reads included), on every device
+//   behind the office IP. A refused first read now blocks every stock write
+//   until a read succeeds (FR1-1: writers only see a confirmed location), so
+//   120. The same bucket also serves the Fulfill dialog's and `useLocations`' /
+//   the admin user editor's cached reads (5-min staleTime). The route has NO
+//   per-user limit, so this bucket is its only throttle (read-only, a small
+//   table).
 const PER_IP_LIMIT_OVERRIDES: ReadonlyMap<string, number> = new Map([
   ["/api/reconciliation/orders/search", 240],
   ["/api/inventory/adjust", 120],
