@@ -56,6 +56,13 @@ const rateLimitedRoutes = ["/api/", "/auth/"];
 //   mount of a writing dialog (one per open on /inventory; two on /products,
 //   where Adjust and Stock In mount together) — refused, the save then fails its
 //   CSRF check. Public, no database; cheap to serve.
+// - The LOCATIONS list (facelift F1, Kris 2026-11-19): read once per signed-in
+//   user per page load and on a Retry (FR2-3), on every device behind the office
+//   IP. A refused first read now blocks every stock write until a read succeeds
+//   (FR1-1: writers only see a confirmed location), so 120. The same bucket also
+//   serves the Fulfill dialog's and `useLocations`' / the admin user editor's
+//   cached reads (5-min staleTime). The route has NO per-user limit, so this
+//   bucket is its only throttle (read-only, a small table).
 const PER_IP_LIMIT_OVERRIDES: ReadonlyMap<string, number> = new Map([
   ["/api/reconciliation/orders/search", 240],
   ["/api/inventory/adjust", 120],
@@ -64,6 +71,7 @@ const PER_IP_LIMIT_OVERRIDES: ReadonlyMap<string, number> = new Map([
   ["/api/inventory/transfers", 120],
   ["/api/products/optimized", 120],
   ["/api/csrf", 240],
+  ["/api/locations", 120],
 ]);
 
 export async function middleware(request: NextRequest) {

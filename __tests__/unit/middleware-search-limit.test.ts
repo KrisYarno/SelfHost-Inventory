@@ -21,8 +21,11 @@
  * whichever of `/api/inventory/logs` / `/api/inventory/transfers` backs the tab
  * on screen, and `/api/products/optimized`, 120; the save 120), plus the token
  * fetch a tagless tab makes per dialog open (`/api/csrf` 240) — by the same
- * exact-match rule. The "every other path keeps
- * 30" examples use `/api/locations`, which is in no list.
+ * exact-match rule.
+ *
+ * Facelift F1 (Kris 2026-11-19): the LOCATIONS list, `/api/locations`, 120 — a
+ * refused first read blocks every stock write until a read succeeds. The "every
+ * other path keeps 30" examples use `/api/stocker/minimums`, which is in no list.
  *
  * The REAL limiter runs (its in-process store); each test uses its own IP so no
  * bucket bleeds into another. `getToken` answers an approved member, so a request
@@ -74,7 +77,7 @@ describe("the middleware's per-IP limit (FR-R2 (1))", () => {
   });
 
   it.each([
-    ["another /api path", "/api/locations"],
+    ["another /api path", "/api/stocker/minimums"],
     ["a deeper path under the search (exact match, not a prefix)", `${SEARCH}/x`],
     ["a path that only starts with the search's spelling", `${SEARCH}x`],
   ])("%s still answers 429 at the 31st request", async (_label, pathname) => {
@@ -90,7 +93,7 @@ describe("the middleware's per-IP limit (FR-R2 (1))", () => {
   it("the search's bucket is its own: 240 searches leave another path's 30 untouched", async () => {
     const ip = freshIp();
     await send(SEARCH, ip, 240);
-    const other = await send("/api/locations", ip, 30);
+    const other = await send("/api/stocker/minimums", ip, 30);
     expect(other.filter((status) => status === 429)).toEqual([]);
   });
 });
@@ -144,5 +147,34 @@ describe("the middleware's per-IP limits for the STOCKTAKE paths (P2-B3-2, Kris 
     expect(post.status).not.toBe(429);
     const over = await request("/api/inventory/adjust", ip);
     expect(over.status).toBe(429);
+  });
+});
+
+describe("the middleware's per-IP limit for the LOCATIONS list (facelift F1, Kris 2026-11-19)", () => {
+  it("/api/locations: the 120th request from one IP passes and the 121st is a 429 carrying the 120 limit", async () => {
+    const ip = freshIp();
+    const statuses = await send("/api/locations", ip, 120);
+    expect(statuses.filter((status) => status === 429)).toEqual([]);
+
+    const limited = await request("/api/locations", ip);
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("X-RateLimit-Limit")).toBe("120");
+  });
+
+  it("a deeper path under it keeps the default 30 (exact match, not a prefix)", async () => {
+    const ip = freshIp();
+    const statuses = await send("/api/locations/x", ip, 30);
+    expect(statuses.filter((status) => status === 429)).toEqual([]);
+
+    const limited = await request("/api/locations/x", ip);
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("X-RateLimit-Limit")).toBe("30");
+  });
+
+  it("its bucket is its own: 120 location reads leave another path's 30 untouched", async () => {
+    const ip = freshIp();
+    await send("/api/locations", ip, 120);
+    const other = await send("/api/stocker/minimums", ip, 30);
+    expect(other.filter((status) => status === 429)).toEqual([]);
   });
 });
