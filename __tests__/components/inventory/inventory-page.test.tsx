@@ -226,3 +226,42 @@ test("F1-6 — renders through Page (wide); the header buttons are the actions; 
   expect(header).toContainElement(exportButton);
   expect(exportButton).toHaveClass("flex-1", "sm:flex-initial");
 });
+
+// Facelift FR1-8 (REV 6, OCR-9): `Could not load inventory.` replaced the list
+// on ANY error — a failed refresh over loaded rows wiped them from the screen.
+// It renders only when the read failed with nothing loaded.
+describe("FR1-8 — the inventory list's failure state, beside QueryState's rule", () => {
+  test("a failed REFRESH keeps the rows: no failure sentence over loaded data", async () => {
+    let failVariants = false;
+    global.fetch = jest.fn(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u.includes("/api/inventory/variants")) {
+        if (failVariants) return { ok: false, status: 500, json: async () => ({ error: "boom" }) } as Response;
+        const page = Number(new URL(u, "http://x").searchParams.get("page") || 1);
+        return { ok: true, json: async () => variantsPage(page, 10) } as Response;
+      }
+      return { ok: true, json: async () => ({ logs: [], transfers: [] }) } as Response;
+    }) as unknown as typeof fetch;
+    wrap();
+    expect(await screen.findByRole("button", { name: /Cat1/ })).toBeInTheDocument();
+    const variantReads = () =>
+      (global.fetch as jest.Mock).mock.calls.filter(([u]) => String(u).includes("/api/inventory/variants")).length;
+    const before = variantReads();
+
+    failVariants = true;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(variantReads()).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled());
+    await act(async () => {});
+
+    expect(screen.queryByText("Could not load inventory.")).toBeNull();
+    expect(screen.getByRole("button", { name: /Cat1/ })).toBeInTheDocument();
+  });
+
+  test("a failed FIRST read (nothing loaded) still says so, with Retry (unchanged)", async () => {
+    mockFetch({ failVariants: true });
+    wrap();
+    expect(await screen.findByText("Could not load inventory.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+});

@@ -232,7 +232,10 @@ export default function OrdersPage() {
                   <Package className="h-16 w-16 text-muted-foreground/40" />
                 </div>
                 <h3 className="text-h3 mb-2">No Orders Found</h3>
-                {searchQuery || status !== "all" ? (
+                {/* Facelift FR1-8 (OCR-9): keyed on the search the list was
+                    ASKED for (the debounced one), the status and the platform —
+                    the store-connection copy only when none is set. */}
+                {debouncedSearch || status !== "all" || platform !== "ALL" ? (
                   <p className="text-body text-muted-foreground max-w-sm">
                     No orders match your current filters. Try adjusting your search or status filter.
                   </p>

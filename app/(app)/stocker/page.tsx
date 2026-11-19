@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils";
 import { exportToCSV } from "@/lib/export-utils";
 import { useLocation } from "@/contexts/location-context";
 import { PageHeader } from "@/components/layout/page-header";
+import { noLocationSentence } from "@/components/workbench/wc-order-selector";
 import {
   StockInTransferDialog,
   type StockInProduct,
@@ -197,10 +198,13 @@ function TransferSuggestions({ item, destinationLocationId, onRequestTransfer }:
 }
 
 export default function StockerPage() {
-  const { selectedLocationId, selectedLocation } = useLocation?.() ?? {
-    selectedLocationId: undefined,
-    selectedLocation: null,
-  };
+  const {
+    selectedLocationId,
+    selectedLocation,
+    locations,
+    isLoading: locationsLoading,
+    loadFailed: locationsLoadFailed,
+  } = useLocation();
   // Sort and filter state
   const [sortBy, setSortBy] = useState<SortOption>("name");
   const [searchQuery, setSearchQuery] = useState("");
@@ -212,7 +216,9 @@ export default function StockerPage() {
   // Print ref
   const printRef = useRef<HTMLDivElement>(null);
 
-  // Low-stock refill list for the selected location (read).
+  // Low-stock refill list for the selected location (read). Facelift FR1-4
+  // (GR-4 = OCR-8): never asked with no location — the server would fall back
+  // to the user's default or location 1, a list for somewhere nobody chose.
   const stockerQuery = useQuery<StockerResponse>({
     queryKey: ["stocker-minimums", selectedLocationId ?? null],
     queryFn: async ({ signal }) => {
@@ -226,6 +232,7 @@ export default function StockerPage() {
       if (!res.ok) throw new Error("Failed to load stocker data");
       return res.json();
     },
+    enabled: selectedLocationId !== null,
   });
   const location = stockerQuery.data?.location ?? null;
   const items = useMemo(() => stockerQuery.data?.items ?? [], [stockerQuery.data]);
@@ -418,6 +425,19 @@ export default function StockerPage() {
         </div>
       </PageHeader>
 
+      {/* FR1-4: with no location the list is never asked for, and the location
+          ladder says why (never "everything is fully stocked" for nowhere). */}
+      {selectedLocationId === null && (
+        <div className="text-center py-12">
+          <p className="text-muted-foreground">
+            {noLocationSentence(
+              { isLoading: locationsLoading, loadFailed: locationsLoadFailed, count: locations.length },
+              "Choose a location to see what needs refilling."
+            )}
+          </p>
+        </div>
+      )}
+
       {/* Search and Sort Controls */}
       {!isLoading && !error && hasAnyItems && (
         <div className="flex flex-col sm:flex-row gap-2">
@@ -467,8 +487,8 @@ export default function StockerPage() {
         </div>
       )}
 
-      {/* Empty state: everything is stocked */}
-      {!isLoading && !error && !hasAnyItems && (
+      {/* Empty state: everything is stocked — only on an answer for a location. */}
+      {selectedLocationId !== null && !isLoading && !error && !hasAnyItems && (
         <Card className="border border-positive-border bg-positive-muted">
           <CardContent className="flex flex-col items-center justify-center py-12 text-center">
             <CheckCircle2 className="h-12 w-12 text-positive mb-4" />

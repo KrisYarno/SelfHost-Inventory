@@ -132,4 +132,12 @@ describe("F1-8 — landmarks", () => {
     expect(mains[0]).toHaveAttribute("tabindex", "-1");
     expect(within(mains[0]).getByTestId("page")).toBeInTheDocument();
   });
+
+  // Facelift FR1-9 (REV 6, OCR-10): the skip link focuses <main> (tabIndex -1),
+  // and the browser's focus outline then ringed the whole page.
+  it("FR1-9 — the skip target draws no focus outline: <main> has focus:outline-none", () => {
+    const { container } = renderShell();
+    const main = container.querySelector("main") as HTMLElement;
+    expect(classesOf(main)).toContain("focus:outline-none");
+  });
 });

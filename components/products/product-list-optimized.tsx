@@ -230,8 +230,11 @@ export function ProductListOptimized({
       {/* Results Summary — this page out of the response's total; with a stock
           filter on, how many of THIS page's rows match (the filter is
           client-side, over one page). */}
-      {/* FR1-7: only when this page has rows — never "Showing 26–25 of 20". */}
-      {rowsOnPage > 0 && (
+      {/* FR1-7: only when this page has rows — never "Showing 26–25 of 20".
+          Facelift FR1-7 (GR-7 = OCR-7): and with a stock filter on, only when
+          something on the page matches — the empty-state sentence says it
+          when nothing does. */}
+      {rowsOnPage > 0 && (stockFilter === "all" || filteredProducts.length > 0) && (
         <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground px-1 md:px-0">
           <span>
             {stockFilter === "all"

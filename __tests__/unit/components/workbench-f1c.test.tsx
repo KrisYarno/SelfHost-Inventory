@@ -344,7 +344,11 @@ describe("F1-15 — the product grid when the products read failed", () => {
 // ---------------------------------------------------------------------------
 
 describe("F1-10 — a cart built from no one location's rows, with no location selected (null/null)", () => {
+  // Facelift FR1-3 (REV 6, GR-2 = OCR-6): with no location the order is not
+  // "updating for the selected location" — that sentence (F1-10's original pin)
+  // is gone; the location ladder says why Complete waits.
   const UPDATING_UNKNOWN = "Updating this order for the selected location…";
+  const NO_LOCATION = "Choose a location to complete this order.";
 
   it("is not built here: Complete waits and says why", async () => {
     act(() => {
@@ -353,7 +357,8 @@ describe("F1-10 — a cart built from no one location's rows, with no location s
     locationContext = at(null);
     renderPage();
 
-    expect(await screen.findByText(UPDATING_UNKNOWN)).toBeInTheDocument();
+    expect(await screen.findByText(NO_LOCATION)).toBeInTheDocument();
+    expect(screen.queryByText(UPDATING_UNKNOWN)).toBeNull();
     expect(screen.getByRole("button", { name: "Complete & Fulfill" })).toBeDisabled();
     // Nothing was read, so nothing was rebuilt or cleared.
     await act(async () => {});
@@ -371,7 +376,7 @@ describe("F1-10 — a cart built from no one location's rows, with no location s
 
     await waitFor(() => expect(sheetProps).not.toBeNull());
     expect(sheetProps!.canComplete).toBe(false);
-    expect(sheetProps!.updatingNotice).toBe(UPDATING_UNKNOWN);
+    expect(sheetProps!.updatingNotice).toBe(NO_LOCATION);
     expect(sheetProps!.cartReadOnly).toBe(true);
   });
 
@@ -431,5 +436,83 @@ describe("F1-11 — a picker confirm while the order is updating", () => {
     expect(toast.success).toHaveBeenCalledTimes(1);
     expect(toast.info).not.toHaveBeenCalledWith(UPDATING_INFO);
     expect(useWorkbench.getState().orderItems).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift FR1-3 (REV 6, GR-2 = OCR-6): no location is not "updating"
+// ---------------------------------------------------------------------------
+
+describe("FR1-3 — with no location, the page's notice, the sheet's notice and the picker's refusal say why", () => {
+  const NO_LOCATION = "Choose a location to complete this order.";
+  const UPDATING_ANY = /^Updating this order for /;
+  const UPDATING_INFO = "This order is updating — add items once it's done.";
+
+  // The location ladder's rungs, as the context reports them with nothing selected.
+  const RUNGS: Array<[label: string, list: Partial<LocationContext>, sentence: string]> = [
+    ["loading", { locations: [], isLoading: true }, "Loading locations…"],
+    ["failed, nothing loaded", { locations: [], loadFailed: true }, "Couldn't load locations."],
+    ["zero locations", { locations: [] }, "No locations configured."],
+    ["loaded, none selected", {}, NO_LOCATION],
+  ];
+
+  it.each(RUNGS)("the page's notice (%s): the ladder, never an updating sentence; Complete disabled", async (_label, list, sentence) => {
+    act(() => {
+      useWorkbench.getState().selectExternalOrder(ORDER_X, MAIN_ROWS, 1);
+    });
+    locationContext = { ...at(null), ...list };
+    renderPage();
+
+    // The cart's notice (the grid states the same rung in its own, larger line).
+    const notice = await screen.findByText(sentence, { selector: "p.text-xs" });
+    expect(notice).toHaveClass("text-muted-foreground");
+    expect(screen.queryByText(UPDATING_ANY)).toBeNull();
+    expect(screen.getByRole("button", { name: "Complete & Fulfill" })).toBeDisabled();
+  });
+
+  it.each(RUNGS)("the sheet's notice (%s): the ladder; Complete disabled", async (_label, list, sentence) => {
+    setWidth(375);
+    act(() => {
+      useWorkbench.getState().selectExternalOrder(ORDER_X, MAIN_ROWS, 1);
+    });
+    locationContext = { ...at(null), ...list };
+    renderPage();
+
+    await waitFor(() => expect(sheetProps).not.toBeNull());
+    expect(sheetProps!.updatingNotice).toBe(sentence);
+    expect(sheetProps!.canComplete).toBe(false);
+  });
+
+  it.each(RUNGS)("the picker's refusal (%s): the ladder as the toast, never the updating one", async (_label, list, sentence) => {
+    act(() => {
+      useWorkbench.getState().selectExternalOrder(ORDER_X, MAIN_ROWS, 1);
+    });
+    const { rerender } = renderPage();
+    await waitFor(() => expect(tileButtons().length).toBe(2));
+    fireEvent.click(tileButtons()[0]);
+    expect(await screen.findByText("Select Quantity")).toBeInTheDocument();
+
+    // The location goes away under the open picker.
+    locationContext = { ...at(null), ...list };
+    rerender();
+    await waitFor(() => expect(screen.getByText(sentence, { selector: "p.text-xs" })).toBeInTheDocument());
+    const before = useWorkbench.getState().orderItems.map((i) => [i.product.id, i.quantity]);
+
+    fireEvent.click(screen.getByRole("button", { name: "1" }));
+    expect(toast.info).toHaveBeenCalledTimes(1);
+    expect(toast.info).toHaveBeenCalledWith(sentence);
+    expect(toast.info).not.toHaveBeenCalledWith(UPDATING_INFO);
+    expect(useWorkbench.getState().orderItems.map((i) => [i.product.id, i.quantity])).toEqual(before);
+  });
+
+  it("with a location, the updating sentences are unchanged", async () => {
+    act(() => {
+      useWorkbench.getState().selectExternalOrder(ORDER_X, MAIN_ROWS, 1);
+    });
+    stockReply[2] = () => new Promise<Response>(() => {});
+    locationContext = at(OVERFLOW);
+    renderPage();
+    expect(await screen.findByText("Updating this order for Overflow…")).toBeInTheDocument();
+    expect(screen.queryByText(NO_LOCATION)).toBeNull();
   });
 });

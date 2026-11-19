@@ -683,7 +683,10 @@ function Drawer({
   return (
     <div className="fixed inset-0 z-50">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="absolute inset-x-0 bottom-0 max-h-[90%] rounded-t-2xl border border-border bg-background shadow-lg">
+      {/* Facelift FR1-6 (OCR-3): the sheet sits ABOVE the dock (the one
+          --dock-height variable, 0 at md and up), and a tall drawer scrolls
+          its body rather than running under the dock. */}
+      <div className="absolute inset-x-0 bottom-[calc(var(--dock-height)+env(safe-area-inset-bottom))] flex max-h-[90%] flex-col rounded-t-2xl border border-border bg-background shadow-lg">
         <div className="flex items-start justify-between gap-2 border-b border-border px-4 py-3">
           <div>
             <p className="text-sm font-semibold">{product.name}</p>
@@ -693,7 +696,7 @@ function Drawer({
             Close
           </Button>
         </div>
-        <div className="space-y-4 overflow-y-auto px-4 py-3">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-3">
           <div className="space-y-2">
             <label className="text-xs font-medium text-muted-foreground">
               Low-stock alert threshold

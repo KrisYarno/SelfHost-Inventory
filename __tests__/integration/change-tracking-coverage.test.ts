@@ -191,6 +191,13 @@ const PERMANENT_EXEMPT: Exemption[] = [
     reason: "CSRF token mint (currently GET-only; defensively permanent)",
   },
   {
+    // Facelift FR1-5 (plan 2026-11-18-facelift-f1, REV 6; GR-5 = OCR-5).
+    path: "app/api/[...missing]/route.ts",
+    reason:
+      "the unknown-API-path catch-all: every verb answers a JSON 404 " +
+      '({ error: "Not found" }) and touches nothing — no persistent state',
+  },
+  {
     path: "app/api/healthz/route.ts",
     reason: "liveness probe (currently GET-only; defensively permanent)",
   },

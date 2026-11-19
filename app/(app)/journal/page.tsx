@@ -34,6 +34,7 @@ import {
 import { useInventoryProducts } from "@/hooks/use-inventory-products";
 import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
 import { useLocation } from "@/contexts/location-context";
+import { noLocationSentence } from "@/components/workbench/wc-order-selector";
 import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
 import { useLowStockDefault } from "@/hooks/use-low-stock-default";
 import { apiErrorMessage, readApiError } from "@/lib/api-error";
@@ -51,7 +52,12 @@ import { StickyActionBar } from "@/components/layout/sticky-action-bar";
 export default function JournalPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
-  const { selectedLocationId, locations } = useLocation();
+  const {
+    selectedLocationId,
+    locations,
+    isLoading: locationsLoading,
+    loadFailed: locationsLoadFailed,
+  } = useLocation();
   const { token: csrfToken } = useCSRF();
   const lowStockDefault = useLowStockDefault();
   const queryClient = useQueryClient();
@@ -417,8 +423,14 @@ export default function JournalPage() {
   // at the refusal — the counter appears well before the limit bites.
   const showItemCounter = itemCount > JOURNAL_COUNTER_FROM;
   const overItemCap = itemCount > MAX_JOURNAL_ITEMS;
+  // Facelift FR1-1 (GR-3): with no location, the tag says why — still loading,
+  // failed, none configured, or none chosen (the location chip's own states).
   const selectedLocationName =
-    locations.find((loc) => loc.id === selectedLocationId)?.name ?? "Select a location";
+    locations.find((loc) => loc.id === selectedLocationId)?.name ??
+    noLocationSentence(
+      { isLoading: locationsLoading, loadFailed: locationsLoadFailed, count: locations.length },
+      "Choose a location first."
+    );
 
   const hasAnyChanges = hasChanges();
 

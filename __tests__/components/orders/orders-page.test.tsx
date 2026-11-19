@@ -462,3 +462,59 @@ describe("F1-17 — the Orders search reset", () => {
     await loaded(50);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Facelift FR1-8 (REV 6, OCR-9) — the empty copy keys on the DEBOUNCED search
+// and on the active filters. Before, it read the RAW search box (so a keystroke
+// flipped the copy over a list that was still the unfiltered answer) and only
+// the status (so a platform filter with no orders said "connect a store").
+// ---------------------------------------------------------------------------
+
+describe("FR1-8 — the Orders empty copy", () => {
+  const FILTERED = "No orders match your current filters. Try adjusting your search or status filter.";
+  const CONNECT = /Orders will appear here once you connect a Shopify or WooCommerce store\./;
+
+  async function emptyAnswer() {
+    totalOrders = 0;
+    renderPage();
+    await waitFor(() => {
+      expect(lastOrderRequest().searchParams.get("companyId")).toBe("c1");
+      expect(screen.getByText("No Orders Found")).toBeInTheDocument();
+    });
+  }
+
+  it("no filter set: the store-connection copy (unchanged)", async () => {
+    await emptyAnswer();
+    expect(screen.getByText(CONNECT)).toBeInTheDocument();
+    expect(screen.queryByText(FILTERED)).toBeNull();
+  });
+
+  it("a platform filter with no orders: the filtered copy, never `connect a store`", async () => {
+    await emptyAnswer();
+    fireEvent.click(screen.getByRole("button", { name: "change platform" }));
+    await waitFor(() => expect(lastOrderRequest().searchParams.get("platform")).toBe("WOOCOMMERCE"));
+    expect(await screen.findByText(FILTERED)).toBeInTheDocument();
+    expect(screen.queryByText(CONNECT)).toBeNull();
+  });
+
+  it("a status filter with no orders: the filtered copy (unchanged)", async () => {
+    await emptyAnswer();
+    fireEvent.click(screen.getByRole("button", { name: "change status" }));
+    await waitFor(() => expect(lastOrderRequest().searchParams.get("status")).toBe("PENDING"));
+    expect(await screen.findByText(FILTERED)).toBeInTheDocument();
+  });
+
+  it("the search counts once it is the search the list was ASKED for — not on the keystroke", async () => {
+    await emptyAnswer();
+    fireEvent.click(screen.getByRole("button", { name: "change search" }));
+    // Typed, not yet applied: the list is still the unfiltered answer, so the
+    // copy is still the unfiltered one.
+    expect(screen.getByText(CONNECT)).toBeInTheDocument();
+    expect(screen.queryByText(FILTERED)).toBeNull();
+
+    // The debounced search applies, and ITS empty answer is a filtered one.
+    await waitFor(() => expect(lastOrderRequest().searchParams.get("search")).toBe("10"));
+    expect(await screen.findByText(FILTERED)).toBeInTheDocument();
+    expect(screen.queryByText(CONNECT)).toBeNull();
+  });
+});

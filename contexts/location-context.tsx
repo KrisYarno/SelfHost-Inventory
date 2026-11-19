@@ -10,7 +10,14 @@ const SELECTED_LOCATION_KEY = 'selectedLocationId';
 
 interface LocationContextType {
   locations: Location[];
+  /**
+   * Facelift FR1-1: the selected location, ONLY once a successful read has
+   * confirmed it is in the list. A saved id is never handed out on its own:
+   * while the list is loading, or its first read failed, every consumer — and
+   * so every stock write — sees `null`.
+   */
   selectedLocation: Location | null;
+  /** `selectedLocation?.id ?? null`: a confirmed id, or none (FR1-1). */
   selectedLocationId: number | null;
   setSelectedLocationId: (locationId: number) => void;
   isLoading: boolean;
@@ -29,18 +36,22 @@ const LocationContext = createContext<LocationContextType | undefined>(undefined
 export function LocationProvider({ children }: { children: ReactNode }) {
   const { data: session } = useSession();
   const [locations, setLocations] = useState<Location[]>([]);
-  const [selectedLocationId, setSelectedLocationId] = useState<number | null>(null);
+  // Facelift FR1-1: the id the rules work on — restored from localStorage,
+  // chosen on the chip, or picked on a first visit. It stays INTERNAL: what
+  // consumers get is `selectedLocationId` below, the same id only once a
+  // successful read has it in the list.
+  const [rawLocationId, setRawLocationId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
   // Bumped by `retryLocations` to run the fetch below again.
   const [reloadKey, setReloadKey] = useState(0);
   const defaultLocationId = session?.user?.defaultLocationId ?? null;
-  // Facelift F1-5: set when a saved id was discarded with no default to fall
-  // back to. The selection then stays empty — the chip asks — until the user
-  // chooses; a later read never fills it in on their behalf.
+  // Facelift F1-5 / FR1-2: set when a saved id was discarded. The selection
+  // then stays empty — the chip asks — until the user chooses; a later read
+  // never fills it in on their behalf.
   const awaitingChoiceRef = useRef(false);
   // Set once a stale id's discard has been announced, until an id is kept: the
-  // warning shows ONCE per discard, whichever way it went.
+  // warning shows ONCE per discard.
   const staleWarnedRef = useRef(false);
 
   // Fetch locations on mount. The read only loads the list: which location is
@@ -80,13 +91,13 @@ export function LocationProvider({ children }: { children: ReactNode }) {
   // Facelift F1-5 — which location every stock write targets. The rules run on
   // every SUCCESSFUL read, and never against a loading or failed one: a failed
   // refresh over a loaded list changes nothing, and a failed first read leaves
-  // the saved id alone.
+  // the saved id alone (unpublished — FR1-1).
   //   - empty list: nothing is selected, and the saved id is removed;
   //   - a current id in the list: kept;
-  //   - a current id NOT in the list (stale): discarded, for the user's default
-  //     when it is in the list, otherwise for nothing — the chip asks. Either
-  //     way a warning says ONCE where writes now land. A discarded id never
-  //     falls to the first location;
+  //   - a current id NOT in the list (stale): discarded for NOTHING — the chip
+  //     asks, and a warning says so ONCE. A discarded id never becomes a write
+  //     target on its own: not the user's default, not the first location
+  //     (FR1-2, reversing REV 4 (A));
   //   - nothing saved (first visit): the default when it is in the list,
   //     otherwise the first location.
   // The updaters only apply to the id the decision was made about, so a choice
@@ -97,22 +108,21 @@ export function LocationProvider({ children }: { children: ReactNode }) {
     if (locations.length === 0) {
       awaitingChoiceRef.current = false;
       staleWarnedRef.current = false;
-      setSelectedLocationId(null);
+      setRawLocationId(null);
       localStorage.removeItem(SELECTED_LOCATION_KEY);
       return;
     }
 
     const inList = (id: number | null) => id !== null && locations.some((loc) => loc.id === id);
-    const fallback = inList(defaultLocationId) ? defaultLocationId : null;
 
-    if (selectedLocationId === null) {
+    if (rawLocationId === null) {
       if (awaitingChoiceRef.current) return;
-      const first = fallback ?? locations[0].id;
-      setSelectedLocationId((current) => (current === null ? first : current));
+      const first = (inList(defaultLocationId) ? defaultLocationId : null) ?? locations[0].id;
+      setRawLocationId((current) => (current === null ? first : current));
       return;
     }
 
-    if (inList(selectedLocationId)) {
+    if (inList(rawLocationId)) {
       awaitingChoiceRef.current = false;
       staleWarnedRef.current = false;
       return;
@@ -120,34 +130,33 @@ export function LocationProvider({ children }: { children: ReactNode }) {
 
     if (!staleWarnedRef.current) {
       staleWarnedRef.current = true;
-      const fallbackLocation = locations.find((loc) => loc.id === fallback);
-      toast.warning(
-        fallbackLocation
-          ? `Your saved location is no longer available — now working at ${fallbackLocation.name}.`
-          : 'Your saved location is no longer available. Choose a location.'
-      );
+      toast.warning('Your saved location is no longer available. Choose a location.');
     }
-    if (fallback === null) awaitingChoiceRef.current = true;
-    const discarded = selectedLocationId;
-    setSelectedLocationId((current) => (Object.is(current, discarded) ? fallback : current));
-  }, [locations, isLoading, loadFailed, selectedLocationId, defaultLocationId]);
+    awaitingChoiceRef.current = true;
+    const discarded = rawLocationId;
+    setRawLocationId((current) => (Object.is(current, discarded) ? null : current));
+  }, [locations, isLoading, loadFailed, rawLocationId, defaultLocationId]);
 
   // Save selected location to localStorage
   useEffect(() => {
-    if (selectedLocationId) {
-      localStorage.setItem(SELECTED_LOCATION_KEY, selectedLocationId.toString());
+    if (rawLocationId) {
+      localStorage.setItem(SELECTED_LOCATION_KEY, rawLocationId.toString());
     }
-  }, [selectedLocationId]);
+  }, [rawLocationId]);
 
   // Load selected location from localStorage on mount
   useEffect(() => {
     const savedLocationId = localStorage.getItem(SELECTED_LOCATION_KEY);
     if (savedLocationId) {
-      setSelectedLocationId((current) => current ?? parseInt(savedLocationId));
+      setRawLocationId((current) => current ?? parseInt(savedLocationId));
     }
   }, []);
 
-  const selectedLocation = locations.find(loc => loc.id === selectedLocationId) || null;
+  // FR1-1: only an id a successfully loaded list holds is published. `locations`
+  // only ever holds a successful answer (a failed refresh keeps the last one),
+  // so a restored id waits — as `null` — for the read that confirms it.
+  const selectedLocation = locations.find(loc => loc.id === rawLocationId) || null;
+  const selectedLocationId = selectedLocation?.id ?? null;
 
   // P2 (Lane 5): memoize the context value so an unrelated parent re-render does
   // not hand every consumer a fresh object literal (which forced a needless
@@ -158,7 +167,7 @@ export function LocationProvider({ children }: { children: ReactNode }) {
       locations,
       selectedLocation,
       selectedLocationId,
-      setSelectedLocationId,
+      setSelectedLocationId: setRawLocationId,
       isLoading,
       loadFailed,
       retryLocations,

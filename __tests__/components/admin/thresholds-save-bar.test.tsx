@@ -105,3 +105,50 @@ describe("Thresholds — the list view's row button is size=compact (F1-1)", () 
     expect(classesOf(undo)).toEqual(expect.arrayContaining(["h-8", "max-md:min-h-11", "max-md:min-w-11"]));
   });
 });
+
+// Facelift FR1-6 (REV 6, OCR-3): the per-product drawer's sheet sat at
+// `bottom-0`, UNDER the fixed dock on a phone — its last location rows and
+// steppers hidden behind it — and its body could not scroll past it.
+describe("Thresholds — the drawer sits above the dock, and a tall drawer scrolls (FR1-6)", () => {
+  async function openDrawer() {
+    const user = userEvent.setup();
+    render(<MinimumSettingsPage />);
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: "List" }));
+    });
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: "Edit per-location minimums for Widget A" }));
+    });
+    // The drawer's own Close (the sheet's header) — the sheet is its parents.
+    const close = screen.getByRole("button", { name: "Close" });
+    const header = close.parentElement as HTMLElement;
+    const sheet = header.parentElement as HTMLElement;
+    return { header, sheet };
+  }
+
+  it("the sheet is anchored at the dock through the variable, as a flex column", async () => {
+    const { sheet } = await openDrawer();
+    const cls = classesOf(sheet);
+    expect(cls).toEqual(
+      expect.arrayContaining([
+        "absolute",
+        "inset-x-0",
+        "bottom-[calc(var(--dock-height)+env(safe-area-inset-bottom))]",
+        "flex",
+        "flex-col",
+        "max-h-[90%]",
+      ])
+    );
+    expect(cls).not.toContain("bottom-0");
+    expect(classesOf(sheet.parentElement as HTMLElement)).toEqual(
+      expect.arrayContaining(["fixed", "inset-0", "z-50"])
+    );
+  });
+
+  it("its body is the part that scrolls: min-h-0 flex-1 overflow-y-auto", async () => {
+    const { header } = await openDrawer();
+    const body = header.nextElementSibling as HTMLElement;
+    expect(body).toHaveTextContent("Low-stock alert threshold");
+    expect(classesOf(body)).toEqual(expect.arrayContaining(["min-h-0", "flex-1", "overflow-y-auto"]));
+  });
+});

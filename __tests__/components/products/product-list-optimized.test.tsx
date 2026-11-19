@@ -448,3 +448,47 @@ describe("FR1-8 — re-seeding from global search", () => {
     expect(replaceStateSpy).not.toHaveBeenCalled();
   });
 });
+
+// Facelift FR1-7 (REV 6, GR-7 = OCR-7): with a stock filter on and NOTHING on
+// the page matching, the summary read `0 of the 25 products on this page match`
+// (and `0 of the 1 products…` on a one-row page) above the empty-state sentence
+// that already says it. The summary is not rendered then.
+describe("FR1-7 — the summary when nothing on the page matches", () => {
+  beforeEach(() => {
+    mockIsMobile = true;
+  });
+
+  it.each([
+    ["a page of several", 60, "No products on this page match — try another page or clear the filter."],
+    ["the only page", 10, "No products match — clear the filter."],
+    ["a one-row page", 1, "No products match — clear the filter."],
+  ])("%s: no summary line — the empty-state sentence says it", async (_label, total, sentence) => {
+    rows = catalogue(total);
+    renderList();
+    await screen.findByText(/^Showing 1–/);
+    fireEvent.click(screen.getByRole("button", { name: "filter: out of stock" }));
+
+    expect(screen.getByText(sentence)).toBeInTheDocument();
+    expect(screen.queryByText(/of the \d+ products? on this page match/)).toBeNull();
+    expect(screen.queryByText(/^0 of the/)).toBeNull();
+    expect(screen.queryByText(/^Showing/)).toBeNull();
+  });
+
+  it("the one-row match keeps `The one product on this page matches`", async () => {
+    rows = catalogue(1, [1]);
+    renderList();
+    await screen.findByText("Showing 1–1 of 1 product");
+    fireEvent.click(screen.getByRole("button", { name: "filter: out of stock" }));
+    expect(screen.getByText("The one product on this page matches")).toBeInTheDocument();
+  });
+
+  it("clearing the filter brings the `Showing` line back", async () => {
+    rows = catalogue(10);
+    renderList();
+    await screen.findByText("Showing 1–10 of 10 products");
+    fireEvent.click(screen.getByRole("button", { name: "filter: out of stock" }));
+    expect(screen.queryByText(/^Showing/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "filter: all" }));
+    expect(screen.getByText("Showing 1–10 of 10 products")).toBeInTheDocument();
+  });
+});

@@ -93,11 +93,13 @@ export function AppShell({ children }: AppShellProps) {
 
       {/* THE single main — the only children render (R-A2). Mobile bottom
           padding keeps content clear of the fixed dock + safe-area inset; the
-          dock height is the one --dock-height variable (facelift F1-3). */}
+          dock height is the one --dock-height variable (facelift F1-3). It is
+          the skip link's target (tabIndex -1), so focusing it draws no outline
+          around the whole page (FR1-9). */}
       <main
         id="main"
         tabIndex={-1}
-        className="min-h-0 flex-1 overflow-y-auto pb-[calc(var(--dock-height)+env(safe-area-inset-bottom))] md:pb-0"
+        className="min-h-0 flex-1 overflow-y-auto pb-[calc(var(--dock-height)+env(safe-area-inset-bottom))] md:pb-0 focus:outline-none"
       >
         {children}
       </main>

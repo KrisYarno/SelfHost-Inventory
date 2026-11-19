@@ -257,7 +257,9 @@ export default function InventoryPage() {
                   </Card>
                 ))}
               </div>
-            ) : variants.isError ? (
+            ) : variants.isError && variants.data === undefined ? (
+              // Facelift FR1-8 (OCR-9): a failure only with nothing loaded — a
+              // failed refresh (or Load more) keeps the rows on screen.
               <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-8 text-center">
                 <p className="text-sm text-destructive">Could not load inventory.</p>
                 <Button

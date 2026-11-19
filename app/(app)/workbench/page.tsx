@@ -806,6 +806,17 @@ export default function WorkbenchPage() {
   const rebuildLive = rebuildSeq !== null && rebuildSeq === selectionSeq;
   const orderUpdating = rebuildPending || rebuildLive;
   const locationName = selectedLocation?.name ?? "the selected location";
+  /**
+   * Facelift FR1-3 (GR-2 = OCR-6): with no location there is nothing to update
+   * the order FOR — "Updating this order for the selected location…" would be
+   * untrue. The notice, the sheet's notice and the picker's refusal say why
+   * instead (the location ladder); Complete stays disabled.
+   */
+  const noLocationNotice =
+    selectedLocationId === null
+      ? noLocationSentence(locationList, "Choose a location to complete this order.")
+      : null;
+  const updatingSentence = noLocationNotice ?? `Updating this order for ${locationName}…`;
 
   /**
    * FR2-1, the flip-back (FD1-1): the location went back to the one the cart
@@ -896,8 +907,9 @@ export default function WorkbenchPage() {
 
   const handleQuantityConfirm = (quantity: number) => {
     // F1-11 (F0 FD2-5): the picker closes either way, so a refused add says why.
+    // FR1-3: with no location, why is the location, not an update.
     if (orderUpdating) {
-      toast.info("This order is updating — add items once it's done.");
+      toast.info(noLocationNotice ?? "This order is updating — add items once it's done.");
       return;
     }
     if (selectedProduct) {
@@ -1291,11 +1303,9 @@ export default function WorkbenchPage() {
                 <span className="font-medium">{getTotalQuantity()} units</span>
               </div>
 
-              {/* FR1-1 (d): why Complete is waiting. */}
+              {/* FR1-1 (d): why Complete is waiting (FR1-3: or that there is no location). */}
               {orderUpdating && (
-                <p className="text-xs text-muted-foreground">
-                  {`Updating this order for ${locationName}…`}
-                </p>
+                <p className="text-xs text-muted-foreground">{updatingSentence}</p>
               )}
 
               <div className="flex gap-2 pt-2">
@@ -1351,7 +1361,7 @@ export default function WorkbenchPage() {
           onClearOrder={handleClearOrder}
           onCompleteOrder={handleCompleteOrder}
           canComplete={orderItems.length > 0 && !!orderReference.trim() && !orderUpdating}
-          updatingNotice={orderUpdating ? `Updating this order for ${locationName}…` : null}
+          updatingNotice={orderUpdating ? updatingSentence : null}
           cartReadOnly={orderUpdating}
           queuePosition={getQueuePosition()}
           onItemMapped={refetchExternalOrder}

@@ -23,6 +23,7 @@ import { ContextTag } from "@/components/ui/context-tag";
 import { ReceivingRedirectPrompt } from "@/components/inventory/receiving-redirect-prompt";
 import { IntentChip } from "@/components/inventory/intent-chip";
 import { OrderNumberField, type OrderCapture } from "@/components/inventory/order-number-field";
+import { noLocationSentence } from "@/components/workbench/wc-order-selector";
 import type { DeductionIntent } from "@/lib/inventory/intent";
 import { apiErrorMessage } from "@/lib/api-error";
 import { SELECTED_ORDER_REJECTED_SENTENCE } from "@/lib/orders/order-capture-sentences";
@@ -115,7 +116,12 @@ export function QuickAdjustDialog({
   product,
   onSuccess,
 }: QuickAdjustDialogProps) {
-  const { selectedLocationId, locations } = useLocation();
+  const {
+    selectedLocationId,
+    locations,
+    isLoading: locationsLoading,
+    loadFailed: locationsLoadFailed,
+  } = useLocation();
   // Default Remove (row 106): most adjustments here are stock leaving.
   const [mode, setMode] = useState<"remove" | "add" | "count">("remove");
   // Digits only, as typed: the field refuses anything else.
@@ -189,9 +195,19 @@ export function QuickAdjustDialog({
   const captureIllShaped =
     captureLive && capture.picked === null && capture.text !== "" && !textWellShaped;
 
+  // Facelift FR1-1: with no location, the blocker says why — still loading,
+  // failed, none configured, or none chosen (F1-18's sentence for that rung).
+  const noLocationBlocker =
+    selectedLocationId === null
+      ? noLocationSentence(
+          { isLoading: locationsLoading, loadFailed: locationsLoadFailed, count: locations.length },
+          "Close this and choose a location first.",
+        )
+      : null;
+
   const blockers: string[] = [];
-  if (selectedLocationId === null) {
-    blockers.push("Close this and choose a location first.");
+  if (noLocationBlocker !== null) {
+    blockers.push(noLocationBlocker);
   }
   if (q === null || q === 0) blockers.push("Enter how many units.");
   if (isRemove && knownStock !== null && q !== null && q > knownStock) {
@@ -293,8 +309,8 @@ export function QuickAdjustDialog({
   // states, so a notice set while the re-read failed shows once it recovers.
   // Offline is a wait, not an error: MUTED, like the read in flight.
   const countMessage: { text: string; tone: "destructive" | "muted" | "warning" } | null =
-    selectedLocationId === null
-      ? { text: "Close this and choose a location first.", tone: "destructive" }
+    noLocationBlocker !== null
+      ? { text: noLocationBlocker, tone: "destructive" }
       : countRead === "reading"
         ? { text: "Reading stock…", tone: "muted" }
         : countRead === "offline"

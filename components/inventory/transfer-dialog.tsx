@@ -104,9 +104,11 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
   // effect keyed on `locations` re-seeded an OPEN draft whenever the context
   // handed out a new array (a session refetch on tab return), wiping what the
   // operator had typed and chosen.
+  // Facelift FR1-4 (GR-4 = OCR-8): with no location selected, From starts EMPTY
+  // and the operator picks it — never a silent first location.
   const [seed] = React.useState(() => {
     if (!locations.length) return { from: null, to: null };
-    const from = selectedLocationId ?? locations[0]?.id ?? null;
+    const from = selectedLocationId;
     return { from, to: locations.find((l) => l.id !== from)?.id ?? null };
   });
   const [fromLocationId, setFromLocationId] = React.useState<number | null>(seed.from);

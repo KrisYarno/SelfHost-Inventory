@@ -36,6 +36,7 @@ import {
   classifySkippedLine,
 } from "@/lib/workbench/skipped-lines";
 import { IntentChip } from "@/components/inventory/intent-chip";
+import { noLocationSentence } from "@/components/workbench/wc-order-selector";
 import type { WorkbenchIntent } from "@/lib/inventory/intent";
 
 // ---------------------------------------------------------------------------
@@ -160,7 +161,13 @@ export function CompleteOrderDialog({
     selectedExternalOrder,
     unmappedExternalItems,
   } = useWorkbench();
-  const { selectedLocationId, selectedLocation } = useLocation();
+  const {
+    selectedLocationId,
+    selectedLocation,
+    locations,
+    isLoading: locationsLoading,
+    loadFailed: locationsLoadFailed,
+  } = useLocation();
   const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
   const queryClient = useQueryClient();
 
@@ -198,6 +205,15 @@ export function CompleteOrderDialog({
     (selectedExternalOrder.builtAtLocationId !== selectedLocationId ||
       selectedExternalOrder.builtAtLocationId === null);
   const locationName = selectedLocation?.name ?? "the selected location";
+  // Facelift FR1-3 (GR-2 = OCR-6): with no location the order is not being
+  // updated for anywhere — the line says why there is no location instead.
+  const notBuiltHereLine =
+    selectedLocationId === null
+      ? noLocationSentence(
+          { isLoading: locationsLoading, loadFailed: locationsLoadFailed, count: locations.length },
+          "Choose a location to complete this order."
+        )
+      : `This order is being updated for ${locationName} — wait a moment.`;
 
   // Amendment 2: Split cart items by source for dual API calls
   const { wcItems, manualItems } = useMemo(() => {
@@ -1218,9 +1234,7 @@ export function CompleteOrderDialog({
 
                   {/* FR2-2: why the action is waiting. */}
                   {notBuiltHere && (
-                    <p className="text-sm text-muted-foreground">
-                      {`This order is being updated for ${locationName} — wait a moment.`}
-                    </p>
+                    <p className="text-sm text-muted-foreground">{notBuiltHereLine}</p>
                   )}
                 </div>
               </fieldset>

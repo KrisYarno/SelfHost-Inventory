@@ -29,7 +29,14 @@ jest.mock("@/hooks/use-csrf", () => ({
 type Loc = { id: number; name: string };
 const MAIN: Loc = { id: 1, name: "Main" };
 const OVERFLOW: Loc = { id: 2, name: "Overflow" };
-let mockLocation: { selectedLocationId: number | null; selectedLocation: Loc | null };
+let mockLocation: {
+  selectedLocationId: number | null;
+  selectedLocation: Loc | null;
+  // Read only with no location (FR1-3's ladder); a selected location needs none.
+  locations?: Loc[];
+  isLoading?: boolean;
+  loadFailed?: boolean;
+};
 jest.mock("@/contexts/location-context", () => ({
   useLocation: () => mockLocation,
 }));
@@ -184,17 +191,24 @@ describe("FR2-2 — the dialog checks the location itself", () => {
   // Facelift F1-10 (F0 FD2-4): the null/null edge — a build that read no one
   // location's rows, with no location selected. `null !== null` is false, so the
   // check used to call that cart built here; it is stated outright now.
+  // FR1-3 (REV 6): with no location the line is the location ladder's, never
+  // "being updated for the selected location" (F1-10's original sentence).
   it("F1-10 — null/null: a build from no one location's rows, with no location selected, is not built here", async () => {
     act(() => {
       useWorkbench.getState().selectExternalOrder(ORDER, ROWS, null);
     });
-    mockLocation = { selectedLocationId: null, selectedLocation: null };
+    mockLocation = {
+      selectedLocationId: null,
+      selectedLocation: null,
+      locations: [MAIN, OVERFLOW],
+      isLoading: false,
+      loadFailed: false,
+    };
     renderDialog();
 
     expect(action("Complete & Fulfill")).toBeDisabled();
-    expect(
-      screen.getByText("This order is being updated for the selected location — wait a moment.")
-    ).toBeInTheDocument();
+    expect(screen.getByText("Choose a location to complete this order.")).toBeInTheDocument();
+    expect(screen.queryByText(UPDATING_ANY)).toBeNull();
 
     // The submit handler refuses as well, past the disabled action.
     const node = action("Complete & Fulfill") as unknown as Record<string, unknown>;
@@ -227,5 +241,37 @@ describe("FR2-2 — the dialog checks the location itself", () => {
 
     expect(action("Complete Order")).toBeEnabled();
     expect(screen.queryByText(UPDATING_ANY)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Facelift FR1-3 (REV 6, GR-2 = OCR-6): no location is not "updating"
+// ---------------------------------------------------------------------------
+
+describe("FR1-3 — with no location, the dialog's line is the location ladder", () => {
+  it.each([
+    ["loading", { locations: [], isLoading: true, loadFailed: false }, "Loading locations…"],
+    ["failed, nothing loaded", { locations: [], isLoading: false, loadFailed: true }, "Couldn't load locations."],
+    ["zero locations", { locations: [], isLoading: false, loadFailed: false }, "No locations configured."],
+    [
+      "loaded, none selected",
+      { locations: [MAIN, OVERFLOW], isLoading: false, loadFailed: false },
+      "Choose a location to complete this order.",
+    ],
+  ])("%s: the ladder's sentence, muted; never an updating line; the action disabled and nothing sent", async (_label, list, sentence) => {
+    act(() => {
+      useWorkbench.getState().selectExternalOrder(ORDER, ROWS, 1);
+    });
+    mockLocation = { selectedLocationId: null, selectedLocation: null, ...list };
+    renderDialog();
+
+    expect(screen.getByText(sentence)).toHaveClass("text-sm", "text-muted-foreground");
+    expect(screen.queryByText(UPDATING_ANY)).toBeNull();
+    expect(action("Complete & Fulfill")).toBeDisabled();
+
+    await act(async () => {
+      action("Complete & Fulfill").click();
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

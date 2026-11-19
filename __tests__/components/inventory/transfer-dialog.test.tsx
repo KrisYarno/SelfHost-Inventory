@@ -540,3 +540,73 @@ describe("the draft survives a session refetch", () => {
     expect(to).toHaveTextContent("Warehouse");
   });
 });
+
+// ===========================================================================
+// Facelift FR1-4 (REV 6, GR-4 = OCR-8): no silent "first location" source
+// ===========================================================================
+
+describe("FR1-4 — with no location selected, From starts EMPTY and the operator picks it", () => {
+  beforeAll(() => {
+    // Radix Select needs these in jsdom.
+    Element.prototype.hasPointerCapture = jest.fn(() => false) as never;
+    Element.prototype.setPointerCapture = jest.fn() as never;
+    Element.prototype.releasePointerCapture = jest.fn() as never;
+    Element.prototype.scrollIntoView = jest.fn() as never;
+  });
+
+  const transferCalls = (fn: jest.Mock) =>
+    fn.mock.calls.filter(([url]) => String(url).includes("/api/inventory/transfer"));
+
+  it("no source is chosen for them: From is empty, no stock is shown for it, and Transfer is dead", async () => {
+    mockSelectedLocationId = null;
+    const fn = mockFetch(insufficientBody({ currentQuantity: 2 }));
+    wrap(<TransferDialog open onOpenChange={() => {}} product={{ id: 42, name: "AOD 2mg" }} />);
+
+    const [from] = screen.getAllByRole("combobox");
+    expect(from).toHaveTextContent("Select source");
+    expect(from).not.toHaveTextContent("Office");
+    expect(screen.getByText("Select a source")).toBeInTheDocument();
+    fireEvent.change(quantityField(), { target: { value: "1" } });
+    expect(screen.getByRole("button", { name: /transfer 1 units/i })).toBeDisabled();
+    await act(async () => {});
+    // No stock is shown for a source nobody chose (the From field's row is bare).
+    const [fromStock] = screen.getAllByText("Current stock:");
+    expect(fromStock.parentElement).toHaveTextContent(/^Current stock:$/);
+    expect(transferCalls(fn)).toHaveLength(0);
+  });
+
+  it("the operator picks From, and the transfer goes from there", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    mockSelectedLocationId = null;
+    mockLocations = [
+      { id: 2, name: "Office" },
+      { id: 3, name: "Warehouse" },
+      { id: 4, name: "Lab" },
+    ];
+    const fn = mockFetch(insufficientBody({ currentQuantity: 2 }));
+    wrap(<TransferDialog open onOpenChange={() => {}} product={{ id: 42, name: "AOD 2mg" }} />);
+
+    await user.click(screen.getAllByRole("combobox")[0]);
+    await user.click(await screen.findByRole("option", { name: "Lab" }));
+    const [from] = screen.getAllByRole("combobox");
+    expect(from).toHaveTextContent("Lab");
+
+    fireEvent.change(quantityField(), { target: { value: "1" } });
+    await user.click(screen.getByRole("button", { name: /transfer 1 units/i }));
+    await waitFor(() => expect(transferCalls(fn)).toHaveLength(1));
+    expect(JSON.parse(String((transferCalls(fn)[0][1] as RequestInit).body))).toMatchObject({
+      productId: 42,
+      fromLocationId: 4,
+      quantity: 1,
+    });
+  });
+
+  it("with a location selected, From is that location (unchanged)", () => {
+    mockSelectedLocationId = 3;
+    mockFetch(insufficientBody({ currentQuantity: 2 }));
+    wrap(<TransferDialog open onOpenChange={() => {}} product={{ id: 42, name: "AOD 2mg" }} />);
+    const [from, to] = screen.getAllByRole("combobox");
+    expect(from).toHaveTextContent("Warehouse");
+    expect(to).toHaveTextContent("Office");
+  });
+});
