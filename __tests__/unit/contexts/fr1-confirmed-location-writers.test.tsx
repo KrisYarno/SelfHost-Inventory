@@ -258,7 +258,9 @@ describe.each<[string, FirstRead]>([
     renderUnderProvider(<JournalPage />);
     await settleFirstRead();
 
-    expect(screen.getByText(ladder())).toBeInTheDocument();
+    // The TAG (the header's): FR2-2's products list now says the rung too.
+    const header = screen.getByRole("heading", { level: 1, name: "Inventory Journal" }).closest("header") as HTMLElement;
+    expect(within(header).getByText(ladder())).toBeInTheDocument();
     expect(screen.queryByText("Select a location")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: /Review & Submit/ }));
@@ -299,5 +301,60 @@ describe.each<[string, FirstRead]>([
     await waitFor(() => expect(writes()).toHaveLength(1));
     expect(String(writes()[0][0])).toBe("/api/inventory/deduct-simple");
     expect(bodyOf(writes()[0])).toMatchObject({ orderReference: "M-1", locationId: 2 });
+  });
+});
+
+// Facelift FR2-2 (REV 8, FD1-2) — THE JOURNAL'S PRODUCTS LIST NEVER SAYS "EMPTY"
+// WITHOUT A READ. With no confirmed location (FR1-1) the products hook has no
+// location to read for and answers nothing at once, and the list said
+// `No products found` — while the locations read was still loading, after it
+// failed, and after a stale id was discarded. Now its first branch says why
+// there is no list: the same ladder the tag uses, ending in
+// `Choose a location to see products.`
+describe("FR2-2 — the Journal's products list with no confirmed location", () => {
+  const productsList = () => screen.getByRole("region", { name: "Products" });
+  /** The list's one status line (the rows have their own; none are on screen here). */
+  const listStatus = () => within(productsList()).getByRole("status");
+
+  describe.each<[string, FirstRead]>([
+    ["the first `/api/locations` read is HELD (loading)", "held"],
+    ["the first `/api/locations` read is REFUSED (a 429)", "refused"],
+  ])("a saved id while %s", (_label, mode) => {
+    beforeEach(() => {
+      firstRead = mode;
+    });
+
+    it("the list says the ladder rung, never `No products found`; once the read confirms the id, the rows", async () => {
+      renderUnderProvider(<JournalPage />);
+      await settleFirstRead();
+      await act(async () => {});
+
+      expect(listStatus().textContent).toBe(ladder());
+      expect(listStatus()).toHaveAttribute("aria-live", "polite");
+      expect(within(productsList()).queryByText("No products found")).toBeNull();
+
+      await confirmLocation();
+      await waitFor(() => expect(within(productsList()).getAllByText("Widget A").length).toBeGreaterThan(0));
+      expect(within(productsList()).queryByText(ladder())).toBeNull();
+      expect(within(productsList()).queryByText("No products found")).toBeNull();
+    });
+  });
+
+  it("a stale saved id, discarded: `Choose a location to see products.` — never `No products found`", async () => {
+    // The first read answers WITHOUT the saved id (2): the rules discard it.
+    const answer = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input: unknown) =>
+      String(input) === "/api/locations" ? ok([{ id: 1, name: "Main" }]) : answer(input)
+    );
+    renderUnderProvider(<JournalPage />);
+    await waitFor(() =>
+      expect(toast.warning).toHaveBeenCalledWith("Your saved location is no longer available. Choose a location.")
+    );
+    await act(async () => {});
+    expect(ctx?.isLoading).toBe(false);
+    expect(ctx?.selectedLocationId).toBeNull();
+
+    expect(listStatus().textContent).toBe("Choose a location to see products.");
+    expect(within(productsList()).queryByText("No products found")).toBeNull();
   });
 });

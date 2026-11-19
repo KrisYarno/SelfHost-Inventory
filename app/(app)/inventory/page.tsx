@@ -102,9 +102,16 @@ export default function InventoryPage() {
     setAutoLoadLimit(AUTO_LOAD_PAGE_LIMIT);
   };
 
+  // Facelift FR2-1 (FD1-1): the sentinel's observer is recreated on every
+  // render, and each new one reports the sentinel at once. With the rows (and
+  // so the sentinel) kept after a failed next page (FR1-8), an open gate read
+  // that page again on every render. A failed next page closes the gate until
+  // its Retry succeeds.
   const { loadMoreRef } = useInfiniteScroll({
     loading: variants.isFetchingNextPage,
-    hasMore: shouldAutoLoad(pagesLoaded, !!variants.hasNextPage, autoLoadLimit),
+    hasMore:
+      shouldAutoLoad(pagesLoaded, !!variants.hasNextPage, autoLoadLimit) &&
+      !variants.isFetchNextPageError,
     onLoadMore: () => variants.fetchNextPage(),
   });
 
@@ -336,6 +343,13 @@ export default function InventoryPage() {
                     <div className="flex items-center gap-2">
                       <Loader2 className="h-4 w-4 animate-spin" />
                       <span className="text-sm text-muted-foreground">Loading more...</span>
+                    </div>
+                  ) : variants.isFetchNextPageError ? (
+                    <div className="flex items-center gap-3">
+                      <p className="text-sm text-destructive">{"Couldn't load more inventory."}</p>
+                      <Button variant="outline" size="sm" onClick={() => variants.fetchNextPage()}>
+                        Retry
+                      </Button>
                     </div>
                   ) : variants.hasNextPage && !shouldAutoLoad(pagesLoaded, true, autoLoadLimit) ? (
                     <Button variant="outline" size="sm" onClick={handleLoadMore}>

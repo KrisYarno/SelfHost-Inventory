@@ -41,14 +41,15 @@ jest.mock("sonner", () => ({
   }),
 }));
 
-// A stable session object per test: the provider's fetch effect is keyed on it.
-type Session = { data: { user: { defaultLocationId: number | null } } | null };
+// A stable session object per test. The provider's fetch effect is keyed on
+// the signed-in user's id (facelift FR2-3), so a signed-in session carries one.
+type Session = { data: { user: { id: number; defaultLocationId: number | null } } | null };
 let mockSession: Session;
 jest.mock("next-auth/react", () => ({ useSession: () => mockSession }));
 
 /** The signed-in session the next mount uses (set per test). */
 let session: Session;
-const signedIn = (defaultLocationId: number | null): Session => ({ data: { user: { defaultLocationId } } });
+const signedIn = (defaultLocationId: number | null): Session => ({ data: { user: { id: 1, defaultLocationId } } });
 
 /** Which session timing this run of the rules uses (see the header). */
 let late = false;
@@ -196,6 +197,21 @@ describe.each([
       await refresh();
       expect(mockWarning).toHaveBeenCalledTimes(1);
       expect(mockPlainToast).not.toHaveBeenCalled();
+    });
+
+    // Facelift FR2-6 (REV 8, FD1-9): the same pin, run through the first-visit
+    // auto-pick (nothing saved), which REV 4's removed toast also used to sit
+    // beside.
+    it.each([
+      ["the default (in the list)", 3, 3],
+      ["the first location (no default)", null, 1],
+    ])("nor on the first-visit auto-pick of %s", async (_what, def, picked) => {
+      session = signedIn(def);
+      fetchMock.mockResolvedValue(ok([1, 3]));
+      await mount();
+      expect(latest?.selectedLocationId).toBe(picked);
+      expect(mockPlainToast).not.toHaveBeenCalled();
+      expect(mockWarning).not.toHaveBeenCalled();
     });
   });
 

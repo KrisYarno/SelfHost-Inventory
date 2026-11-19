@@ -425,12 +425,14 @@ export default function JournalPage() {
   const overItemCap = itemCount > MAX_JOURNAL_ITEMS;
   // Facelift FR1-1 (GR-3): with no location, the tag says why — still loading,
   // failed, none configured, or none chosen (the location chip's own states).
+  const locationList = {
+    isLoading: locationsLoading,
+    loadFailed: locationsLoadFailed,
+    count: locations.length,
+  };
   const selectedLocationName =
     locations.find((loc) => loc.id === selectedLocationId)?.name ??
-    noLocationSentence(
-      { isLoading: locationsLoading, loadFailed: locationsLoadFailed, count: locations.length },
-      "Choose a location first."
-    );
+    noLocationSentence(locationList, "Choose a location first.");
 
   const hasAnyChanges = hasChanges();
 
@@ -514,7 +516,17 @@ export default function JournalPage() {
               aria-live="polite"
               aria-relevant="additions removals"
             >
-              {isLoading ? (
+              {/* Facelift FR2-2 (FD1-2): with no confirmed location there is no
+                  read for the list, so it says why — never "No products found". */}
+              {selectedLocationId === null ? (
+                <div
+                  className="text-center py-8 text-muted-foreground"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span>{noLocationSentence(locationList, "Choose a location to see products.")}</span>
+                </div>
+              ) : isLoading ? (
                 <div
                   className="text-center py-8 text-muted-foreground"
                   role="status"

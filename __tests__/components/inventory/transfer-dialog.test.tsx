@@ -610,3 +610,39 @@ describe("FR1-4 — with no location selected, From starts EMPTY and the operato
     expect(to).toHaveTextContent("Office");
   });
 });
+
+// Facelift FR2-6 (REV 8, FD1-9): From is a CONTROLLED select from the first
+// render. FR1-4's empty From was `value={undefined}` — Radix treats that as
+// uncontrolled, and the first pick switched it to controlled (React's
+// "changing from uncontrolled to controlled" warning; the placeholder held by
+// accident). It is now `""` while empty, which Radix Select 2.2.6 renders as the
+// placeholder.
+describe("FR2-6 — From is controlled from the first render", () => {
+  beforeAll(() => {
+    Element.prototype.hasPointerCapture = jest.fn(() => false) as never;
+    Element.prototype.setPointerCapture = jest.fn() as never;
+    Element.prototype.releasePointerCapture = jest.fn() as never;
+    Element.prototype.scrollIntoView = jest.fn() as never;
+  });
+
+  it("empty From shows `Select source` as Radix's placeholder, and picking one never switches it from uncontrolled", async () => {
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    mockSelectedLocationId = null;
+    mockFetch(insufficientBody({ currentQuantity: 2 }));
+    wrap(<TransferDialog open onOpenChange={() => {}} product={{ id: 42, name: "AOD 2mg" }} />);
+
+    const [from] = screen.getAllByRole("combobox");
+    expect(from).toHaveTextContent("Select source");
+    expect(from).toHaveAttribute("data-placeholder");
+
+    await user.click(from);
+    await user.click(await screen.findByRole("option", { name: "Warehouse" }));
+    expect(screen.getAllByRole("combobox")[0]).toHaveTextContent("Warehouse");
+    expect(screen.getAllByRole("combobox")[0]).not.toHaveAttribute("data-placeholder");
+
+    const switched = warn.mock.calls.filter(([m]) => /changing from uncontrolled to controlled/.test(String(m)));
+    expect(switched).toHaveLength(0);
+    warn.mockRestore();
+  });
+});

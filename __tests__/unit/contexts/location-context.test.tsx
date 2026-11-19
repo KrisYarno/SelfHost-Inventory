@@ -9,10 +9,11 @@ import React from "react";
 import { render, act, waitFor } from "@testing-library/react";
 import { LocationProvider, useLocation } from "@/contexts/location-context";
 
-// Stable session object (same identity every render) so the provider's
-// `[session]`-keyed fetch effect runs exactly once instead of looping.
+// Stable session object (same identity every render). The provider's fetch
+// effect is keyed on the signed-in user's id (facelift FR2-3), so the session
+// carries one — the real session always does (lib/auth.ts).
 jest.mock("next-auth/react", () => {
-  const session = { data: { user: { defaultLocationId: 1 } } };
+  const session = { data: { user: { id: 1, defaultLocationId: 1 } } };
   return { useSession: () => session };
 });
 

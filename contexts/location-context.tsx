@@ -46,6 +46,10 @@ export function LocationProvider({ children }: { children: ReactNode }) {
   // Bumped by `retryLocations` to run the fetch below again.
   const [reloadKey, setReloadKey] = useState(0);
   const defaultLocationId = session?.user?.defaultLocationId ?? null;
+  // Facelift FR2-3 (FD1-3): the read below is keyed on WHO is signed in, not on
+  // the session object — `SessionProvider` hands out a new one on every tab
+  // focus, and each one re-read the list on the shared per-IP bucket.
+  const userId = session?.user?.id ?? null;
   // Facelift F1-5 / FR1-2: set when a saved id was discarded. The selection
   // then stays empty — the chip asks — until the user chooses; a later read
   // never fills it in on their behalf.
@@ -54,8 +58,11 @@ export function LocationProvider({ children }: { children: ReactNode }) {
   // warning shows ONCE per discard.
   const staleWarnedRef = useRef(false);
 
-  // Fetch locations on mount. The read only loads the list: which location is
-  // selected is decided by the rules below, never here.
+  // Fetch locations once per signed-in user (FR2-3), and again on Retry. The
+  // read only loads the list: which location is selected is decided by the
+  // rules below, never here. A location added elsewhere shows after a reload or
+  // a Retry; one deleted elsewhere is refused by the server and discarded at
+  // the next read.
   useEffect(() => {
     async function fetchLocations() {
       try {
@@ -75,18 +82,18 @@ export function LocationProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    if (session) {
+    if (userId !== null) {
       fetchLocations();
     }
-  }, [session, reloadKey]);
+  }, [userId, reloadKey]);
 
-  // FR2-4: with no session the effect above fetches nothing, so a retry then
-  // would set `isLoading` with no read to clear it. It does nothing instead.
+  // FR2-4: with no signed-in user the effect above fetches nothing, so a retry
+  // then would set `isLoading` with no read to clear it. It does nothing instead.
   const retryLocations = useCallback(() => {
-    if (!session) return;
+    if (userId === null) return;
     setIsLoading(true);
     setReloadKey((key) => key + 1);
-  }, [session]);
+  }, [userId]);
 
   // Facelift F1-5 — which location every stock write targets. The rules run on
   // every SUCCESSFUL read, and never against a loading or failed one: a failed

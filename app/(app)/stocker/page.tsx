@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useCallback, useRef } from "react";
+import { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -250,8 +250,18 @@ export default function StockerPage() {
     setStockInDialogOpen(true);
   };
 
+  // Facelift FR2-4 (FD1-4): `refetch()` ignores `enabled`, and with no
+  // location it read the list with no `locationId` (the server's fallback). A
+  // stock-in that finishes after the location went away calls the callback it
+  // was handed while the location was still there, so the CURRENT location
+  // decides — mirrored into a ref.
+  const selectedLocationIdRef = useRef(selectedLocationId);
+  useEffect(() => {
+    selectedLocationIdRef.current = selectedLocationId;
+  }, [selectedLocationId]);
+
   const handleStockInSuccess = () => {
-    stockerQuery.refetch();
+    if (selectedLocationIdRef.current !== null) stockerQuery.refetch();
   };
 
   // Filter items by search query
@@ -404,12 +414,18 @@ export default function StockerPage() {
         className="-mx-4 -mt-4 sm:-mx-6"
       >
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline">
-            {totalProducts} product{totalProducts === 1 ? "" : "s"} need refill
-          </Badge>
-          <Badge variant="outline">
-            {totalUnitsNeeded} unit{totalUnitsNeeded === 1 ? "" : "s"} needed
-          </Badge>
+          {/* FR2-4: the counts are an answer's — never `0` for no location, a
+              read in flight, or a failed one. */}
+          {selectedLocationId !== null && stockerQuery.isSuccess && !stockerQuery.isPlaceholderData && (
+            <>
+              <Badge variant="outline">
+                {totalProducts} product{totalProducts === 1 ? "" : "s"} need refill
+              </Badge>
+              <Badge variant="outline">
+                {totalUnitsNeeded} unit{totalUnitsNeeded === 1 ? "" : "s"} needed
+              </Badge>
+            </>
+          )}
           {items.length > 0 && (
             <>
               <Button variant="outline" size="sm" onClick={handlePrintPickList}>
@@ -613,15 +629,20 @@ export default function StockerPage() {
         </div>
       )}
 
-      {/* Stock In Transfer Dialog */}
-      <StockInTransferDialog
-        open={stockInDialogOpen}
-        onOpenChange={setStockInDialogOpen}
-        product={stockInProduct}
-        destinationLocationId={selectedLocationId ?? location?.id ?? 0}
-        destinationLocationName={selectedLocation?.name ?? location?.name ?? "Unknown"}
-        onSuccess={handleStockInSuccess}
-      />
+      {/* Stock In Transfer Dialog. FR2-4 (FD1-7): it moves stock TO the
+          selected location, so it exists only while one is selected — never to
+          `0` or "Unknown". (Under FR1-1 the id and the location are set
+          together; the second check names it for the type.) */}
+      {selectedLocationId !== null && selectedLocation !== null && (
+        <StockInTransferDialog
+          open={stockInDialogOpen}
+          onOpenChange={setStockInDialogOpen}
+          product={stockInProduct}
+          destinationLocationId={selectedLocationId}
+          destinationLocationName={selectedLocation.name}
+          onSuccess={handleStockInSuccess}
+        />
+      )}
     </div>
   );
 }

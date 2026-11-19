@@ -15,7 +15,8 @@ import React from "react";
 import { render, act, waitFor } from "@testing-library/react";
 import { LocationProvider, useLocation } from "@/contexts/location-context";
 
-const SIGNED_IN = { data: { user: { defaultLocationId: 1 } } };
+// Signed in = a user id (facelift FR2-3 keys the read on it).
+const SIGNED_IN = { data: { user: { id: 1, defaultLocationId: 1 } } };
 const SIGNED_OUT = { data: null };
 let mockSession: { data: unknown } = SIGNED_IN;
 jest.mock("next-auth/react", () => ({ useSession: () => mockSession }));

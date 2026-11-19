@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -680,13 +681,15 @@ function Drawer({
   const raw = edits?.combinedMin !== undefined ? edits.combinedMin : product.combinedMinimum;
   const perLocation = edits?.perLocation ?? {};
 
-  return (
-    <div className="fixed inset-0 z-50">
+  // Facelift FR2-5 (FD1-5; supersedes FR1-6's offset): portaled to the body at
+  // z-[60], above the dock's z-50, so the backdrop dims and blocks the dock —
+  // a tap on a dock tab can no longer navigate away from unsaved edits. The
+  // sheet sits at the bottom with the safe-area inset as padding, and a tall
+  // drawer scrolls its body (FR1-6).
+  return createPortal(
+    <div className="fixed inset-0 z-[60]">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      {/* Facelift FR1-6 (OCR-3): the sheet sits ABOVE the dock (the one
-          --dock-height variable, 0 at md and up), and a tall drawer scrolls
-          its body rather than running under the dock. */}
-      <div className="absolute inset-x-0 bottom-[calc(var(--dock-height)+env(safe-area-inset-bottom))] flex max-h-[90%] flex-col rounded-t-2xl border border-border bg-background shadow-lg">
+      <div className="absolute inset-x-0 bottom-0 flex max-h-[90%] flex-col rounded-t-2xl border border-border bg-background pb-[env(safe-area-inset-bottom)] shadow-lg">
         <div className="flex items-start justify-between gap-2 border-b border-border px-4 py-3">
           <div>
             <p className="text-sm font-semibold">{product.name}</p>
@@ -747,7 +750,8 @@ function Drawer({
         </div>
         <div className="h-4" />
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

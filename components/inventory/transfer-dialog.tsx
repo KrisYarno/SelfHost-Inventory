@@ -270,8 +270,10 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                     <MapPin className="h-3.5 w-3.5 text-muted-foreground" />
                     From location
                   </Label>
+                  {/* FR2-6: controlled from the first render — `""` while empty
+                      shows the placeholder (Radix Select 2.2.6). */}
                   <Select
-                    value={fromLocationId ? String(fromLocationId) : undefined}
+                    value={fromLocationId ? String(fromLocationId) : ""}
                     onValueChange={(value) => {
                       const id = Number(value);
                       setFromLocationId(id);

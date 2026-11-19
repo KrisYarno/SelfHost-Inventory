@@ -202,8 +202,9 @@ export default function DashboardPage() {
   // over a loaded list keeps the list.
   const locationsFailed = locationsLoadFailed && locations.length === 0;
 
-  // Every caption keys on whether a location is SELECTED; its name may not be
-  // known yet (the id is restored before the location list arrives).
+  // Every caption keys on whether a location is SELECTED. Under facelift FR1-1
+  // a selected id is always a CONFIRMED one — in a successfully loaded list —
+  // so its name is known; the fallback below is never expected to show.
   const hasLocation = selectedLocationId !== null;
   const locationName = selectedLocation?.name ?? "the selected location";
 

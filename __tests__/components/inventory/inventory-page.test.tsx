@@ -265,3 +265,124 @@ describe("FR1-8 — the inventory list's failure state, beside QueryState's rule
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 });
+
+// Facelift FR2-1 (REV 8, FD1-1): a failed NEXT page stops auto-load and says so.
+//
+// Before: the sentinel's observer is recreated on every render (the page's
+// inline `onLoadMore`), and a real observer reports its target once on
+// `observe()`. FR1-8 keeps the rows — and so the sentinel — mounted after a
+// failed page, so every render after the failure made a fresh observer that saw
+// the sentinel in view and asked for the page again: a failing page 2 read in
+// a loop, and the screen never said anything. Now the auto-load gate is closed
+// while the last next-page read failed; the sentinel says `Couldn't load more
+// inventory.` with a Retry.
+describe("FR2-1 — a failed next page stops auto-load and says so", () => {
+  /**
+   * A controllable IntersectionObserver: like a real one, it reports each
+   * target's state ONCE, asynchronously, after `observe()` — and never for a
+   * target it no longer observes. `inView` is whether the sentinel is on screen.
+   */
+  class ControlledIntersectionObserver {
+    static inView = true;
+    private targets = new Set<Element>();
+    constructor(private callback: IntersectionObserverCallback) {}
+    observe(target: Element) {
+      this.targets.add(target);
+      setTimeout(() => {
+        if (!this.targets.has(target)) return;
+        act(() => {
+          this.callback(
+            [{ isIntersecting: ControlledIntersectionObserver.inView, target } as IntersectionObserverEntry],
+            this as unknown as IntersectionObserver
+          );
+        });
+      }, 0);
+    }
+    unobserve(target: Element) {
+      this.targets.delete(target);
+    }
+    disconnect() {
+      this.targets.clear();
+    }
+    takeRecords() {
+      return [];
+    }
+  }
+
+  const originalObserver = global.IntersectionObserver;
+  beforeEach(() => {
+    ControlledIntersectionObserver.inView = true;
+    global.IntersectionObserver = ControlledIntersectionObserver as unknown as typeof IntersectionObserver;
+  });
+  afterEach(() => {
+    global.IntersectionObserver = originalObserver;
+  });
+
+  /** Page 2 fails until `page2Ok` is set; every other page answers. */
+  let page2Ok: boolean;
+  function mockPages() {
+    page2Ok = false;
+    global.fetch = jest.fn(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u.includes("/api/inventory/variants")) {
+        const page = Number(new URL(u, "http://x").searchParams.get("page") || 1);
+        if (page === 2 && !page2Ok) return { ok: false, status: 500, json: async () => ({ error: "boom" }) } as Response;
+        return { ok: true, json: async () => variantsPage(page, 10) } as Response;
+      }
+      return { ok: true, json: async () => ({ logs: [], transfers: [] }) } as Response;
+    }) as unknown as typeof fetch;
+  }
+  const pageReads = (page: number) =>
+    (global.fetch as jest.Mock).mock.calls.filter(([u]) => {
+      const url = String(u);
+      return url.includes("/api/inventory/variants") && new URL(url, "http://x").searchParams.get("page") === String(page);
+    }).length;
+  /** Lets a few observer rounds (each a timer) and their renders run. */
+  const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 30)));
+
+  const FAILED = "Couldn't load more inventory.";
+
+  it("a failed page 2 issues exactly ONE read, then the sentence and Retry — and no further reads while it stays in view", async () => {
+    mockPages();
+    wrap();
+    expect(await screen.findByText(FAILED)).toBeInTheDocument();
+    const sentence = screen.getByText(FAILED);
+    expect(sentence.tagName).toBe("P");
+    expect(sentence).toHaveClass("text-sm", "text-destructive");
+    const retry = screen.getByRole("button", { name: "Retry" });
+    expect(sentence.parentElement).toContainElement(retry);
+    expect(pageReads(2)).toBe(1);
+
+    // The sentinel stays in view, and every re-render makes a fresh observer
+    // that reports it: still no read.
+    for (let i = 0; i < 5; i++) {
+      fireEvent.click(screen.getByRole("button", { name: /Cat1/ }));
+      await settle();
+    }
+    expect(pageReads(2)).toBe(1);
+    // The rows stay; a failed NEXT page is not a failed list.
+    expect(screen.getByRole("button", { name: /Cat1/ })).toBeInTheDocument();
+    expect(screen.queryByText("Could not load inventory.")).toBeNull();
+  });
+
+  it("Retry issues ONE read; on success the sentence goes and auto-load resumes", async () => {
+    mockPages();
+    wrap();
+    expect(await screen.findByText(FAILED)).toBeInTheDocument();
+    expect(pageReads(2)).toBe(1);
+    expect(pageReads(3)).toBe(0);
+
+    page2Ok = true;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByText(FAILED)).toBeNull());
+    expect(pageReads(2)).toBe(2);
+    // Auto-load resumed: page 3 is read by the sentinel, once — and then the
+    // page limit (3) hands over to Load more.
+    await waitFor(() => expect(pageReads(3)).toBe(1));
+    expect(await screen.findByRole("button", { name: /load more/i })).toBeInTheDocument();
+    await settle();
+    expect(pageReads(2)).toBe(2);
+    expect(pageReads(3)).toBe(1);
+    expect(pageReads(4)).toBe(0);
+  });
+});
