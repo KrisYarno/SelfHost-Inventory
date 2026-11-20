@@ -5,6 +5,11 @@
 // COUNT (callers pass an idempotent opener, so "fires once" is only visible
 // here), the cancel paths, the `#main` scroll listener, and the click guard.
 //
+// Fix round FR1-3 (REV 7): a `pointerdown` within 150 ms of the last `#main`
+// scroll starts NO timer (a finger stopping a fling is not a long press). ONE
+// module-level record, kept by ONE passive capture listener on `#main`,
+// installed on the first hook use and tolerant of `#main` being absent.
+//
 // jsdom 26 has no PointerEvent. The test-local polyfill adds ONLY `pointerType`
 // and `pointerId`; `clientX` / `clientY` / `button` pass through MouseEvent's
 // init (they are getter-only on jsdom's MouseEvent and are never assigned).
@@ -340,5 +345,152 @@ describe("F2-7 useLongPress — the click guard (B6)", () => {
     advance(100);
     fireEvent.click(el, { detail: 1 });
     expect(lastIgnored()).toBe(true);
+  });
+});
+
+describe("FR1-3 useLongPress — a finger that stops a scroll never long-presses", () => {
+  it("a press 100 ms after a #main scroll -> no fire, however long it is held", () => {
+    const { el, onLongPress } = setup({ withMain: true });
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(100);
+    fireEvent.pointerDown(el, at("touch"));
+    advance(2000);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it("a press 200 ms after a #main scroll -> fires at 500 ms", () => {
+    const { el, onLongPress } = setup({ withMain: true });
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(200);
+    fireEvent.pointerDown(el, at("touch"));
+    advance(499);
+    expect(onLongPress).not.toHaveBeenCalled();
+    advance(1);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it("at exactly 150 ms the press is still the scroll's; at 151 ms it is a press", () => {
+    const at150 = setup({ withMain: true });
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(150);
+    fireEvent.pointerDown(at150.el, at("touch"));
+    advance(1000);
+    expect(at150.onLongPress).not.toHaveBeenCalled();
+    at150.unmount();
+
+    const at151 = setup({ withMain: true });
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(151);
+    fireEvent.pointerDown(at151.el, at("touch"));
+    advance(500);
+    expect(at151.onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it("a scroll of an element INSIDE #main counts too (a capture listener)", () => {
+    const { el, onLongPress } = setup({ withMain: true });
+    fireEvent.scroll(el.parentElement!);
+    advance(100);
+    fireEvent.pointerDown(el, at("touch"));
+    advance(1000);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it("the scroll that stopped one press does not stop the next one 200 ms later", () => {
+    const { el, onLongPress } = setup({ withMain: true });
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(50);
+    fireEvent.pointerDown(el, at("touch"));
+    advance(150);
+    fireEvent.pointerUp(el, at("touch"));
+    fireEvent.pointerDown(el, at("touch"));
+    advance(500);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it("ONE passive capture listener on #main, installed on the first hook use (mount), shared by every instance", () => {
+    const main = document.createElement("div");
+    main.id = "main";
+    document.body.appendChild(main);
+    const add = jest.spyOn(main, "addEventListener");
+    try {
+      const host = document.createElement("div");
+      main.appendChild(host);
+      const onLongPress = jest.fn();
+      render(
+        <>
+          <Harness onLongPress={onLongPress} onClick={jest.fn()} />
+          <Harness onLongPress={onLongPress} onClick={jest.fn()} />
+        </>,
+        { container: host },
+      );
+      // Installed at mount, before any press: one listener for both instances.
+      const record = add.mock.calls.filter(([, , opts]) => typeof opts === "object");
+      expect(record).toHaveLength(1);
+      expect(record[0][0]).toBe("scroll");
+      expect(record[0][2]).toEqual({ capture: true, passive: true });
+      // Presses add only their own per-press listener (A2), never a second record.
+      for (const button of screen.getAllByRole("button", { name: "Press" })) {
+        fireEvent.pointerDown(button, at("touch"));
+        fireEvent.pointerUp(button, at("touch"));
+      }
+      expect(add.mock.calls.filter(([, , opts]) => typeof opts === "object")).toHaveLength(1);
+    } finally {
+      main.remove();
+    }
+  });
+
+  it("Android's contextmenu during a press 100 ms after a #main scroll: default prevented, NO fire", () => {
+    const { el, onLongPress } = setup({ withMain: true });
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(100);
+    fireEvent.pointerDown(el, at("touch"));
+    advance(400);
+    expect(fireEvent.contextMenu(el)).toBe(false); // default prevented
+    advance(2000);
+    expect(onLongPress).not.toHaveBeenCalled();
+  });
+
+  it("Android's contextmenu during a press 200 ms after a #main scroll: fires ONCE (and the timer adds nothing)", () => {
+    const { el, onLongPress } = setup({ withMain: true });
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(200);
+    fireEvent.pointerDown(el, at("touch"));
+    advance(400);
+    expect(fireEvent.contextMenu(el)).toBe(false);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    advance(2000);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it("the scroll-stopped press ends on the next pointerdown: a fresh press's contextmenu fires", () => {
+    const { el, onLongPress } = setup({ withMain: true });
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(50);
+    fireEvent.pointerDown(el, at("touch"));
+    fireEvent.contextMenu(el);
+    fireEvent.pointerUp(el, at("touch"));
+    expect(onLongPress).not.toHaveBeenCalled();
+    advance(300);
+    fireEvent.pointerDown(el, at("touch"));
+    advance(100);
+    fireEvent.contextMenu(el);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it("a desktop right-click right after a #main scroll still fires (only a touch / pen press is a finger stopping a scroll)", () => {
+    const { el, onLongPress } = setup({ withMain: true });
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(20);
+    fireEvent.pointerDown(el, at("mouse", 100, 100, 2));
+    expect(fireEvent.contextMenu(el)).toBe(false);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+  });
+
+  it("no #main on the page (after tests that scrolled one): no record is left over, and a touch press fires", () => {
+    const { el, onLongPress } = setup();
+    expect(document.getElementById("main")).toBeNull();
+    fireEvent.pointerDown(el, at("touch"));
+    advance(500);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
   });
 });

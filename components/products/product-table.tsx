@@ -73,7 +73,7 @@ export function ProductTable({
   );
 }
 
-/** One table row; it owns its product's menu state (A2). */
+/** One table row; it owns its product's menu state (A2). Nothing presses it open: `openedByPress` is false (FR1-1). */
 function ProductTableRow({
   product,
   showHere,
@@ -96,7 +96,7 @@ function ProductTableRow({
   return (
     <TableRow className="h-12">
       <TableCell>
-        <div className="font-semibold">{product.baseName}</div>
+        <div className="font-semibold">{product.baseName || product.name}</div>
         {(product.variant || isPending) && (
           <div className="flex items-center gap-2">
             {product.variant && <span className="text-xs text-muted-foreground">{product.variant}</span>}
@@ -130,6 +130,7 @@ function ProductTableRow({
           isAdmin={isAdmin}
           open={menuOpen}
           onOpenChange={setMenuOpen}
+          openedByPress={false}
           onAdjust={onAdjust}
           onStockIn={onStockIn}
           onEdit={onEdit}

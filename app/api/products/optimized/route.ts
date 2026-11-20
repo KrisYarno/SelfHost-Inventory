@@ -73,6 +73,9 @@ export const GET = apiHandler(async (request: NextRequest) => {
   }
 
   orderBy.push({ name: "asc" });
+  // Facelift FR1-6: a final `id` makes the order total, so the export's pages
+  // (500 at a time) never repeat or skip a row among exact ties. Both paths.
+  orderBy.push({ id: "asc" });
 
   // SHOW contract: provisional (PENDING_REVIEW) products stay listed — do NOT add
   // an approvalStatus filter. Locked by __tests__/integration/read-path-isolation.test.ts.
@@ -187,5 +190,8 @@ export const GET = apiHandler(async (request: NextRequest) => {
     hereLocationId,
     // F2 B5: the filter this answer describes, so a count never mixes two answers.
     stock,
+    // Facelift FR1-10: the search this answer applied (`""` for none), so the
+    // list's sentences and its export describe the answer on screen.
+    search,
   });
 });

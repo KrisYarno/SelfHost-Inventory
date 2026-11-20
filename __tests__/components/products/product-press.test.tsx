@@ -11,6 +11,14 @@
 //     after the up -> Adjust; a keyboard click is never ignored.
 // "Fires once" is pinned at the hook level (use-long-press.test.tsx): the
 // opener is idempotent, so a second fire is invisible here.
+//
+// Fix round FR1 (REV 7), for both views:
+//   - FR1-1: a menu THIS element's press opened never fires an item by itself
+//     (Linux / macOS fire `contextmenu` on mouse-DOWN, so the release lands on
+//     the open menu): no handler until a pointerdown inside the menu; Enter
+//     always works; a "…"-opened menu works as before.
+//   - FR1-3: a press within 150 ms of a `#main` scroll (a finger stopping a
+//     fling) starts no timer; 200 ms after, it fires at 500 ms.
 
 import * as React from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
@@ -93,7 +101,7 @@ describe.each([
       fireEvent.pointerUp(main, at(type));
       fireEvent.click(main, { detail: 1 });
     };
-    return { main, dots, onAdjust, menuIsOpen, tap };
+    return { main, dots, onAdjust, onStockIn, menuIsOpen, tap };
   }
 
   it("a short touch tap opens Adjust stock (with the product) and no menu", () => {
@@ -248,5 +256,118 @@ describe.each([
   it("B2: the pressed element carries select-none [-webkit-user-select:none] [-webkit-touch-callout:none]", () => {
     const { main } = setup();
     expect(main).toHaveClass("select-none", "[-webkit-user-select:none]", "[-webkit-touch-callout:none]");
+  });
+
+  // ---- FR1-1 ---------------------------------------------------------------
+  const stockIn = () => screen.getByRole("menuitem", { name: "Stock In" });
+
+  it("FR1-1: contextMenu(main), then pointerUp(item, button 2) -> no handler, and the menu is open", () => {
+    const { main, onStockIn, onAdjust, menuIsOpen } = setup();
+    fireEvent.contextMenu(main);
+    expect(menuIsOpen()).toBe(true);
+    fireEvent.pointerUp(stockIn(), { pointerType: "mouse", pointerId: 1, button: 2 });
+    expect(onStockIn).not.toHaveBeenCalled();
+    expect(onAdjust).not.toHaveBeenCalled();
+    expect(menuIsOpen()).toBe(true);
+  });
+
+  it("FR1-1: the Linux right-click in full (mouse-down 2, contextmenu, release over an item) chooses nothing", () => {
+    const { main, onStockIn, menuIsOpen } = setup();
+    fireEvent.pointerDown(main, at("mouse", 50, 20, 2));
+    fireEvent.contextMenu(main);
+    fireEvent.pointerUp(stockIn(), at("mouse", 50, 20, 2));
+    expect(onStockIn).not.toHaveBeenCalled();
+    expect(menuIsOpen()).toBe(true);
+  });
+
+  it("FR1-1: long press, then click(item) with no pointerdown inside -> no handler; then pointerDown + click -> the handler runs", () => {
+    const { main, onStockIn, menuIsOpen } = setup();
+    fireEvent.pointerDown(main, at("touch"));
+    advance(500);
+    fireEvent.pointerUp(main, at("touch"));
+    expect(menuIsOpen()).toBe(true);
+    fireEvent.click(stockIn(), { detail: 1 });
+    expect(onStockIn).not.toHaveBeenCalled();
+    expect(menuIsOpen()).toBe(true);
+
+    fireEvent.pointerDown(stockIn(), at("touch"));
+    fireEvent.pointerUp(stockIn(), at("touch"));
+    fireEvent.click(stockIn(), { detail: 1 });
+    expect(onStockIn).toHaveBeenCalledTimes(1);
+    expect(onStockIn).toHaveBeenCalledWith(product);
+    expect(menuIsOpen()).toBe(false);
+  });
+
+  it("FR1-1: after a press-open, Enter on an item runs its handler", () => {
+    const { main, onStockIn, menuIsOpen } = setup();
+    fireEvent.contextMenu(main);
+    act(() => stockIn().focus());
+    fireEvent.keyDown(stockIn(), { key: "Enter" });
+    expect(onStockIn).toHaveBeenCalledTimes(1);
+    expect(menuIsOpen()).toBe(false);
+  });
+
+  it("FR1-1: a \"…\"-opened menu works as before (a click on an item with no pointerdown inside runs it)", () => {
+    const { dots, onStockIn, menuIsOpen } = setup();
+    fireEvent.pointerDown(dots, at("touch"));
+    fireEvent.pointerUp(dots, at("touch"));
+    fireEvent.click(dots, { detail: 1 });
+    expect(menuIsOpen()).toBe(true);
+    fireEvent.click(stockIn(), { detail: 1 });
+    expect(onStockIn).toHaveBeenCalledTimes(1);
+  });
+
+  it("FR1-1: a press-open, closed, then a \"…\" open -> the items work at once (the guard is per opening)", () => {
+    const { main, dots, onStockIn, menuIsOpen } = setup();
+    fireEvent.contextMenu(main);
+    expect(menuIsOpen()).toBe(true);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    expect(menuIsOpen()).toBe(false);
+    fireEvent.click(dots, { detail: 0 });
+    expect(menuIsOpen()).toBe(true);
+    fireEvent.click(stockIn(), { detail: 1 });
+    expect(onStockIn).toHaveBeenCalledTimes(1);
+  });
+
+  // ---- FR1-3 ---------------------------------------------------------------
+  it("FR1-3: a touch press 100 ms after a #main scroll starts no timer (no menu, however long it is held)", () => {
+    const { main, menuIsOpen } = setup();
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(100);
+    fireEvent.pointerDown(main, at("touch"));
+    advance(1000);
+    expect(menuIsOpen()).toBe(false);
+  });
+
+  it("FR1-3 (ruling): Android's contextmenu during a press 100 ms after a #main scroll opens no menu", () => {
+    const { main, menuIsOpen } = setup();
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(100);
+    fireEvent.pointerDown(main, at("touch"));
+    advance(400);
+    expect(fireEvent.contextMenu(main)).toBe(false);
+    advance(1000);
+    expect(menuIsOpen()).toBe(false);
+  });
+
+  it("FR1-3 (ruling): Android's contextmenu during a press 200 ms after a #main scroll opens the menu", () => {
+    const { main, menuIsOpen } = setup();
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(200);
+    fireEvent.pointerDown(main, at("touch"));
+    advance(400);
+    expect(fireEvent.contextMenu(main)).toBe(false);
+    expect(menuIsOpen()).toBe(true);
+  });
+
+  it("FR1-3: a touch press 200 ms after a #main scroll fires at 500 ms", () => {
+    const { main, menuIsOpen } = setup();
+    fireEvent.scroll(document.getElementById("main")!);
+    advance(200);
+    fireEvent.pointerDown(main, at("touch"));
+    advance(499);
+    expect(menuIsOpen()).toBe(false);
+    advance(1);
+    expect(menuIsOpen()).toBe(true);
   });
 });

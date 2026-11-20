@@ -9,6 +9,22 @@
 //   - B7: a touch / pen pointerdown alone never opens; its click does; a mouse
 //     opens on Radix's pointerdown and the following click does NOT close it;
 //     Enter / Space open through Radix's keydown.
+//
+// Fix round FR1 (REV 7):
+//   - FR1-1: a menu the owner opened by a PRESS (`openedByPress`) never
+//     chooses an item by itself: until a pointerdown inside the menu, an item's
+//     pointerup is default-prevented (Radix skips its click) and a pointer
+//     click is refused (no handler, menu open, a link does not navigate). Any
+//     button but the primary never chooses on pointerup. A keyboard selection
+//     (detail 0) always works. A "…"-opened menu works as before.
+//   - FR1-7: a `pointercancel` clears the recorded pointer type; a trigger click
+//     with `detail === 0` only ever OPENS (never toggles closed). This AMENDS
+//     B7's "a click with no pointerdown does not toggle" to a POINTER click
+//     (detail 1): a detail-0 click with no pointerdown now opens.
+//   - NOT built (stopped, see the FR1 report): FR1-7's "cleared on
+//     `pointerleave`". A touch tap fires `pointerleave` right after `pointerup`
+//     and BEFORE its click, so clearing there would stop every touch tap from
+//     opening the "…"; the browsers' real order is pinned below.
 
 import * as React from "react";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
@@ -57,13 +73,24 @@ type Handlers = {
   onAdjust: jest.Mock; onStockIn: jest.Mock; onEdit?: jest.Mock; onDelete?: jest.Mock; onOpenChange: jest.Mock;
 };
 
-function Harness({ isAdmin, initialOpen = false, handlers }: { isAdmin: boolean; initialOpen?: boolean; handlers: Handlers }) {
+function Harness({
+  isAdmin,
+  initialOpen = false,
+  openedByPress = false,
+  handlers,
+}: {
+  isAdmin: boolean;
+  initialOpen?: boolean;
+  openedByPress?: boolean;
+  handlers: Handlers;
+}) {
   const [open, setOpen] = React.useState(initialOpen);
   return (
     <ProductActionsMenu
       product={product}
       isAdmin={isAdmin}
       open={open}
+      openedByPress={openedByPress}
       onOpenChange={(next) => {
         handlers.onOpenChange(next);
         setOpen(next);
@@ -76,14 +103,14 @@ function Harness({ isAdmin, initialOpen = false, handlers }: { isAdmin: boolean;
   );
 }
 
-function setup({ isAdmin = false, initialOpen = false, adminHandlers = true } = {}) {
+function setup({ isAdmin = false, initialOpen = false, adminHandlers = true, openedByPress = false } = {}) {
   const handlers: Handlers = {
     onAdjust: jest.fn(),
     onStockIn: jest.fn(),
     onOpenChange: jest.fn(),
     ...(adminHandlers ? { onEdit: jest.fn(), onDelete: jest.fn() } : {}),
   };
-  render(<Harness isAdmin={isAdmin} initialOpen={initialOpen} handlers={handlers} />);
+  render(<Harness isAdmin={isAdmin} initialOpen={initialOpen} openedByPress={openedByPress} handlers={handlers} />);
   return handlers;
 }
 
@@ -219,9 +246,9 @@ describe("B7 — telling touch from mouse on the \"…\"", () => {
     expect(menuIsOpen()).toBe(true);
   });
 
-  it("a click with no pointerdown before it (a synthetic click) does not toggle", () => {
+  it("a POINTER click (detail 1) with no pointerdown before it does not toggle (FR1-7 amends this pin: detail 0 now opens)", () => {
     const handlers = setup();
-    fireEvent.click(trigger());
+    fireEvent.click(trigger(), { detail: 1 });
     expect(menuIsOpen()).toBe(false);
     expect(handlers.onOpenChange).not.toHaveBeenCalled();
   });
@@ -245,5 +272,153 @@ describe("B7 — telling touch from mouse on the \"…\"", () => {
     await user.keyboard("{Enter}");
     expect(within(screen.getByRole("menu")).queryAllByRole("menuitem").length).toBeGreaterThan(0);
     expect(screen.getByRole("menu").contains(document.activeElement)).toBe(true);
+  });
+});
+
+describe("FR1-7 — the \"…\" for keyboards and assistive technology", () => {
+  const press = (pointerType: string) => ({ pointerType, pointerId: 1, button: 0, ctrlKey: false });
+
+  it("a detail: 0 click with no pointerdown opens the menu", () => {
+    const handlers = setup();
+    fireEvent.click(trigger(), { detail: 0 });
+    expect(menuIsOpen()).toBe(true);
+    expect(handlers.onOpenChange.mock.calls).toEqual([[true]]);
+  });
+
+  it("Space keydown, then a detail: 0 click -> open (not toggled closed)", () => {
+    const handlers = setup();
+    fireEvent.keyDown(trigger(), { key: " " });
+    expect(menuIsOpen()).toBe(true);
+    fireEvent.click(trigger(), { detail: 0 });
+    expect(menuIsOpen()).toBe(true);
+    expect(handlers.onOpenChange.mock.calls).toEqual([[true]]);
+  });
+
+  it("a touch pointerdown, then pointercancel, then later a keyboard Space (keydown + its detail-0 click) -> open", () => {
+    const handlers = setup();
+    const t = trigger();
+    fireEvent.pointerDown(t, press("touch"));
+    fireEvent.pointerCancel(t, press("touch"));
+    expect(menuIsOpen()).toBe(false);
+    fireEvent.keyDown(t, { key: " " });
+    fireEvent.click(t, { detail: 0 });
+    expect(menuIsOpen()).toBe(true);
+    expect(handlers.onOpenChange.mock.calls).toEqual([[true]]);
+  });
+
+  it("a pointercancel clears the recorded type: a later POINTER click with no pointerdown does not toggle", () => {
+    const handlers = setup();
+    const t = trigger();
+    fireEvent.pointerDown(t, press("touch"));
+    fireEvent.pointerCancel(t, press("touch"));
+    fireEvent.click(t, { detail: 1 });
+    expect(menuIsOpen()).toBe(false);
+    expect(handlers.onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("a detail: 0 click on an OPEN menu's trigger never closes it", () => {
+    const handlers = setup({ initialOpen: true });
+    fireEvent.click(trigger(), { detail: 0 });
+    expect(menuIsOpen()).toBe(true);
+    expect(handlers.onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("a touch tap in the browsers' real order (pointerdown, pointerup, pointerout, pointerleave, click) opens it", () => {
+    // A pointer without hover fires pointerout + pointerleave right after its
+    // pointerup, BEFORE the click: the recorded type must survive pointerleave.
+    const handlers = setup();
+    const t = trigger();
+    fireEvent.pointerDown(t, press("touch"));
+    fireEvent.pointerUp(t, press("touch"));
+    fireEvent.pointerOut(t, press("touch"));
+    fireEvent.pointerLeave(t, press("touch"));
+    fireEvent.click(t, { detail: 1 });
+    expect(menuIsOpen()).toBe(true);
+    expect(handlers.onOpenChange.mock.calls).toEqual([[true]]);
+  });
+});
+
+describe("FR1-1 — a press-opened menu never fires an item by itself", () => {
+  const item = (name: string) => screen.getByRole("menuitem", { name });
+  const mouse = (button: number) => ({ pointerType: "mouse", pointerId: 1, button });
+
+  it.each([2, 0])(
+    "openedByPress: a button-%i pointerup on an item with no pointerdown inside -> default-prevented, no handler, the menu open",
+    (button) => {
+      const handlers = setup({ isAdmin: true, initialOpen: true, openedByPress: true });
+      expect(fireEvent.pointerUp(item("Delete"), mouse(button))).toBe(false);
+      expect(handlers.onDelete).not.toHaveBeenCalled();
+      expect(handlers.onOpenChange).not.toHaveBeenCalled();
+      expect(menuIsOpen()).toBe(true);
+    },
+  );
+
+  it("openedByPress: a pointer click on an item with no pointerdown inside -> refused (no handler, menu open)", () => {
+    const handlers = setup({ isAdmin: true, initialOpen: true, openedByPress: true });
+    for (const [name, key] of [
+      ["Adjust stock", "onAdjust"],
+      ["Stock In", "onStockIn"],
+      ["Edit", "onEdit"],
+      ["Delete", "onDelete"],
+    ] as const) {
+      expect(fireEvent.click(item(name), { detail: 1 })).toBe(false);
+      expect(handlers[key]).not.toHaveBeenCalled();
+    }
+    expect(menuIsOpen()).toBe(true);
+    expect(handlers.onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("openedByPress: a link item's pointer click is default-prevented (no navigation) and the menu stays open", () => {
+    setup({ initialOpen: true, openedByPress: true });
+    expect(fireEvent.click(item("Analytics"), { detail: 1 })).toBe(false);
+    expect(fireEvent.click(item("History"), { detail: 1 })).toBe(false);
+    expect(menuIsOpen()).toBe(true);
+  });
+
+  it("then a pointerdown inside the menu clears the guard: pointerdown + click on the item runs its handler", () => {
+    const handlers = setup({ initialOpen: true, openedByPress: true });
+    fireEvent.click(item("Stock In"), { detail: 1 });
+    expect(handlers.onStockIn).not.toHaveBeenCalled();
+    fireEvent.pointerDown(item("Stock In"), mouse(0));
+    fireEvent.pointerUp(item("Stock In"), mouse(0));
+    fireEvent.click(item("Stock In"), { detail: 1 });
+    expect(handlers.onStockIn).toHaveBeenCalledTimes(1);
+    expect(handlers.onStockIn).toHaveBeenCalledWith(product);
+    expect(menuIsOpen()).toBe(false);
+  });
+
+  it("a pointerdown anywhere inside the menu content clears it (not only on an item)", () => {
+    const handlers = setup({ initialOpen: true, openedByPress: true });
+    fireEvent.pointerDown(screen.getByRole("menu"), mouse(0));
+    fireEvent.click(item("Adjust stock"), { detail: 1 });
+    expect(handlers.onAdjust).toHaveBeenCalledTimes(1);
+  });
+
+  it("after a press-open, Enter on an item runs its handler (a keyboard selection always works)", () => {
+    const handlers = setup({ initialOpen: true, openedByPress: true });
+    act(() => item("Stock In").focus());
+    fireEvent.keyDown(item("Stock In"), { key: "Enter" });
+    expect(handlers.onStockIn).toHaveBeenCalledTimes(1);
+    expect(menuIsOpen()).toBe(false);
+  });
+
+  it("a \"…\"-opened menu (openedByPress false) works as before: a primary pointerup with no pointerdown on the item chooses it (Radix's press-drag-release)", () => {
+    const handlers = setup({ initialOpen: true, openedByPress: false });
+    fireEvent.pointerUp(item("Stock In"), mouse(0));
+    expect(handlers.onStockIn).toHaveBeenCalledTimes(1);
+    expect(menuIsOpen()).toBe(false);
+  });
+
+  it("a \"…\"-opened menu: a pointer click with no pointerdown inside runs its handler", () => {
+    const handlers = setup({ initialOpen: true, openedByPress: false });
+    fireEvent.click(item("Adjust stock"), { detail: 1 });
+    expect(handlers.onAdjust).toHaveBeenCalledTimes(1);
+  });
+
+  it("any button but the primary never chooses on its pointerup, even in a \"…\"-opened menu", () => {
+    const handlers = setup({ initialOpen: true, openedByPress: false });
+    expect(fireEvent.pointerUp(item("Stock In"), mouse(2))).toBe(false);
+    expect(handlers.onStockIn).not.toHaveBeenCalled();
+    expect(menuIsOpen()).toBe(true);
   });
 });

@@ -1,7 +1,7 @@
 "use client";
 
+import { useId } from "react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { RotateCcw, Trash2, Package } from "lucide-react";
@@ -76,11 +76,12 @@ export function DeletedProductsList() {
     restoreMutation.mutate(product);
   };
 
+  // Facelift FR1-13: 4 rows of the rows' own height, inside the rows' frame.
   if (isLoading) {
     return (
-      <div className="space-y-3">
+      <div className="rounded-lg border bg-surface divide-y">
         {[...Array(4)].map((_, i) => (
-          <Skeleton key={i} className="h-20 rounded-lg" />
+          <Skeleton key={i} className="h-14 rounded-none" />
         ))}
       </div>
     );
@@ -123,65 +124,81 @@ export function DeletedProductsList() {
       </div>
 
       {/* Facelift F2-10 (FL-B-14): rows, not cards. No dimming and no
-          strike-through: the Deleted badge says it. */}
+          strike-through: the `Deleted products` heading above the list says
+          it (FR1-13: so no per-row Deleted badge either). */}
       <div className="rounded-lg border bg-surface divide-y">
-        {products.map((product) => {
-          const isRestoring = restoringId === product.id;
-          const deletedDate = new Date(product.deletedAt);
-          const formattedDate = deletedDate.toLocaleDateString(undefined, {
-            month: "short",
-            day: "numeric",
-            year: "numeric",
-          });
-
-          return (
-            <div key={product.id} className="flex min-h-14 items-center gap-2 px-3 py-2">
-              <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 items-center gap-2">
-                  <div className="text-sm font-semibold truncate">{product.name}</div>
-                  <Badge
-                    variant="outline"
-                    className="shrink-0 text-[11px] px-2 py-1 bg-negative-muted text-negative-foreground border-negative-border"
-                  >
-                    Deleted
-                  </Badge>
-                </div>
-                <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
-                  {product.baseName && (
-                    <span>
-                      {product.baseName}
-                      {product.variant ? ` / ${product.variant}` : ""}
-                    </span>
-                  )}
-                  <span>Deleted {formattedDate}</span>
-                  {product.deletedByUser && (
-                    <span>by {product.deletedByUser.username}</span>
-                  )}
-                </div>
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                className="shrink-0"
-                disabled={isRestoring}
-                onClick={() => handleRestore(product)}
-              >
-                {isRestoring ? (
-                  <>
-                    <span className="mr-2 h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                    Restoring...
-                  </>
-                ) : (
-                  <>
-                    <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-                    Restore Product
-                  </>
-                )}
-              </Button>
-            </div>
-          );
-        })}
+        {products.map((product) => (
+          <DeletedProductRow
+            key={product.id}
+            product={product}
+            isRestoring={restoringId === product.id}
+            onRestore={handleRestore}
+          />
+        ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * One deleted product. Facelift FR1-9: `Restore Product` keeps its visible
+ * label as its accessible name and is DESCRIBED by this row's product name
+ * (a per-row `useId`), so a screen reader hears which product it restores.
+ */
+function DeletedProductRow({
+  product,
+  isRestoring,
+  onRestore,
+}: {
+  product: DeletedProduct;
+  isRestoring: boolean;
+  onRestore: (product: DeletedProduct) => void;
+}) {
+  const nameId = useId();
+  const deletedDate = new Date(product.deletedAt);
+  const formattedDate = deletedDate.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+
+  return (
+    <div className="flex min-h-14 items-center gap-2 px-3 py-2">
+      <div className="min-w-0 flex-1">
+        <div id={nameId} className="text-sm font-semibold truncate">{product.name}</div>
+        <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+          {product.baseName && (
+            <span>
+              {product.baseName}
+              {product.variant ? ` / ${product.variant}` : ""}
+            </span>
+          )}
+          <span>Deleted {formattedDate}</span>
+          {product.deletedByUser && (
+            <span>by {product.deletedByUser.username}</span>
+          )}
+        </div>
+      </div>
+      <Button
+        size="sm"
+        variant="outline"
+        className="shrink-0"
+        disabled={isRestoring}
+        aria-describedby={nameId}
+        onClick={() => onRestore(product)}
+      >
+        {isRestoring ? (
+          <>
+            <span className="mr-2 h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            Restoring...
+          </>
+        ) : (
+          <>
+            <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+            Restore Product
+          </>
+        )}
+      </Button>
     </div>
   );
 }

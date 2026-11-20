@@ -11,6 +11,9 @@
 //     text from `sm` up). The Switch + Label pair is gone. Members get none;
 //   - A21: the deleted view has `<h2 className="text-h3">Deleted products</h2>`
 //     above the list.
+//   - FR1-12 (REV 7): the product list stays MOUNTED while the deleted view
+//     shows, hidden with `hidden`, so its filter, page and search survive the
+//     trip (the real list's survival is pinned in products-page-keeps-list).
 
 import * as React from "react";
 import fs from "fs";
@@ -19,6 +22,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { useSession } from "next-auth/react";
 
 type ListProps = {
+  className?: string;
   isAdmin?: boolean;
   onCreate?: () => void;
   onEdit?: unknown;
@@ -27,12 +31,20 @@ type ListProps = {
   onStockIn?: unknown;
 };
 let listProps: ListProps | null = null;
-jest.mock("@/components/products/product-list-optimized", () => ({
-  ProductListOptimized: (props: ListProps) => {
-    listProps = props;
-    return <div data-testid="product-list" />;
-  },
-}));
+/** FR1-12: how many times the list was MOUNTED (a remount would lose its state). */
+let listMounts = 0;
+jest.mock("@/components/products/product-list-optimized", () => {
+  const { useEffect } = jest.requireActual("react");
+  return {
+    ProductListOptimized: (props: ListProps) => {
+      listProps = props;
+      useEffect(() => {
+        listMounts += 1;
+      }, []);
+      return <div data-testid="product-list" className={props.className} />;
+    },
+  };
+});
 jest.mock("@/components/products/deleted-products-list", () => ({
   DeletedProductsList: () => <div data-testid="deleted-list" />,
 }));
@@ -61,6 +73,7 @@ const header = () => screen.getByRole("banner");
 
 beforeEach(() => {
   listProps = null;
+  listMounts = 0;
   createOpen = null;
 });
 
@@ -127,8 +140,8 @@ describe("F2-4 / A21 — the header actions", () => {
   });
 });
 
-describe("F2-4 / A21 — the Deleted toggle switches the view", () => {
-  it("pressed: aria-pressed true, secondary, the `Deleted products` h2 (text-h3) above the deleted list; again: back to the list", () => {
+describe("F2-4 / A21 / FR1-12 — the Deleted toggle switches the view", () => {
+  it("pressed: aria-pressed true, secondary, the `Deleted products` h2 (text-h3) above the deleted list, the list hidden; again: back to the list", () => {
     asAdmin(true);
     render(<ProductsPage />);
     const deleted = within(header()).getByRole("button", { name: "Deleted products" });
@@ -144,13 +157,37 @@ describe("F2-4 / A21 — the Deleted toggle switches the view", () => {
     expect(h2).toHaveClass("text-h3");
     const list = screen.getByTestId("deleted-list");
     expect(h2.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.queryByTestId("product-list")).toBeNull();
+    // FR1-12: the product list is still mounted, hidden (it was unmounted before).
+    expect(screen.getByTestId("product-list")).toHaveClass("hidden");
 
     fireEvent.click(deleted);
     expect(deleted).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByTestId("product-list")).toBeInTheDocument();
+    expect(screen.getByTestId("product-list")).not.toHaveClass("hidden");
     expect(screen.queryByTestId("deleted-list")).toBeNull();
     expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
+  });
+
+  it("FR1-12: the list is mounted ONCE across trips to Deleted and back (never remounted)", () => {
+    asAdmin(true);
+    render(<ProductsPage />);
+    expect(listMounts).toBe(1);
+    const deleted = within(header()).getByRole("button", { name: "Deleted products" });
+    for (let i = 0; i < 3; i++) {
+      fireEvent.click(deleted);
+      expect(screen.getByTestId("deleted-list")).toBeInTheDocument();
+      fireEvent.click(deleted);
+      expect(screen.queryByTestId("deleted-list")).toBeNull();
+    }
+    expect(listMounts).toBe(1);
+    expect(listProps!.className).toBeUndefined();
+  });
+
+  it("FR1-12: a member (no Deleted view) gets the list with no `hidden`", () => {
+    asAdmin(false);
+    render(<ProductsPage />);
+    expect(screen.getByTestId("product-list")).not.toHaveClass("hidden");
+    expect(listProps!.className).toBeUndefined();
   });
 });
 

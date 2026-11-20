@@ -192,3 +192,19 @@ describe("F2-8 — the F2b views never use the retired cards", () => {
     expect(src).not.toMatch(/use-is-mobile|useIsMobile/);
   });
 });
+
+describe("FR1-8 — a product with no base name still has a title", () => {
+  it.each([null, ""])("baseName %p: the title line reads the product's name", (baseName) => {
+    renderRow(make({ baseName, variant: null }));
+    const title = mainButton().querySelector(".text-sm.font-semibold.truncate") as HTMLElement;
+    expect(title).not.toBeNull();
+    expect(title.textContent).toBe("Widget 10mg");
+    expect(mainButton()).toHaveAttribute("aria-label", "Adjust stock for Widget 10mg");
+  });
+
+  it("a base name still wins when there is one", () => {
+    renderRow();
+    const title = mainButton().querySelector(".text-sm.font-semibold.truncate") as HTMLElement;
+    expect(title.textContent).toBe("Widget");
+  });
+});

@@ -39,8 +39,14 @@ export function ProductRow({
   onDelete,
 }: ProductRowProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  // FR1-1: whether THIS element's press (long press or right-click) opened the
+  // menu; the "…" and the keyboard open it with false.
+  const [openedByPress, setOpenedByPress] = useState(false);
   // Idempotent opener (A2): a long press never closes the menu.
-  const { handlers, shouldIgnoreClick } = useLongPress(() => setMenuOpen(true));
+  const { handlers, shouldIgnoreClick } = useLongPress(() => {
+    setOpenedByPress(true);
+    setMenuOpen(true);
+  });
   // B12: per-instance ids; the row and the table row are in the DOM at once.
   const id = useId();
   const stockId = `${id}-stock`;
@@ -62,7 +68,7 @@ export function ProductRow({
         }}
       >
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold truncate">{product.baseName}</div>
+          <div className="text-sm font-semibold truncate">{product.baseName || product.name}</div>
           {(product.variant || isPending) && (
             <div className="flex min-w-0 items-center gap-2">
               {product.variant && (
@@ -88,7 +94,11 @@ export function ProductRow({
         product={product}
         isAdmin={isAdmin}
         open={menuOpen}
-        onOpenChange={setMenuOpen}
+        onOpenChange={(next) => {
+          if (next) setOpenedByPress(false);
+          setMenuOpen(next);
+        }}
+        openedByPress={openedByPress}
         onAdjust={onAdjust}
         onStockIn={onStockIn}
         onEdit={onEdit}

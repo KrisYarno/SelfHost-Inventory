@@ -25,6 +25,25 @@
 //     and `use-is-mobile` are gone with those imports. B1: `useLocation` is
 //     mocked (it throws outside a provider).
 //
+// Fix round FR1 (plan 2026-11-19-facelift-f2 REV 7), pinned below:
+//   - FR1-2: the "here" wiring at list level (a chip switch with the reply held
+//     never labels the old location's numbers "here"; the export's `At {name}`
+//     names the location whose id it sent).
+//   - FR1-6: the export tells the truth (0 rows: no file + `No products to
+//     export.`; fewer than the first answer's total: the file + a warning).
+//   - FR1-10: every sentence comes from the answer on screen (its `search` and
+//     `stock` echoes); paging text is the answer's page; Previous / Next /
+//     Export wait while the data is a placeholder. The browser frame where the
+//     list's own debounce has landed and the hook's has not is reproduced with
+//     `mockHookSearchLag` (the hook reads that search instead of the list's).
+//   - FR1-12: a remembered Grid is the first frame (read in a layout effect;
+//     pinned in product-list-first-frame.test.tsx with React's mock scheduler).
+//   - FR1-14: the CSV's state words are the badges' words (ONE map).
+//   AMENDED by FR1 (named in the report): FR1-6's short-file pins (warning, not
+//   success); FR1-10's two paging pins now wait for an answer before the next
+//   Next (it is disabled on placeholder data); A17's import pin (the list no
+//   longer imports the StockState type); the mock route echoes `search`.
+//
 // FR2-3 (REV 7): dropping the param is not a navigation — it is a plain
 // `history.replaceState(null, "", "/products")` (Next 14.2 keeps
 // `useSearchParams` in sync with it), never `router.replace`, which went to the
@@ -55,17 +74,41 @@ jest.mock("@/contexts/location-context", () => ({
   useLocation: () => mockLocation,
 }));
 
+/**
+ * FR1-10: when set, the HOOK reads this search instead of the list's — the
+ * browser frame where the list's own debounce timer has fired and the hook's
+ * (a separate timer, a separate task) has not. Null: a plain pass-through.
+ */
+let mockHookSearchLag: string | null = null;
+jest.mock("@/hooks/use-products", () => {
+  const actual = jest.requireActual("@/hooks/use-products");
+  return {
+    ...actual,
+    useProducts: (filters: { search?: string }, options?: { enabled?: boolean }) =>
+      actual.useProducts(mockHookSearchLag === null ? filters : { ...filters, search: mockHookSearchLag }, options),
+  };
+});
+
 const mockExportToCSV = jest.fn();
 jest.mock("@/lib/export-utils", () => ({
   exportToCSV: (...args: unknown[]) => mockExportToCSV(...args),
 }));
 const mockToastSuccess = jest.fn();
 const mockToastError = jest.fn();
+// FR1-6: the export also says `info` (nothing to export) and `warning` (a short file).
+const mockToastInfo = jest.fn();
+const mockToastWarning = jest.fn();
 jest.mock("sonner", () => ({
-  toast: { success: (...a: unknown[]) => mockToastSuccess(...a), error: (...a: unknown[]) => mockToastError(...a) },
+  toast: {
+    success: (...a: unknown[]) => mockToastSuccess(...a),
+    error: (...a: unknown[]) => mockToastError(...a),
+    info: (...a: unknown[]) => mockToastInfo(...a),
+    warning: (...a: unknown[]) => mockToastWarning(...a),
+  },
 }));
 
 import { ProductListOptimized } from "@/components/products/product-list-optimized";
+import { STOCK_STATE_WORDS } from "@/components/products/product-stock";
 
 type State = "ok" | "low" | "out" | "below-zero" | "no-record";
 type Row = {
@@ -110,7 +153,7 @@ function catalogue(n: number, state: State = "ok", start = 1): Row[] {
 
 const OUT_STATES: State[] = ["out", "below-zero", "no-record"];
 
-/** The route as F2a built it: search, the stock filter, paging, the echoes. */
+/** The route as F2a built it: search, the stock filter, paging, the echoes (FR1-10: `search` too). */
 function serve(url: URL) {
   const page = Number(url.searchParams.get("page") ?? 1);
   const pageSize = Number(url.searchParams.get("pageSize") ?? 25);
@@ -132,6 +175,7 @@ function serve(url: URL) {
     totalPages: Math.ceil(matching.length / pageSize),
     hereLocationId: here ? Number(here) : null,
     stock,
+    search,
   };
 }
 
@@ -220,10 +264,13 @@ beforeEach(() => {
   mockExportToCSV.mockReset();
   mockToastSuccess.mockReset();
   mockToastError.mockReset();
+  mockToastInfo.mockReset();
+  mockToastWarning.mockReset();
   holdIf = null;
   held = [];
   failIf = null;
   tweak = null;
+  mockHookSearchLag = null;
   rows = catalogue(60);
   window.localStorage.clear();
   mockFetch();
@@ -488,6 +535,8 @@ describe("F2-5 / A12 — line 2: the stock filter", () => {
     await screen.findByText("Showing 1–25 of 60 products");
     fireEvent.change(searchBox(), { target: { value: "Product" } });
     await waitDebounce();
+    // FR1-10: Next waits for the search's answer (it is disabled on placeholder data).
+    await waitFor(() => expect(screen.getByRole("button", { name: "Next" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     await screen.findByText("Showing 26–50 of 60 products");
 
@@ -634,9 +683,10 @@ describe("F2-5 — removed: the dead scroll listener, useIsMobile, the cards and
     expect(src).not.toMatch(/MobileFilterSheet|mobile-filter-sheet/);
   });
 
-  it("A17: the stock-threshold module is imported for its TYPE only", () => {
+  it("A17: the stock-threshold module is never VALUE-imported (FR1-14 removed the list's type import with its local map)", () => {
     const imports = src.split(/\r?\n/).filter((l) => l.includes("@/lib/stock-threshold"));
-    expect(imports).toEqual(['import type { StockState } from "@/lib/stock-threshold";']);
+    for (const line of imports) expect(line).toMatch(/^import type /);
+    expect(src).not.toMatch(/^import (?!type )[^;]*["']@\/lib\/stock-threshold["']/m);
   });
 
   it("the file keeps its CRLF line endings", () => {
@@ -1020,6 +1070,8 @@ describe("A5 — an out-of-range page", () => {
     const { qc } = renderList();
     await screen.findByText("Showing 1–25 of 80 products");
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    // FR1-10: the second Next waits for page 2's answer (disabled on placeholder data).
+    await screen.findByText("Showing 26–50 of 80 products");
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     await screen.findByText("Showing 51–75 of 80 products");
 
@@ -1091,10 +1143,17 @@ const exported = () => {
   return { data, columns, filename };
 };
 
+/** Every toast the export said (FR1-6 adds info and warning). */
+const exportToasts = () =>
+  mockToastSuccess.mock.calls.length +
+  mockToastError.mock.calls.length +
+  mockToastInfo.mock.calls.length +
+  mockToastWarning.mock.calls.length;
+
 async function clickExport() {
   await screen.findByText(/^Showing 1–/);
   fireEvent.click(exportButton());
-  await waitFor(() => expect(mockToastSuccess.mock.calls.length + mockToastError.mock.calls.length).toBe(1));
+  await waitFor(() => expect(exportToasts()).toBe(1));
 }
 
 describe("F2-9 / A6 — export reads every matching product", () => {
@@ -1124,7 +1183,11 @@ describe("F2-9 / A6 — export reads every matching product", () => {
     await clickExport();
     expect(exportCalls().map((u) => u.searchParams.get("page"))).toEqual(["1", "2"]);
     expect(exported().data).toHaveLength(600);
-    expect(mockToastSuccess).toHaveBeenCalledWith("Exported 600 products.");
+    // FR1-6: 600 gathered of the first answer's 1200: the file is written, and says so.
+    expect(mockToastWarning).toHaveBeenCalledWith(
+      "Exported 600 of 1200 products. The list changed during the export — export again for a complete file.",
+    );
+    expect(mockToastSuccess).not.toHaveBeenCalled();
   });
 
   it("a short page 1 -> one request", async () => {
@@ -1134,7 +1197,11 @@ describe("F2-9 / A6 — export reads every matching product", () => {
     renderList();
     await clickExport();
     expect(exportCalls()).toHaveLength(1);
-    expect(mockToastSuccess).toHaveBeenCalledWith("Exported 499 products.");
+    // FR1-6: 499 of 1200.
+    expect(exported().data).toHaveLength(499);
+    expect(mockToastWarning).toHaveBeenCalledWith(
+      "Exported 499 of 1200 products. The list changed during the export — export again for a complete file.",
+    );
   });
 
   it("reads EXACTLY pages 2..totalPages of the first answer (1500 -> 3 requests)", async () => {
@@ -1157,7 +1224,10 @@ describe("F2-9 / A6 — export reads every matching product", () => {
     expect(data).toHaveLength(500);
     expect(new Set(data.map((r) => r.name)).size).toBe(500);
     expect(data.filter((r) => r.name === "Product 1")).toHaveLength(1);
-    expect(mockToastSuccess).toHaveBeenCalledWith("Exported 500 products.");
+    // FR1-6: the rows written (500) are fewer than the first answer's 501.
+    expect(mockToastWarning).toHaveBeenCalledWith(
+      "Exported 500 of 501 products. The list changed during the export — export again for a complete file.",
+    );
   });
 
   it("the export uses the DEBOUNCED search the list is showing, and the stock filter", async () => {
@@ -1294,5 +1364,241 @@ describe("F2-9 — the export's toasts, disabled state and visibility", () => {
     fireEvent.click(clearButton());
     await screen.findByText("Showing 1–25 of 60 products");
     expect(exportButton()).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round FR1 (REV 7)
+// ---------------------------------------------------------------------------
+
+const BACK = { id: 2, name: "Back" };
+const confirmBack = () => {
+  mockLocation = { selectedLocation: BACK, selectedLocationId: 2, isLoading: false, loadFailed: false };
+};
+/** Back's rows read 7 here (Main's read their total, 50). */
+const backReadsSeven = (u: URL, body: ReturnType<typeof serve>) =>
+  u.searchParams.get("hereLocationId") === "2"
+    ? { ...body, products: body.products.map((p) => ({ ...p, hereQuantity: 7 })) }
+    : body;
+
+describe("FR1-2 — the here wiring, at list level", () => {
+  it("Main confirmed, then the chip switches to Back with the reply HELD: no `here` line, no `Here (` header, the caption already says Back; after release, `7 here` and `Here (Back)`", async () => {
+    tweak = backReadsSeven;
+    const { rerenderList } = renderList();
+    await screen.findByText("Showing 1–25 of 60 products");
+    expect(screen.getAllByText("50 here").length).toBeGreaterThan(0);
+    expect(screen.getByRole("columnheader", { name: "Here (Main)" })).toBeInTheDocument();
+
+    holdIf = (u) => u.searchParams.get("hereLocationId") === "2";
+    confirmBack();
+    rerenderList();
+    await waitFor(() => expect(held).toHaveLength(1));
+
+    // Main's numbers are still on screen (placeholder) — never labelled "here".
+    expect(mainButtons()).toHaveLength(25);
+    expect(screen.queryByText(/ here$/)).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: /^Here \(/ })).toBeNull();
+    expect(screen.getByText("Totals cover all locations. “Here” is Back.")).toBeInTheDocument();
+
+    holdIf = null;
+    await release();
+    expect((await screen.findAllByText("7 here")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("columnheader", { name: "Here (Back)" })).toBeInTheDocument();
+    expect(screen.queryByText("50 here")).toBeNull();
+    expect(lastListCall().searchParams.get("hereLocationId")).toBe("2");
+  });
+
+  it("the export's `At {name}` names the location whose id it SENT as hereLocationId", async () => {
+    tweak = backReadsSeven;
+    rows = catalogue(3);
+    const { rerenderList } = renderList();
+    await screen.findByText("Showing 1–3 of 3 products");
+    confirmBack();
+    rerenderList();
+    expect((await screen.findAllByText("7 here")).length).toBeGreaterThan(0);
+    await clickExport();
+    const sent = exportCalls().map((u) => u.searchParams.get("hereLocationId"));
+    expect(sent).toEqual(["2"]);
+    const { columns, data } = exported();
+    expect(columns.map((c) => c.label)).toContain("At Back");
+    expect(columns.map((c) => c.label)).not.toContain("At Main");
+    expect(data.map((r) => r.hereQuantity)).toEqual([7, 7, 7]);
+  });
+});
+
+describe("FR1-6 — the export tells the truth", () => {
+  it("0 rows gathered: NO file, and `toast.info(\"No products to export.\")` (never `Exported 0 products.`)", async () => {
+    rows = catalogue(3);
+    tweak = (u, body) =>
+      u.searchParams.get("pageSize") === "500" ? { ...body, products: [], total: 0, totalPages: 0 } : body;
+    renderList();
+    await clickExport();
+    expect(mockExportToCSV).not.toHaveBeenCalled();
+    expect(mockToastInfo).toHaveBeenCalledTimes(1);
+    expect(mockToastInfo).toHaveBeenCalledWith("No products to export.");
+    expect(mockToastSuccess).not.toHaveBeenCalled();
+    expect(mockToastWarning).not.toHaveBeenCalled();
+  });
+
+  it("0 rows gathered though the first answer said 5: still no file and `No products to export.`", async () => {
+    rows = catalogue(5);
+    tweak = (u, body) => (u.searchParams.get("pageSize") === "500" ? { ...body, products: [] } : body);
+    renderList();
+    await clickExport();
+    expect(mockExportToCSV).not.toHaveBeenCalled();
+    expect(mockToastInfo).toHaveBeenCalledWith("No products to export.");
+  });
+
+  it("gathered < the first answer's total: the file is written, and the warning says n of total", async () => {
+    rows = catalogue(3);
+    tweak = (u, body) =>
+      u.searchParams.get("pageSize") === "500" ? { ...body, products: body.products.slice(0, 2) } : body;
+    renderList();
+    await clickExport();
+    expect(exported().data).toHaveLength(2);
+    expect(mockToastWarning).toHaveBeenCalledWith(
+      "Exported 2 of 3 products. The list changed during the export — export again for a complete file.",
+    );
+    expect(mockToastSuccess).not.toHaveBeenCalled();
+  });
+
+  it("otherwise: today's `Exported {n} {product|products}.` (all gathered; or more than the first total)", async () => {
+    rows = catalogue(4);
+    renderList();
+    await clickExport();
+    expect(mockToastSuccess).toHaveBeenCalledWith("Exported 4 products.");
+    expect(mockToastWarning).not.toHaveBeenCalled();
+    expect(mockToastInfo).not.toHaveBeenCalled();
+  });
+
+  it("more rows than the first answer's total (the list grew): the plain success", async () => {
+    rows = catalogue(4);
+    tweak = (u, body) => (u.searchParams.get("pageSize") === "500" ? { ...body, total: 3 } : body);
+    renderList();
+    await clickExport();
+    expect(exported().data).toHaveLength(4);
+    expect(mockToastSuccess).toHaveBeenCalledWith("Exported 4 products.");
+  });
+});
+
+describe("FR1-10 — every sentence comes from the answer on screen", () => {
+  it("clearing a search that matched nothing never reads `No products yet.` — not in the frame where the box's debounce has landed and the answer has not", async () => {
+    const { rerenderList } = renderList();
+    await screen.findByText("Showing 1–25 of 60 products");
+    fireEvent.change(searchBox(), { target: { value: "zzz" } });
+    expect(await screen.findByText("No products match.")).toBeInTheDocument();
+
+    // The X, then the list's own debounce lands while the hook's has not.
+    mockHookSearchLag = "zzz";
+    fireEvent.click(clearButton());
+    await waitDebounce();
+    expect(searchBox().value).toBe("");
+    expect(screen.queryByText("No products yet.")).toBeNull();
+    expect(screen.getByText("No products match.")).toBeInTheDocument();
+
+    // The hook's lands: the answer for no search arrives.
+    mockHookSearchLag = null;
+    rerenderList();
+    expect(await screen.findByText("Showing 1–25 of 60 products")).toBeInTheDocument();
+    expect(screen.queryByText("No products yet.")).toBeNull();
+  });
+
+  it("the empty state's buttons follow the answer's filter: `Show all stock` only when the ANSWER is filtered", async () => {
+    renderList();
+    await screen.findByText("Showing 1–25 of 60 products");
+    fireEvent.click(filterButton("Low"));
+    expect(await screen.findByText("No products match.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show all stock" })).toBeInTheDocument();
+  });
+
+  it("mid-flight paging shows the ANSWER's page: Next with the reply held still reads `Page 1 of 3`", async () => {
+    renderList();
+    await screen.findByText("Page 1 of 3");
+    holdIf = (u) => u.searchParams.get("page") === "2";
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect(held).toHaveLength(1));
+    expect(screen.getByText("Page 1 of 3")).toBeInTheDocument();
+    expect(screen.queryByText("Page 2 of 3")).toBeNull();
+    expect(screen.getByText("Showing 1–25 of 60 products")).toBeInTheDocument();
+    holdIf = null;
+    await release();
+    expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument();
+    expect(screen.getByText("Showing 26–50 of 60 products")).toBeInTheDocument();
+  });
+
+  it("Previous, Next and Export are DISABLED while the data is a placeholder, and come back with the answer", async () => {
+    renderList();
+    await screen.findByText("Page 1 of 3");
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await screen.findByText("Page 2 of 3");
+    expect(screen.getByRole("button", { name: "Previous" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Next" })).toBeEnabled();
+    expect(exportButton()).toBeEnabled();
+
+    // A page in flight (page 3 held): all three wait, Previous included (page 3 is not page 1).
+    holdIf = () => true;
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => expect(held).toHaveLength(1));
+    expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+    expect(exportButton()).toBeDisabled();
+    // A click on a disabled Previous / Next does not page.
+    const before = listCalls().length;
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(listCalls().length).toBe(before);
+    holdIf = null;
+    await release();
+    expect(await screen.findByText("Page 3 of 3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous" })).toBeEnabled();
+
+    // A filter in flight: the same.
+    holdIf = () => true;
+    fireEvent.click(filterButton("In stock"));
+    await waitFor(() => expect(held).toHaveLength(1));
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+    expect(exportButton()).toBeDisabled();
+
+    holdIf = null;
+    await release();
+    expect(await screen.findByText("Showing 1–25 of 60 products in stock")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next" })).toBeEnabled();
+    expect(exportButton()).toBeEnabled();
+  });
+
+  it("the export's params come from the answer on screen, not from a box that ran ahead of it", async () => {
+    renderList();
+    await screen.findByText("Showing 1–25 of 60 products");
+    fireEvent.change(searchBox(), { target: { value: "Product 1" } });
+    expect(await screen.findByText("Showing 1–11 of 11 products")).toBeInTheDocument();
+    fireEvent.click(filterButton("In stock"));
+    expect(await screen.findByText("Showing 1–11 of 11 products in stock")).toBeInTheDocument();
+
+    // The box runs ahead: the list's own debounce lands, the answer has not.
+    mockHookSearchLag = "Product 1";
+    fireEvent.change(searchBox(), { target: { value: "Product 2" } });
+    await waitDebounce();
+    fireEvent.click(exportButton());
+    await waitFor(() => expect(exportToasts()).toBe(1));
+    const [u] = exportCalls();
+    expect(u.searchParams.get("search")).toBe("Product 1");
+    expect(u.searchParams.get("stock")).toBe("in-stock");
+    expect(exported().data).toHaveLength(11);
+  });
+});
+
+// FR1-12's first-frame pin lives in product-list-first-frame.test.tsx: it needs
+// React's mock scheduler to make the paint boundary visible in jsdom.
+
+describe("FR1-14 — the CSV's state words are the badges' words", () => {
+  it("each exported `Stock state` equals STOCK_STATE_WORDS, the map the badges render", async () => {
+    const states: State[] = ["ok", "low", "out", "below-zero", "no-record"];
+    rows = states.map((st, i) => row(i + 1, st));
+    renderList();
+    await clickExport();
+    expect(exported().data.map((r) => r.stockState)).toEqual(states.map((st) => STOCK_STATE_WORDS[st]));
+    for (const st of states.filter((x) => x !== "ok")) {
+      expect(screen.getAllByText(STOCK_STATE_WORDS[st], { exact: true }).length).toBeGreaterThan(0);
+    }
   });
 });

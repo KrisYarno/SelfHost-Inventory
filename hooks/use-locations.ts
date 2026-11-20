@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, type QueryClient } from "@tanstack/react-query";
 
 /**
  * THE ONE HOME of the locations query (plan P-9, contract pack C2c.4).
@@ -43,4 +43,14 @@ export function useLocations(enabled = true) {
       return (json?.locations ?? json ?? []) as Location[];
     },
   });
+}
+
+/**
+ * Facelift F2 FR1-4: marks the shared locations list stale (refetching it where
+ * it is on screen) after the catalogue changed — an admin added or deleted a
+ * location. It lives HERE so this module stays the one owner of the key; the
+ * callers never spell it.
+ */
+export function invalidateLocationLists(queryClient: QueryClient) {
+  return queryClient.invalidateQueries({ queryKey: locationKeys.all });
 }

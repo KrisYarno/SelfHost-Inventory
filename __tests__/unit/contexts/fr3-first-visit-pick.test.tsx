@@ -67,8 +67,14 @@ let session: Session;
 /** Which session timing this run uses: the app's (after mount), or at mount. */
 let late = false;
 
-/** The PROVIDER's `/api/locations` reads (no init), each answered by the test. */
+/**
+ * The PROVIDER's `/api/locations` reads, each answered by the test. Facelift
+ * F2 FR1-11: the provider's read now carries a signal too — its 10 s
+ * `AbortSignal.timeout` — so its reads are told from the dialog's (which pass
+ * react-query's signal) by THAT signal, recorded as it is made.
+ */
 let providerReads: Array<(res: Response) => void>;
+let providerSignals: WeakSet<AbortSignal>;
 /** What the Fulfill dialog's own `/api/locations` read answers (it passes a signal). */
 let dialogList: number[];
 let fetchMock: jest.Mock;
@@ -100,10 +106,19 @@ beforeEach(() => {
   window.localStorage.clear();
   session = signedIn(null);
   jest.spyOn(console, "error").mockImplementation(() => {});
+  providerSignals = new WeakSet();
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  jest.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+    const signal = timeout(ms);
+    providerSignals.add(signal);
+    return signal;
+  });
   fetchMock = jest.fn((input: unknown, init?: RequestInit) => {
     const url = String(input);
     if (url === "/api/locations") {
-      if (init === undefined) return new Promise<Response>((resolve) => providerReads.push(resolve));
+      if (!init?.signal || providerSignals.has(init.signal)) {
+        return new Promise<Response>((resolve) => providerReads.push(resolve));
+      }
       return Promise.resolve(ok(dialogList));
     }
     return Promise.resolve({ ok: true, status: 200, json: async () => ({}) } as unknown as Response);

@@ -7,14 +7,27 @@ import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 import { cn } from "@/lib/utils";
 
 /**
- * Facelift F2-6: the state word beside the total. `stockState` is read from the
- * response (A24); the UI never recomputes it. `ok` has no badge.
+ * Facelift FR1-14: the ONE map of the five state words. The badges below and
+ * the Products list's CSV (`Stock state`) both read it; `ok` has no badge and
+ * exports as `OK`.
  */
-const STATE_BADGES: Record<Exclude<StockState, "ok">, { tone: StatusTone; word: string }> = {
-  low: { tone: "warning", word: "Low" },
-  out: { tone: "negative", word: "Out" },
-  "below-zero": { tone: "negative", word: "Below zero" },
-  "no-record": { tone: "neutral", word: "No record" },
+export const STOCK_STATE_WORDS: Record<StockState, string> = {
+  ok: "OK",
+  low: "Low",
+  out: "Out",
+  "below-zero": "Below zero",
+  "no-record": "No record",
+};
+
+/**
+ * Facelift F2-6: the state word beside the total, in its tone. `stockState` is
+ * read from the response (A24); the UI never recomputes it. `ok` has no badge.
+ */
+const STATE_TONES: Record<Exclude<StockState, "ok">, StatusTone> = {
+  low: "warning",
+  out: "negative",
+  "below-zero": "negative",
+  "no-record": "neutral",
 };
 
 interface ProductStockProps {
@@ -50,7 +63,10 @@ export function ProductStock({
   className,
 }: ProductStockProps) {
   const { totalQuantity, hereQuantity, stockState } = product;
-  const badge = stockState === undefined || stockState === "ok" ? null : STATE_BADGES[stockState];
+  const badge =
+    stockState === undefined || stockState === "ok"
+      ? null
+      : { tone: STATE_TONES[stockState], word: STOCK_STATE_WORDS[stockState] };
   const hereShown =
     showHere &&
     selectedLocationId !== null &&

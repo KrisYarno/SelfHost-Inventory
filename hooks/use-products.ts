@@ -15,6 +15,8 @@ interface ProductsResponse {
   hereLocationId: number | null;
   /** Facelift F2 B5: the stock filter this answer describes (the request's `stock`, or `all`). */
   stock: StockFilter;
+  /** Facelift FR1-10: the search this answer applied (the request's `search`, or `""`). */
+  search: string;
 }
 
 /**

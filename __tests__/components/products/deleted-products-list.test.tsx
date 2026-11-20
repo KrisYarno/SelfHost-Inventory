@@ -8,6 +8,14 @@
 // `size="sm"` Button (44 px on phones via F1) with the `h-8 text-xs` override
 // gone; `opacity-75` is dropped. Every existing string and behaviour is
 // unchanged: the change is STRUCTURAL.
+//
+// Fix round FR1 (REV 7):
+//   - FR1-13: the per-row `Deleted` badge is REMOVED (the page's `Deleted
+//     products` h2 says it; this amends F2-10's "strings unchanged" for that
+//     one badge); the loading skeleton is 4 rows of `h-14` inside the rows'
+//     own bordered frame.
+//   - FR1-9: `Restore Product` keeps its visible label as its name and is
+//     DESCRIBED by its row's product name (`useId` per row).
 
 import * as React from "react";
 import fs from "fs";
@@ -140,11 +148,11 @@ describe("F2-10 — rows, not cards", () => {
   });
 });
 
-describe("F2-10 / A24 — every existing string, unchanged", () => {
-  it("the count, the Deleted badge, the base / variant line, the date, the user, Restore Product", async () => {
+describe("F2-10 / A24 — every existing string, unchanged (but FR1-13's badge)", () => {
+  it("the count, the base / variant line, the date, the user, Restore Product — and FR1-13: NO per-row Deleted badge", async () => {
     renderList();
     expect(await screen.findByText("2 deleted products")).toBeInTheDocument();
-    expect(screen.getAllByText("Deleted", { exact: true })).toHaveLength(2);
+    expect(screen.queryAllByText("Deleted", { exact: true })).toHaveLength(0);
     expect(screen.getByText("BPC 5 / Vial")).toBeInTheDocument();
     expect(screen.getByText(`Deleted ${formatted(PRODUCTS[1].deletedAt)}`)).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Restore Product" })).toHaveLength(2);
@@ -196,5 +204,63 @@ describe("F2-10 — Restore still restores", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Restore Product" })[0]);
     await waitFor(() => expect(mockToastError).toHaveBeenCalledWith("Nope"));
     (console.error as jest.Mock).mockRestore();
+  });
+});
+
+describe("FR1-13 — deleted rows on a phone", () => {
+  it("no per-row Deleted badge: each row is the name line, then the base / date / user line", async () => {
+    renderList();
+    const name = await screen.findByText("BPC 5 Vial");
+    const row = name.closest(".min-h-14") as HTMLElement;
+    expect(within(row).queryByText("Deleted", { exact: true })).toBeNull();
+    const src = fs.readFileSync(path.join(process.cwd(), "components/products/deleted-products-list.tsx"), "utf8");
+    expect(src).not.toMatch(/<Badge\b/);
+    expect(src).not.toMatch(/bg-negative-muted/);
+  });
+
+  it("loading: 4 skeleton rows of h-14 inside the rows' bordered frame", () => {
+    fetchMock.mockImplementation(() => new Promise<Response>(() => {}));
+    const { container } = renderList();
+    const frame = container.firstElementChild as HTMLElement;
+    expect(classesOf(frame)).toEqual(expect.arrayContaining(["rounded-lg", "border", "bg-surface", "divide-y"]));
+    expect(frame.children).toHaveLength(4);
+    for (const s of Array.from(frame.children)) {
+      expect(classesOf(s)).toContain("h-14");
+      expect(classesOf(s)).not.toContain("h-20");
+    }
+  });
+});
+
+describe("FR1-9 — Restore's accessible description", () => {
+  it("each `Restore Product` is NAMED by its label and DESCRIBED by its own row's product name", async () => {
+    renderList();
+    await screen.findByText("BPC 5 Vial");
+    const restores = screen.getAllByRole("button", { name: "Restore Product" });
+    expect(restores).toHaveLength(2);
+    expect(restores[0]).toHaveAccessibleName("Restore Product");
+    expect(restores[0]).toHaveAccessibleDescription("BPC 5 Vial");
+    expect(restores[1]).toHaveAccessibleDescription("TB 500");
+    const id = restores[0].getAttribute("aria-describedby")!;
+    expect(document.getElementById(id)).toBe(screen.getByText("BPC 5 Vial"));
+  });
+
+  it("the ids are per row (useId): distinct, and each points at one element", async () => {
+    renderList();
+    await screen.findByText("BPC 5 Vial");
+    const ids = screen.getAllByRole("button", { name: "Restore Product" }).map((b) => b.getAttribute("aria-describedby"));
+    expect(new Set(ids).size).toBe(2);
+    for (const id of ids) expect(document.querySelectorAll(`[id="${id}"]`)).toHaveLength(1);
+  });
+
+  it("while restoring, the button is still described by its product", async () => {
+    renderList();
+    await screen.findByText("BPC 5 Vial");
+    holdRestore = () => {};
+    fireEvent.click(screen.getAllByRole("button", { name: "Restore Product" })[0]);
+    const restoring = await screen.findByRole("button", { name: "Restoring..." });
+    expect(restoring).toHaveAccessibleDescription("BPC 5 Vial");
+    await act(async () => {
+      holdRestore!();
+    });
   });
 });

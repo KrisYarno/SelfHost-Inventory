@@ -1,14 +1,14 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { ProductWithQuantity } from "@/types/product";
-// TYPE-ONLY (facelift F2 A17): no client file value-imports the helper's module.
-import type { StockState } from "@/lib/stock-threshold";
 import { ProductRow } from "./product-row";
 import { ProductGridTile } from "./product-grid-tile";
 import { ProductTable } from "./product-table";
+// FR1-14: the ONE map of the state words (the badges read it too).
+import { STOCK_STATE_WORDS } from "./product-stock";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -38,15 +38,6 @@ const COUNT_NOUNS: Record<StockFilter, [string, string]> = {
   out: ["product out of stock", "products out of stock"],
 };
 
-/** F2-9: the export's `Stock state` cell: F2-6's word, or `OK`. */
-const STATE_WORDS: Record<StockState, string> = {
-  ok: "OK",
-  low: "Low",
-  out: "Out",
-  "below-zero": "Below zero",
-  "no-record": "No record",
-};
-
 type ProductView = "list" | "grid";
 /** F2-8 / A13: where this device remembers the view. */
 const VIEW_KEY = "products.view";
@@ -58,9 +49,16 @@ const EXPORT_PAGE_SIZE = 500;
 /** One page of `/api/products/optimized` as the export reads it. */
 interface ExportPage {
   products: ProductWithQuantity[];
+  /** FR1-6: how many rows the answer says match; the first page's is the export's yardstick. */
+  total: number;
   pageSize: number;
   totalPages: number;
 }
+
+// FR1-12: the remembered view is read in the commit, before the browser paints
+// (a layout effect), so a remembered Grid is the first frame shown. The server
+// renders no effects.
+const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 interface ProductListProps {
   onEdit?: (product: ProductWithQuantity) => void;
@@ -92,7 +90,7 @@ export function ProductListOptimized({
   const [page, setPage] = useState(1);
   const [stockFilter, setStockFilter] = useState<StockFilter>("all");
   // F2-8 / A13: "list" on the first render; the remembered choice is read
-  // after mount.
+  // after mount (FR1-12: before the first paint).
   const [view, setView] = useState<ProductView>("list");
   const [exporting, setExporting] = useState(false);
   // A6: the export reads the search the list is showing (the hook's debounce).
@@ -141,9 +139,10 @@ export function ProductListOptimized({
     setPage(1);
   }, [urlSearch]);
 
-  // A13: the remembered view, read once after mount. Storage that throws (or
-  // holds anything else) leaves the List default.
-  useEffect(() => {
+  // A13 / FR1-12: the remembered view, read once after mount, in the commit
+  // (never in the useState initializer). Storage that throws (or holds anything
+  // else) leaves the List default.
+  useIsomorphicLayoutEffect(() => {
     try {
       const saved = window.localStorage.getItem(VIEW_KEY);
       if (saved === "list" || saved === "grid") setView(saved);
@@ -200,28 +199,39 @@ export function ProductListOptimized({
   const caption = selectedLocation
     ? `Totals cover all locations. “Here” is ${selectedLocation.name}.`
     : "Totals cover all locations.";
+  // FR1-10: the paging line is the answer's own page of its own count (`data`
+  // is the answer QueryState hands the rows below).
   const pageCount = data && data.pageSize > 0 ? Math.ceil(data.total / data.pageSize) : 0;
   // F2-9: an answer that says the catalogue (or the match) is empty has
   // nothing to export.
   const exportHidden = data !== undefined && !isPlaceholderData && data.total === 0;
+  // FR1-10: every sentence (and the export) describes the ANSWER on screen: its
+  // own search and filter, never the box or the buttons, which can run ahead of
+  // it. Before any answer there is nothing on screen to describe, and the
+  // export reads what the list is reading.
+  const answerSearch = data ? data.search : debouncedSearch;
+  const answerStock = data ? data.stock : stockFilter;
 
   // F2-9 (FL-B-2, A6): every product matching the search and the filter, read
   // 500 at a time: page 1, then EXACTLY pages 2..totalPages of that first
   // answer, stopping early on a short or empty page. Rows are de-duplicated by
-  // id; the file and the toast count the rows actually gathered.
+  // id; the file and the toast count the rows actually gathered (FR1-6: and
+  // say so when that is fewer than the first answer's total).
   const handleExport = async () => {
     if (exporting) return;
     setExporting(true);
     // The location the `At` column is named for is the one its values were read for.
     const location = selectedLocation;
+    const search = answerSearch;
+    const stock = answerStock;
     const readPage = async (n: number): Promise<ExportPage> => {
       const params = new URLSearchParams();
-      if (debouncedSearch) params.set("search", debouncedSearch);
+      if (search) params.set("search", search);
       params.set("sortBy", "baseNameNumeric");
       params.set("sortOrder", "asc");
       params.set("page", String(n));
       params.set("pageSize", String(EXPORT_PAGE_SIZE));
-      if (stockFilter !== "all") params.set("stock", stockFilter);
+      if (stock !== "all") params.set("stock", stock);
       if (location) params.set("hereLocationId", String(location.id));
       const response = await fetch(`/api/products/optimized?${params}`);
       if (!response.ok) throw new Error("Failed to export products");
@@ -250,11 +260,17 @@ export function ProductListOptimized({
         // Raw numbers: a null total or here is an empty cell, never 0.
         totalQuantity: product.totalQuantity,
         hereQuantity: product.hereQuantity,
-        stockState: product.stockState ? STATE_WORDS[product.stockState] : undefined,
+        stockState: product.stockState ? STOCK_STATE_WORDS[product.stockState] : undefined,
         lowStockThreshold: product.lowStockThreshold,
         costPrice: product.costPrice,
         retailPrice: product.retailPrice,
       }));
+      const n = rows.length;
+      // FR1-6: nothing gathered is no file (never `Exported 0 products.`).
+      if (n === 0) {
+        toast.info("No products to export.");
+        return;
+      }
       exportToCSV(
         rows,
         [
@@ -270,8 +286,15 @@ export function ProductListOptimized({
         ],
         `products-${new Date().toISOString().split("T")[0]}.csv`
       );
-      const n = rows.length;
-      toast.success(`Exported ${n} ${n === 1 ? "product" : "products"}.`);
+      // FR1-6: fewer rows than the first answer said match means the catalogue
+      // changed while the pages were read: the file is written, and says so.
+      if (n < first.total) {
+        toast.warning(
+          `Exported ${n} of ${first.total} products. The list changed during the export — export again for a complete file.`
+        );
+      } else {
+        toast.success(`Exported ${n} ${n === 1 ? "product" : "products"}.`);
+      }
     } catch (error) {
       console.error("Error exporting products:", error);
       toast.error("Couldn't export products. Try again.");
@@ -308,12 +331,14 @@ export function ProductListOptimized({
     );
 
   // F2-9 / A24: a search or a filter that matches nothing, or a catalogue with
-  // nothing in it yet. Each button clears ONLY its own part.
+  // nothing in it yet. Each button clears ONLY its own part. FR1-10: said of the
+  // answer's own search and filter, so a box just cleared never reads `No
+  // products yet.` before its answer arrives.
   const empty =
-    debouncedSearch !== "" || stockFilter !== "all" ? (
+    answerSearch !== "" || answerStock !== "all" ? (
       <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
         <p className="text-sm text-muted-foreground">No products match.</p>
-        {stockFilter !== "all" && (
+        {answerStock !== "all" && (
           <Button variant="outline" size="sm" onClick={() => chooseFilter("all")}>
             Show all stock
           </Button>
@@ -397,7 +422,7 @@ export function ProductListOptimized({
               variant="outline"
               size="sm"
               onClick={handleExport}
-              disabled={exporting}
+              disabled={exporting || isPlaceholderData}
               className="shrink-0"
               aria-label="Export CSV"
             >
@@ -488,23 +513,25 @@ export function ProductListOptimized({
               </div>
             )}
 
-            {/* F2-9: paging (no pb-20: the shell already clears the dock). */}
+            {/* F2-9: paging (no pb-20: the shell already clears the dock).
+                FR1-10: while a page, search or filter is in flight the buttons
+                wait for its answer. */}
             {pageCount > 1 && (
               <div className="flex items-center justify-center gap-2 pt-4">
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={() => goToPage(Math.max(1, page - 1))}
-                  disabled={page === 1}
+                  disabled={page === 1 || isPlaceholderData}
                 >
                   Previous
                 </Button>
-                <span className="px-2 text-sm">{`Page ${page} of ${pageCount}`}</span>
+                <span className="px-2 text-sm">{`Page ${d.page} of ${pageCount}`}</span>
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={() => goToPage(page + 1)}
-                  disabled={page >= pageCount}
+                  disabled={page >= pageCount || isPlaceholderData}
                 >
                   Next
                 </Button>

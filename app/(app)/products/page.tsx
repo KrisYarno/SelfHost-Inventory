@@ -76,21 +76,24 @@ export default function ProductsPage() {
     <>
       {/* F2-4: the F1 frame; the shell's main element is the one scroller. */}
       <Page title="Products" actions={actions}>
-        {showDeleted && isAdmin ? (
+        {showDeleted && isAdmin && (
           <div className="space-y-4">
             <h2 className="text-h3">Deleted products</h2>
             <DeletedProductsList />
           </div>
-        ) : (
-          <ProductListOptimized
-            onEdit={isAdmin ? handleEdit : undefined}
-            onDelete={isAdmin ? handleDelete : undefined}
-            onQuickAdjust={handleQuickAdjust}
-            onStockIn={handleStockIn}
-            onCreate={isAdmin ? () => setCreateDialogOpen(true) : undefined}
-            isAdmin={isAdmin}
-          />
         )}
+        {/* Facelift FR1-12: the list stays MOUNTED while the deleted view
+            shows, hidden, so its filter, page and search survive a trip to
+            Deleted and back. */}
+        <ProductListOptimized
+          onEdit={isAdmin ? handleEdit : undefined}
+          onDelete={isAdmin ? handleDelete : undefined}
+          onQuickAdjust={handleQuickAdjust}
+          onStockIn={handleStockIn}
+          onCreate={isAdmin ? () => setCreateDialogOpen(true) : undefined}
+          isAdmin={isAdmin}
+          className={showDeleted && isAdmin ? "hidden" : undefined}
+        />
       </Page>
 
       {/* Dialogs */}

@@ -41,8 +41,14 @@ export function ProductGridTile({
   onDelete,
 }: ProductGridTileProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  // FR1-1: whether THIS element's press (long press or right-click) opened the
+  // menu; the "…" and the keyboard open it with false.
+  const [openedByPress, setOpenedByPress] = useState(false);
   // Idempotent opener (A2): a long press never closes the menu.
-  const { handlers, shouldIgnoreClick } = useLongPress(() => setMenuOpen(true));
+  const { handlers, shouldIgnoreClick } = useLongPress(() => {
+    setOpenedByPress(true);
+    setMenuOpen(true);
+  });
   // B12: per-instance ids.
   const id = useId();
   const stockId = `${id}-stock`;
@@ -64,7 +70,7 @@ export function ProductGridTile({
         }}
       >
         <div className="min-w-0 pr-12">
-          <div className="text-sm font-semibold line-clamp-2">{product.baseName}</div>
+          <div className="text-sm font-semibold line-clamp-2">{product.baseName || product.name}</div>
           {product.variant && (
             <div className="text-xs text-muted-foreground truncate">{product.variant}</div>
           )}
@@ -87,7 +93,11 @@ export function ProductGridTile({
           product={product}
           isAdmin={isAdmin}
           open={menuOpen}
-          onOpenChange={setMenuOpen}
+          onOpenChange={(next) => {
+            if (next) setOpenedByPress(false);
+            setMenuOpen(next);
+          }}
+          openedByPress={openedByPress}
           onAdjust={onAdjust}
           onStockIn={onStockIn}
           onEdit={onEdit}

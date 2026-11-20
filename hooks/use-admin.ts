@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { getJSON, type ApiError } from "@/hooks/get-json";
 import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
+import { invalidateLocationLists } from "@/hooks/use-locations";
 import { useLocation } from "@/contexts/location-context";
 import type { User } from "@/components/admin/user-table";
 // Reconciliation Part 2 (seam S-B18): the move dialog OWNS the 200 body's shape,
@@ -542,8 +543,23 @@ export function useAdminSettings() {
   });
 }
 
-// Facelift F2-13: creating or deleting a location also re-reads the app-wide list
-// (the chip, every stock writer), so the change shows without a reload.
+// Facelift F2-13 / FR1-4: creating or deleting a location refreshes EVERY
+// location list without a reload: the app-wide list (the chip, every stock
+// writer) is re-read, and the cached ones are invalidated — `useLocations`'
+// shared list (through its own module's `invalidateLocationLists`, so that
+// module stays the one owner of its key) and the admin
+// `["admin", "location-options"]` — beside the settings page's own (the one
+// the mutation waits for, as before).
+function refreshLocationLists(
+  queryClient: ReturnType<typeof useQueryClient>,
+  retryLocations: () => void,
+) {
+  retryLocations();
+  invalidateLocationLists(queryClient);
+  queryClient.invalidateQueries({ queryKey: ["admin", "location-options"] });
+  return queryClient.invalidateQueries({ queryKey: ["admin", "settings"] });
+}
+
 export function useAddLocation() {
   const queryClient = useQueryClient();
   const { token: csrfToken } = useCSRF();
@@ -551,10 +567,7 @@ export function useAddLocation() {
   return useMutation({
     mutationFn: (name: string) =>
       mutateJSON("/api/admin/locations", "POST", { name }, csrfToken),
-    onSuccess: () => {
-      retryLocations();
-      return queryClient.invalidateQueries({ queryKey: ["admin", "settings"] });
-    },
+    onSuccess: () => refreshLocationLists(queryClient, retryLocations),
   });
 }
 
@@ -565,10 +578,7 @@ export function useDeleteSettingsLocation() {
   return useMutation({
     mutationFn: (locationId: number) =>
       mutateJSON(`/api/admin/locations/${locationId}`, "DELETE", undefined, csrfToken),
-    onSuccess: () => {
-      retryLocations();
-      return queryClient.invalidateQueries({ queryKey: ["admin", "settings"] });
-    },
+    onSuccess: () => refreshLocationLists(queryClient, retryLocations),
   });
 }
 

@@ -11,6 +11,22 @@ const SELECTED_LOCATION_KEY = 'selectedLocationId';
 /** Facelift F2-13 / B8: a tab coming back re-reads once the last read attempt is this old. */
 const LOCATIONS_STALE_MS = 5 * 60 * 1000;
 
+/** Facelift FR1-11: a locations read that has not answered in this long has failed. */
+const LOCATIONS_READ_TIMEOUT_MS = 10_000;
+
+/**
+ * FR1-11's clock, GUARDED like the move's (`lib/reconciliation/move-timeout.ts`):
+ * `AbortSignal.timeout` is absent on older WebViews, and an unguarded call
+ * throws BEFORE the fetch, inside the read's try, where every read would fail
+ * and no location would ever be confirmed for a stock write. Where it is
+ * missing the read runs on the browser's own clock, as before.
+ */
+function locationsReadSignal(): AbortSignal | undefined {
+  return typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(LOCATIONS_READ_TIMEOUT_MS)
+    : undefined;
+}
+
 interface LocationContextType {
   locations: Location[];
   /**
@@ -71,6 +87,10 @@ export function LocationProvider({ children }: { children: ReactNode }) {
   // success or failure; null until one has.
   const lastAttemptAtRef = useRef<number | null>(null);
 
+  // Facelift FR1-5: every read takes the next id from this counter; only the
+  // LATEST read's answer is applied.
+  const latestReadRef = useRef(0);
+
   // Fetch locations once per signed-in user (FR2-3), again on Retry, and again
   // when a tab comes back 5 minutes or more after the last read (F2-13, below). A
   // location added elsewhere shows after one of those; one deleted elsewhere is
@@ -83,6 +103,18 @@ export function LocationProvider({ children }: { children: ReactNode }) {
   // Only an EMPTY selection is filled: a restored saved id is kept, and the
   // rules below confirm or discard it as before; a discarded id, while the chip
   // asks, is never filled in. The rules stay the backstop.
+  //
+  // Facelift FR1-5: reads are SEQUENCED. A Retry, an admin's location change or
+  // a returning tab can start a read while an older one is still in flight, and
+  // the two can land in either order. Each read takes a monotonic id; its
+  // answer (`setLocations`, `setLoadFailed`, the first-visit pick) and its
+  // `finally` (`setIsLoading(false)`) apply ONLY while its id is still the
+  // latest. A superseded answer changes nothing: an older list never brings back
+  // a location a newer read dropped, and it never ends the newer read's loading.
+  //
+  // Facelift FR1-11: a read that has not answered in 10 s is aborted and counts
+  // as a FAILED read (`loadFailed`), so nothing waiting on the list (the
+  // Products list, A14) waits forever; a failed read publishes no id (FR1-1).
   useEffect(() => {
     // Nothing saved: the user's default when it is in the list, otherwise the
     // first location (F1-5).
@@ -94,10 +126,14 @@ export function LocationProvider({ children }: { children: ReactNode }) {
 
     async function fetchLocations() {
       lastAttemptAtRef.current = Date.now();
+      const readId = ++latestReadRef.current;
+      const isLatest = () => readId === latestReadRef.current;
       try {
-        const response = await fetch('/api/locations');
+        const response = await fetch('/api/locations', { signal: locationsReadSignal() });
+        if (!isLatest()) return;
         if (response.ok) {
           const data: Location[] = await response.json();
+          if (!isLatest()) return;
           setLocations(data);
           setLoadFailed(false);
           setRawLocationId((cur) => cur ?? (awaitingChoiceRef.current ? null : firstVisitPick(data)));
@@ -105,10 +141,11 @@ export function LocationProvider({ children }: { children: ReactNode }) {
           setLoadFailed(true);
         }
       } catch (error) {
+        if (!isLatest()) return;
         console.error('Failed to fetch locations:', error);
         setLoadFailed(true);
       } finally {
-        setIsLoading(false);
+        if (isLatest()) setIsLoading(false);
       }
     }
 
@@ -129,7 +166,7 @@ export function LocationProvider({ children }: { children: ReactNode }) {
   // long-lived tab. When the page becomes visible again, signed in, and the last
   // read ATTEMPT (success or failure) started at least 5 minutes ago, the fetch
   // above runs again — one more reader on the shared per-IP `/api/locations`
-  // bucket, at most once per device per 5 minutes, failures included. Before
+  // bucket, at most once per tab per 5 minutes, failures included. Before
   // any attempt the mount read covers it. Unlike `retryLocations`, it only bumps
   // the read and never sets `isLoading`, so nothing waiting on the list is held
   // back by a background re-read; the answer goes through the same rules as any

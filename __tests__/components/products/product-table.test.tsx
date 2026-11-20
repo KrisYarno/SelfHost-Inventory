@@ -241,3 +241,22 @@ describe("B12 — no duplicate ids with the row, the tile and the table all moun
     }
   });
 });
+
+describe("FR1-8 — a product with no base name still has a title", () => {
+  it.each([null, ""])("baseName %p: the Product cell's title reads the product's name", (baseName) => {
+    render(
+      <ProductTable
+        products={[make({ id: 4, name: "Delta 2mg", baseName, totalQuantity: 3, hereQuantity: 3, stockState: "low" })]}
+        isAdmin={false}
+        hereLocationId={1}
+        selectedLocation={MAIN}
+        onAdjust={jest.fn()}
+        onStockIn={jest.fn()}
+      />
+    );
+    const cell = within(bodyRows()[0]).getAllByRole("cell")[0];
+    const title = cell.querySelector(".font-semibold") as HTMLElement;
+    expect(title).not.toBeNull();
+    expect(title.textContent).toBe("Delta 2mg");
+  });
+});

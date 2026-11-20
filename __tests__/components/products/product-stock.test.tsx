@@ -10,13 +10,16 @@
 //     `{n} here`, `No record here` for null (A15), `0 here` for a 0 row;
 //   - `undefined` fields render NOTHING: no `—` and no `0` (A18 via B9);
 //   - A17: the F2b files import `@/lib/stock-threshold` TYPE-ONLY.
+//   - FR1-14 (REV 7): `STOCK_STATE_WORDS` is the ONE map of the five words
+//     (`ok` -> `OK`); the badges read it, and so does the list's CSV
+//     (product-list-optimized.test pins that the CSV's words equal these).
 
 import * as React from "react";
 import fs from "fs";
 import path from "path";
 import ts from "typescript";
 import { render, screen } from "@testing-library/react";
-import { ProductStock } from "@/components/products/product-stock";
+import { ProductStock, STOCK_STATE_WORDS } from "@/components/products/product-stock";
 import { toneClasses } from "@/components/ui/tone-classes";
 import type { ProductWithQuantity } from "@/types/product";
 
@@ -222,5 +225,34 @@ describe("A17 — the F2b files import @/lib/stock-threshold TYPE-ONLY", () => {
     expect(helperImports("components/products/product-stock.tsx")).toEqual([
       { text: 'import type { StockState } from "@/lib/stock-threshold";', typeOnly: true },
     ]);
+  });
+});
+
+describe("FR1-14 — ONE map of state words", () => {
+  it("STOCK_STATE_WORDS is exactly the five words, with ok -> OK", () => {
+    expect(STOCK_STATE_WORDS).toEqual({
+      ok: "OK",
+      low: "Low",
+      out: "Out",
+      "below-zero": "Below zero",
+      "no-record": "No record",
+    });
+  });
+
+  it.each(["low", "out", "below-zero", "no-record"] as const)("the %s badge reads STOCK_STATE_WORDS[%s]", (state) => {
+    renderStock({ totalQuantity: state === "no-record" ? null : 3, hereQuantity: 1, stockState: state });
+    expect(screen.getByText(STOCK_STATE_WORDS[state], { exact: true })).toBeInTheDocument();
+  });
+
+  it("the words live in ONE place: no other component spells the badge map out", () => {
+    const stock = fs.readFileSync(path.join(process.cwd(), "components/products/product-stock.tsx"), "utf8");
+    // Each word appears once in the stock figure's source: in the exported map.
+    for (const word of ['"Below zero"', '"No record"']) {
+      expect(stock.split(word).length - 1).toBe(1);
+    }
+    const list = fs.readFileSync(path.join(process.cwd(), "components/products/product-list-optimized.tsx"), "utf8");
+    expect(list).not.toMatch(/\bSTATE_WORDS\s*[:=]/);
+    expect(list).not.toMatch(/"Below zero"|"No record"/);
+    expect(list).toMatch(/import \{ STOCK_STATE_WORDS \} from "\.\/product-stock";/);
   });
 });

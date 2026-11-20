@@ -27,6 +27,13 @@ import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent }
 //   real browser may not send. A keyboard click (`event.detail === 0`) is never
 //   ignored: the caller's onClick checks `detail` before asking, because
 //   `shouldIgnoreClick` (A2's signature) takes no event.
+// - A FINGER THAT STOPS A SCROLL (FR1-3): a `pointerdown` within 150 ms of the
+//   last `#main` scroll starts NO timer. On a phone, a touch during a fling
+//   stops the fling; held, it would otherwise open the menu on whichever row
+//   the list stopped under the finger. Android also sends its own long-press
+//   `contextmenu`: during a press suppressed this way it still calls
+//   `preventDefault()` but never fires (the FR1 ruling). The press ends on
+//   the next `pointerdown`, as every press does.
 // ---------------------------------------------------------------------------
 
 /** A touch or pen press held this long fires. */
@@ -35,6 +42,37 @@ const LONG_PRESS_MS = 500;
 const MOVE_TOLERANCE_PX = 10;
 /** B6: a click this soon after a fired press ENDED is that press's own click. */
 const CLICK_GUARD_MS = 600;
+/** FR1-3: a press this soon after `#main` scrolled is a finger stopping that scroll. */
+const SCROLL_SETTLE_MS = 150;
+
+// FR1-3: ONE module-level record of the last `#main` scroll, kept by ONE
+// passive capture `scroll` listener on the shell's `#main`. It is installed
+// lazily, on the first hook use (an element's mount, checked again on every
+// `pointerdown`), and follows `#main` if the element is replaced; with no
+// `#main` there is no listener and nothing throws. The record belongs to the
+// `#main` it was kept on: a new (or absent) `#main` starts with no scroll.
+let lastMainScrollAt: number | null = null;
+let mainScrollTarget: HTMLElement | null = null;
+
+const recordMainScroll = () => {
+  lastMainScrollAt = Date.now();
+};
+
+function watchMainScroll() {
+  const main = document.getElementById("main");
+  if (main === mainScrollTarget) return;
+  mainScrollTarget?.removeEventListener("scroll", recordMainScroll, true);
+  lastMainScrollAt = null;
+  mainScrollTarget = main;
+  main?.addEventListener("scroll", recordMainScroll, { capture: true, passive: true });
+}
+
+/** `#main` scrolled within the last 150 ms. A clock that went backwards is no scroll. */
+function mainScrolledJustNow(): boolean {
+  if (lastMainScrollAt === null) return false;
+  const since = Date.now() - lastMainScrollAt;
+  return since >= 0 && since <= SCROLL_SETTLE_MS;
+}
 
 interface PressState {
   timer: ReturnType<typeof setTimeout> | null;
@@ -47,6 +85,8 @@ interface PressState {
   down: boolean;
   /** When the fired press ended, or null. */
   endedAt: number | null;
+  /** FR1-3: this press's touch / pen `pointerdown` came within 150 ms of a `#main` scroll. */
+  scrollStopped: boolean;
 }
 
 export function useLongPress(onLongPress: () => void): {
@@ -73,6 +113,7 @@ export function useLongPress(onLongPress: () => void): {
     fired: false,
     down: false,
     endedAt: null,
+    scrollStopped: false,
   });
 
   const api = useMemo(() => {
@@ -111,7 +152,15 @@ export function useLongPress(onLongPress: () => void): {
           state.fired = false;
           state.endedAt = null;
           state.down = true;
+          state.scrollStopped = false;
+          watchMainScroll();
           if ((event.pointerType !== "touch" && event.pointerType !== "pen") || event.button !== 0) return;
+          // FR1-3: the finger that stopped a scroll is not a long press — not
+          // by the timer, and not by Android's own long-press `contextmenu`.
+          if (mainScrolledJustNow()) {
+            state.scrollStopped = true;
+            return;
+          }
           state.start = { x: event.clientX, y: event.clientY };
           state.timer = setTimeout(fire, LONG_PRESS_MS);
           const target = document.getElementById("main");
@@ -132,7 +181,7 @@ export function useLongPress(onLongPress: () => void): {
         onPointerLeave: cancel,
         onContextMenu: (event: ReactMouseEvent) => {
           event.preventDefault();
-          if (state.fired) return;
+          if (state.fired || state.scrollStopped) return;
           fire();
         },
       },
@@ -143,6 +192,11 @@ export function useLongPress(onLongPress: () => void): {
       },
       cancel,
     };
+  }, []);
+
+  // FR1-3: the first use installs the `#main` scroll record.
+  useEffect(() => {
+    watchMainScroll();
   }, []);
 
   // An unmounted element never fires and leaves no listener behind.

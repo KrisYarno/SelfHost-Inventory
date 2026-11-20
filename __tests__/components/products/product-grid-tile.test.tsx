@@ -136,3 +136,18 @@ describe("F2-8 ProductGridTile — the pending badge and the description", () =>
     expect(btn).toHaveAccessibleDescription(/Pending review/);
   });
 });
+
+describe("FR1-8 — a product with no base name still has a title", () => {
+  it.each([null, ""])("baseName %p: the title reads the product's name", (baseName) => {
+    renderTile(make({ baseName, variant: null }));
+    const title = mainButton().querySelector(".text-sm.font-semibold.line-clamp-2") as HTMLElement;
+    expect(title).not.toBeNull();
+    expect(title.textContent).toBe("Long Widget Name 10mg");
+  });
+
+  it("a base name still wins when there is one", () => {
+    renderTile();
+    const title = mainButton().querySelector(".text-sm.font-semibold.line-clamp-2") as HTMLElement;
+    expect(title.textContent).toBe("Long Widget Name");
+  });
+});

@@ -60,7 +60,7 @@ const rateLimitedRoutes = ["/api/", "/auth/"];
 // - The LOCATIONS list (facelift F1, Kris 2026-11-19): read once per signed-in
 //   user per page load, on a Retry (FR2-3), after an admin adds or deletes a
 //   location, and on a return to the tab after 5 minutes (facelift F2-13: at
-//   most once per device per 5 minutes, failed reads included), on every device
+//   most once per tab per 5 minutes, failed reads included), on every device
 //   behind the office IP. A refused first read now blocks every stock write
 //   until a read succeeds (FR1-1: writers only see a confirmed location), so
 //   120. The same bucket also serves the Fulfill dialog's and `useLocations`' /

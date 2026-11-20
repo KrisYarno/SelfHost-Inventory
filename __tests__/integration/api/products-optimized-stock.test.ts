@@ -19,6 +19,12 @@
  *     kept rows itself; `stock === all` keeps the DB-paginated path.
  *   - `currentQuantity`, search, sort, no root `quantity`, and the SHOW contract
  *     (provisional products listed; no approvalStatus in the where) are kept.
+ *
+ * Fix round FR1 (REV 7):
+ *   - FR1-6: `orderBy` gains a final `{ id: "asc" }` on BOTH paths (order changes
+ *     only among exact ties; this amends REV 1's "sorting byte-for-byte").
+ *   - FR1-10: the response echoes `search`, the search string it applied (`""`
+ *     when absent), after `stock`.
  */
 
 jest.mock('@/lib/prisma', () => ({
@@ -128,7 +134,8 @@ describe('F2-1 — the params and their validation', () => {
   it('echoes stock: "all" when absent, and each accepted value on both paths', async () => {
     const plain = (await get('')).body;
     expect(plain.stock).toBe('all');
-    expect(Object.keys(plain).slice(-2)).toEqual(['hereLocationId', 'stock']);
+    // FR1-10 appends the `search` echo after `stock`.
+    expect(Object.keys(plain).slice(-3)).toEqual(['hereLocationId', 'stock', 'search']);
     for (const v of ['all', 'in-stock', 'low', 'out']) {
       expect((await get(`?stock=${v}&hereLocationId=3`)).body).toMatchObject({ stock: v, hereLocationId: 3 });
     }
@@ -300,7 +307,8 @@ describe('F2-1 — the filtered path (stock !== all)', () => {
         { variant: { contains: 'Wid' } },
       ],
     });
-    expect(args.orderBy).toEqual([{ name: 'desc' }, { name: 'asc' }]);
+    // FR1-6: the final id tiebreak, on this path too.
+    expect(args.orderBy).toEqual([{ name: 'desc' }, { name: 'asc' }, { id: 'asc' }]);
     expect(m.product.count).not.toHaveBeenCalled();
   });
 
@@ -351,13 +359,14 @@ describe('F2-1 — the default path (stock absent or all) stays DB-paginated', (
     }
   });
 
-  it('the default sort is unchanged (baseName, numericValue, variant, then name)', async () => {
+  it('the default sort is unchanged (baseName, numericValue, variant, then name), then FR1-6\'s id tiebreak', async () => {
     await get('');
     expect(m.product.findMany.mock.calls[0][0].orderBy).toEqual([
       { baseName: 'asc' },
       { numericValue: 'asc' },
       { variant: 'asc' },
       { name: 'asc' },
+      { id: 'asc' },
     ]);
   });
 
@@ -408,5 +417,57 @@ describe('A10 — the bounds; the response echoes the clamped values', () => {
     const { body } = await get('?stock=in-stock&pageSize=1000&page=0');
     expect(body).toMatchObject({ total: 600, page: 1, pageSize: 500, totalPages: 2 });
     expect(body.products).toHaveLength(500);
+  });
+});
+
+describe('FR1-6 — the order is total: a final { id: "asc" } on BOTH paths', () => {
+  it.each([
+    ['', [{ baseName: 'asc' }, { numericValue: 'asc' }, { variant: 'asc' }, { name: 'asc' }]],
+    ['?sortBy=name&sortOrder=desc', [{ name: 'desc' }, { name: 'asc' }]],
+    ['?sortBy=baseName', [{ baseName: 'asc' }, { name: 'asc' }]],
+    ['?sortBy=numericValue&sortOrder=desc', [{ numericValue: 'desc' }, { name: 'asc' }]],
+  ])('%s: the sort as before, then id asc — default path and every filtered path', async (q, sort) => {
+    for (const stock of ['', 'all', 'in-stock', 'low', 'out']) {
+      m.product.findMany.mockClear();
+      const sep = q ? '&' : '?';
+      await get(`${q}${stock ? `${sep}stock=${stock}` : ''}`);
+      expect(m.product.findMany).toHaveBeenCalledTimes(1);
+      expect(m.product.findMany.mock.calls[0][0].orderBy).toEqual([...sort, { id: 'asc' }]);
+    }
+  });
+
+  it('exact ties (same baseName, numericValue, variant and name) page in id order on the filtered path', async () => {
+    // The mocked DB returns rows in the order asked; the route keeps that order.
+    m.product.findMany.mockResolvedValue([
+      row(3, [[1, 50]], { name: 'Same' }),
+      row(7, [[1, 50]], { name: 'Same' }),
+      row(9, [[1, 50]], { name: 'Same' }),
+    ]);
+    const p1 = (await get('?stock=in-stock&pageSize=2&page=1')).body;
+    const p2 = (await get('?stock=in-stock&pageSize=2&page=2')).body;
+    expect([...p1.products, ...p2.products].map((p: any) => p.id)).toEqual([3, 7, 9]);
+    expect(m.product.findMany.mock.calls.every(([args]) => args.orderBy.at(-1)?.id === 'asc')).toBe(true);
+  });
+});
+
+describe('FR1-10 — the answer echoes the search it applied', () => {
+  it('"" when absent, on both paths', async () => {
+    expect((await get('')).body.search).toBe('');
+    expect((await get('?stock=low')).body.search).toBe('');
+  });
+
+  it('the applied string, on both paths — the same string the where used', async () => {
+    for (const q of ['?search=Wid', '?search=Wid&stock=out']) {
+      m.product.findMany.mockClear();
+      const { body } = await get(q);
+      expect(body.search).toBe('Wid');
+      expect(m.product.findMany.mock.calls[0][0].where.OR[0]).toEqual({ name: { contains: 'Wid' } });
+    }
+  });
+
+  it('a padded search is echoed exactly as applied (the route trims nothing, so the echo trims nothing)', async () => {
+    const { body } = await get(`?search=${encodeURIComponent(' Wid ')}`);
+    expect(m.product.findMany.mock.calls[0][0].where.OR[0]).toEqual({ name: { contains: ' Wid ' } });
+    expect(body.search).toBe(' Wid ');
   });
 });
