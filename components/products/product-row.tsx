@@ -51,7 +51,7 @@ export function ProductRow({
     <div className="flex min-h-14 items-center gap-2 px-3">
       <button
         type="button"
-        className="min-w-0 flex-1 text-left flex items-center gap-3 self-stretch select-none [-webkit-user-select:none] [-webkit-touch-callout:none]"
+        className="min-w-0 flex-1 text-left flex items-center gap-3 self-stretch select-none [-webkit-user-select:none] [-webkit-touch-callout:none] rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-label={`Adjust stock for ${product.name}`}
         aria-describedby={isPending ? `${stockId} ${pendingId}` : stockId}
         {...handlers}

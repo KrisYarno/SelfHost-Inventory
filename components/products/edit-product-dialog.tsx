@@ -13,6 +13,7 @@ import { ProductForm } from "./product-form";
 import { ProductFormData, Product } from "@/types/product";
 import { toast } from "sonner";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { queryClient } from "@/lib/query-client";
 
 /** VERBATIM (pack § P2-B3-1R, M-b3 fix 8). */
 const READ_FAILED = "Couldn't load this product.";
@@ -97,6 +98,7 @@ export function EditProductDialog({
       toast.success(`Product "${updatedProduct.name}" updated successfully`);
       onOpenChange(false);
       router.refresh(); // Refresh the page to show the updated product
+      queryClient.invalidateQueries({ queryKey: ["products"] }); // Facelift F2 B4: the list's stock state follows a threshold edit
     } catch (error) {
       console.error("Error updating product:", error);
       toast.error(error instanceof Error ? error.message : "Failed to update product");

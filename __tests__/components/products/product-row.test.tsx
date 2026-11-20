@@ -72,6 +72,16 @@ describe("F2-8 ProductRow — structure, strings and classes", () => {
     expect(btn).toHaveClass("min-w-0", "flex-1", "text-left");
   });
 
+  it("C1 (REV 5 R15): the main button carries the ONE focus ring of DESIGN §1.1", () => {
+    renderRow();
+    expect(mainButton()).toHaveClass(
+      "rounded-md",
+      "focus-visible:outline-none",
+      "focus-visible:ring-2",
+      "focus-visible:ring-ring",
+    );
+  });
+
   it("baseName is text-sm font-semibold truncate; the variant under it is text-xs text-muted-foreground truncate", () => {
     renderRow();
     expect(within(mainButton()).getByText("Widget", { exact: true })).toHaveClass("text-sm", "font-semibold", "truncate");

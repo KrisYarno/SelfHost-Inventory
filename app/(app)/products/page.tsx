@@ -12,9 +12,7 @@ import { QuickAdjustDialog } from "@/components/inventory/quick-adjust-dialog";
 import { StockInDialog } from "@/components/inventory/stock-in-dialog";
 import { ProductWithQuantity } from "@/types/product";
 import { Plus, Trash2 } from "lucide-react";
-import { PageHeader } from "@/components/layout/page-header";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
+import { Page } from "@/components/layout/page";
 
 export default function ProductsPage() {
   const { data: session } = useSession();
@@ -52,48 +50,48 @@ export default function ProductsPage() {
     // Refresh handled by React Query in ProductListOptimized
   };
 
-  return (
-    <div className="flex flex-col h-full">
-      {/* Header */}
-      <PageHeader title="Products">
-        {isAdmin && (
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
-              <Switch
-                id="show-deleted"
-                checked={showDeleted}
-                onCheckedChange={setShowDeleted}
-              />
-              <Label htmlFor="show-deleted" className="text-sm cursor-pointer flex items-center gap-1.5">
-                <Trash2 className="h-3.5 w-3.5" />
-                Deleted
-              </Label>
-            </div>
-            <Button onClick={() => setCreateDialogOpen(true)}>
-              <Plus className="mr-2 h-4 w-4" />
-              Add Product
-            </Button>
-          </div>
-        )}
-      </PageHeader>
+  // Facelift F2-4 (A21): the admin's header actions, one row that wraps (the
+  // F1 frame). Icon-only below `sm`; the F1 touch floor makes both 44 px on
+  // phones. Members get none.
+  const actions = isAdmin ? (
+    <>
+      <Button
+        variant={showDeleted ? "secondary" : "outline"}
+        size="sm"
+        aria-pressed={showDeleted}
+        aria-label="Deleted products"
+        onClick={() => setShowDeleted((shown) => !shown)}
+      >
+        <Trash2 className="h-4 w-4" />
+        <span className="hidden sm:inline">Deleted</span>
+      </Button>
+      <Button size="sm" aria-label="Add Product" onClick={() => setCreateDialogOpen(true)}>
+        <Plus className="h-4 w-4" />
+        <span className="hidden sm:inline">Add Product</span>
+      </Button>
+    </>
+  ) : undefined;
 
-      {/* Main Content */}
-      <div className="flex-1 overflow-auto p-[var(--card-padding)]">
-        <div className="mx-auto max-w-7xl">
-          {showDeleted && isAdmin ? (
+  return (
+    <>
+      {/* F2-4: the F1 frame; the shell's main element is the one scroller. */}
+      <Page title="Products" actions={actions}>
+        {showDeleted && isAdmin ? (
+          <div className="space-y-4">
+            <h2 className="text-h3">Deleted products</h2>
             <DeletedProductsList />
-          ) : (
-            <ProductListOptimized
-              onEdit={isAdmin ? handleEdit : undefined}
-              onDelete={isAdmin ? handleDelete : undefined}
-              onQuickAdjust={handleQuickAdjust}
-              onStockIn={handleStockIn}
-              isAdmin={isAdmin}
-              showInventoryActions={true}
-            />
-          )}
-        </div>
-      </div>
+          </div>
+        ) : (
+          <ProductListOptimized
+            onEdit={isAdmin ? handleEdit : undefined}
+            onDelete={isAdmin ? handleDelete : undefined}
+            onQuickAdjust={handleQuickAdjust}
+            onStockIn={handleStockIn}
+            onCreate={isAdmin ? () => setCreateDialogOpen(true) : undefined}
+            isAdmin={isAdmin}
+          />
+        )}
+      </Page>
 
       {/* Dialogs */}
       <CreateProductDialog open={createDialogOpen} onOpenChange={setCreateDialogOpen} />
@@ -143,6 +141,6 @@ export default function ProductsPage() {
           onSuccess={refreshProducts}
         />
       )}
-    </div>
+    </>
   );
 }

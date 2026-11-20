@@ -62,6 +62,16 @@ describe("F2-8 ProductGridTile (A19) — structure, strings and classes", () => 
     expect(btn).toHaveClass("p-3", "text-left", "min-h-28", "w-full", "h-full");
   });
 
+  it("C1 (REV 5 R15): the main button carries the ONE focus ring of DESIGN §1.1", () => {
+    renderTile();
+    expect(mainButton()).toHaveClass(
+      "rounded-md",
+      "focus-visible:outline-none",
+      "focus-visible:ring-2",
+      "focus-visible:ring-ring",
+    );
+  });
+
   it("the name is text-sm font-semibold line-clamp-2; the text block is pr-12 (A24), clear of the \"…\"", () => {
     renderTile();
     const name = within(mainButton()).getByText("Long Widget Name", { exact: true });

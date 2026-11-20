@@ -61,6 +61,7 @@ jest.mock("@/components/layout/page-header", () => ({
 }));
 
 import { EditProductDialog } from "@/components/products/edit-product-dialog";
+import { queryClient } from "@/lib/query-client";
 import { ProductForm } from "@/components/products/product-form";
 import ProductsPage from "@/app/(app)/products/page";
 
@@ -255,6 +256,45 @@ describe("EditProductDialog -> PUT: each override compared with its mount value 
     fireEvent.change(field(/Buffer/i), { target: { value: "0" } });
     const { body } = await submitAndReadPut();
     expect(body.reorderConfig).toEqual({ customSafetyStockDays: 0 });
+  });
+});
+
+// Facelift F2 B4 (A20): the Products list shows a server-computed stock state
+// (`stockState` reads the threshold), so a saved edit invalidates every
+// ["products"] query on the app's ONE QueryClient — the singleton, so the
+// dialog needs no provider.
+describe("EditProductDialog -> a saved edit refreshes the products list (F2 B4)", () => {
+  it("invalidates [\"products\"] on the singleton queryClient after the PUT succeeds, and not before", async () => {
+    const spy = jest.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+    try {
+      await renderLoaded();
+      expect(spy).not.toHaveBeenCalled();
+      await submitAndReadPut();
+      await waitFor(() => expect(spy).toHaveBeenCalledWith({ queryKey: ["products"] }));
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a refused PUT invalidates nothing", async () => {
+    const spy = jest.spyOn(queryClient, "invalidateQueries").mockResolvedValue(undefined);
+    (global.fetch as jest.Mock).mockImplementation((url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url);
+      if (!init?.method || init.method === "GET") {
+        return new Promise<Answer>((resolve, reject) => reads.push({ url: u, resolve, reject }));
+      }
+      return Promise.resolve({ ok: false, status: 400, json: async () => ({ error: "Bad threshold" }) });
+    });
+    try {
+      await renderLoaded();
+      await submitAndReadPut();
+      const { toast } = jest.requireMock("sonner") as { toast: { error: jest.Mock } };
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Bad threshold"));
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

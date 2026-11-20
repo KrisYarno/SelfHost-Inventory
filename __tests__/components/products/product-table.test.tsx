@@ -8,7 +8,7 @@
 //     F2-6's total + state), Here ({location}) (`{n}` / `No record`; OMITTED
 //     with no confirmed location or a mismatched echo), Cost and Retail
 //     (EVERY user — B10: a member sees them; `$` 2 decimals, `Not set` muted),
-//     and the "…";
+//     and the "…" (REV 5 C2: its header is a `w-12` th with an sr-only `Actions`);
 //   - rows are not clickable; the "…" carries the actions;
 //   - B12: no duplicate ids with the row, the tile and the table all mounted.
 
@@ -91,12 +91,26 @@ describe("F2-8 ProductTable — the frame", () => {
 describe("F2-8 / B10 — the columns", () => {
   it("B10: a MEMBER sees Product, Stock, Here (Main), Cost, Retail and the actions column", () => {
     renderTable({ isAdmin: false });
-    expect(headers()).toEqual(["Product", "Stock", "Here (Main)", "Cost", "Retail", ""]);
+    expect(headers()).toEqual(["Product", "Stock", "Here (Main)", "Cost", "Retail", "Actions"]);
   });
 
   it("an admin sees the same columns", () => {
     renderTable({ isAdmin: true });
-    expect(headers()).toEqual(["Product", "Stock", "Here (Main)", "Cost", "Retail", ""]);
+    expect(headers()).toEqual(["Product", "Stock", "Here (Main)", "Cost", "Retail", "Actions"]);
+  });
+
+  it("C2 (REV 5 R8): the actions header is <th className=\"w-12\"> holding an sr-only `Actions`", () => {
+    renderTable();
+    const th = screen.getByRole("columnheader", { name: "Actions" });
+    expect(th.tagName).toBe("TH");
+    expect(th.getAttribute("class")).toBe("w-12");
+    expect(th.children).toHaveLength(1);
+    const label = th.firstElementChild as HTMLElement;
+    expect(label.tagName).toBe("SPAN");
+    expect(label.getAttribute("class")).toBe("sr-only");
+    expect(label.textContent).toBe("Actions");
+    // It is the last column, over the "…" cells.
+    expect(screen.getAllByRole("columnheader").at(-1)).toBe(th);
   });
 
   it("Cost and Retail: $ with 2 decimals; null reads Not set, muted (member and admin alike)", () => {
@@ -144,25 +158,25 @@ describe("F2-8 / A15 — the Here column", () => {
 
   it("OMITTED with no confirmed location (header and cells)", () => {
     renderTable({ location: null, here: null });
-    expect(headers()).toEqual(["Product", "Stock", "Cost", "Retail", ""]);
+    expect(headers()).toEqual(["Product", "Stock", "Cost", "Retail", "Actions"]);
     for (const row of bodyRows()) expect(within(row).getAllByRole("cell")).toHaveLength(5);
   });
 
   it("OMITTED when the echo does not match the confirmed location", () => {
     renderTable({ location: { id: 2, name: "Annex" }, here: 1 });
-    expect(headers()).toEqual(["Product", "Stock", "Cost", "Retail", ""]);
+    expect(headers()).toEqual(["Product", "Stock", "Cost", "Retail", "Actions"]);
     expect(screen.queryByText(/^Here/)).toBeNull();
   });
 
   it("OMITTED when the answer carries no echo (null, or no field at all)", () => {
     const { unmount } = renderTable({ here: null });
-    expect(headers()).toEqual(["Product", "Stock", "Cost", "Retail", ""]);
+    expect(headers()).toEqual(["Product", "Stock", "Cost", "Retail", "Actions"]);
     unmount();
     // Rendered directly: `renderTable`'s default would replace an undefined `here`.
     render(
       <ProductTable products={PRODUCTS} isAdmin={false} hereLocationId={undefined} selectedLocation={MAIN} onAdjust={jest.fn()} onStockIn={jest.fn()} />
     );
-    expect(headers()).toEqual(["Product", "Stock", "Cost", "Retail", ""]);
+    expect(headers()).toEqual(["Product", "Stock", "Cost", "Retail", "Actions"]);
   });
 });
 

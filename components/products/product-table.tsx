@@ -54,7 +54,7 @@ export function ProductTable({
           {showHere && <TableHead className="text-right">Here ({selectedLocation.name})</TableHead>}
           <TableHead className="text-right">Cost</TableHead>
           <TableHead className="text-right">Retail</TableHead>
-          <TableHead className="w-12" />
+          <th className="w-12"><span className="sr-only">Actions</span></th>
         </TableRow>
       </TableHeader>
       <TableBody>

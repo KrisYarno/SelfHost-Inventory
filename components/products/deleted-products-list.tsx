@@ -1,6 +1,5 @@
 "use client";
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -8,7 +7,6 @@ import { toast } from "sonner";
 import { RotateCcw, Trash2, Package } from "lucide-react";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { cn } from "@/lib/utils";
 
 interface DeletedProduct {
   id: number;
@@ -124,7 +122,9 @@ export function DeletedProductsList() {
         </span>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+      {/* Facelift F2-10 (FL-B-14): rows, not cards. No dimming and no
+          strike-through: the Deleted badge says it. */}
+      <div className="rounded-lg border bg-surface divide-y">
         {products.map((product) => {
           const isRestoring = restoringId === product.id;
           const deletedDate = new Date(product.deletedAt);
@@ -135,60 +135,50 @@ export function DeletedProductsList() {
           });
 
           return (
-            <Card
-              key={product.id}
-              className={cn(
-                "flex flex-col border border-border/70 bg-gradient-to-br from-surface to-muted/40",
-                "shadow-sm rounded-xl opacity-75 hover:opacity-100 transition-opacity duration-200"
-              )}
-            >
-              <CardHeader className="space-y-1.5 pb-2">
-                <div className="flex items-start justify-between gap-2">
-                  <CardTitle className="text-base font-semibold line-through decoration-muted-foreground/50">
-                    {product.name}
-                  </CardTitle>
+            <div key={product.id} className="flex min-h-14 items-center gap-2 px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <div className="text-sm font-semibold truncate">{product.name}</div>
                   <Badge
                     variant="outline"
-                    className="text-[11px] px-2 py-1 bg-negative-muted text-negative-foreground border-negative-border"
+                    className="shrink-0 text-[11px] px-2 py-1 bg-negative-muted text-negative-foreground border-negative-border"
                   >
                     Deleted
                   </Badge>
                 </div>
-                {product.baseName && (
-                  <p className="text-xs text-muted-foreground">
-                    {product.baseName}
-                    {product.variant ? ` / ${product.variant}` : ""}
-                  </p>
-                )}
-              </CardHeader>
-              <CardContent className="space-y-3 pt-0">
-                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+                  {product.baseName && (
+                    <span>
+                      {product.baseName}
+                      {product.variant ? ` / ${product.variant}` : ""}
+                    </span>
+                  )}
                   <span>Deleted {formattedDate}</span>
                   {product.deletedByUser && (
                     <span>by {product.deletedByUser.username}</span>
                   )}
                 </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-8 w-full text-xs"
-                  disabled={isRestoring}
-                  onClick={() => handleRestore(product)}
-                >
-                  {isRestoring ? (
-                    <>
-                      <span className="mr-2 h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                      Restoring...
-                    </>
-                  ) : (
-                    <>
-                      <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-                      Restore Product
-                    </>
-                  )}
-                </Button>
-              </CardContent>
-            </Card>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="shrink-0"
+                disabled={isRestoring}
+                onClick={() => handleRestore(product)}
+              >
+                {isRestoring ? (
+                  <>
+                    <span className="mr-2 h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                    Restoring...
+                  </>
+                ) : (
+                  <>
+                    <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                    Restore Product
+                  </>
+                )}
+              </Button>
+            </div>
           );
         })}
       </div>

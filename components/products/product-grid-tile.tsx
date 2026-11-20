@@ -53,7 +53,7 @@ export function ProductGridTile({
     <div className="relative rounded-lg border bg-surface">
       <button
         type="button"
-        className="p-3 text-left min-h-28 flex h-full w-full flex-col gap-2 select-none [-webkit-user-select:none] [-webkit-touch-callout:none]"
+        className="p-3 text-left min-h-28 flex h-full w-full flex-col gap-2 select-none [-webkit-user-select:none] [-webkit-touch-callout:none] rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-label={`Adjust stock for ${product.name}`}
         aria-describedby={isPending ? `${stockId} ${pendingId}` : stockId}
         {...handlers}
