@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { useSearchParams } from "next/navigation";
+import { useSession } from "next-auth/react";
 import { toast } from "sonner";
 import { ProductWithQuantity } from "@/types/product";
 import { ProductRow } from "./product-row";
@@ -96,10 +97,18 @@ export function ProductListOptimized({
   // A6: the export reads the search the list is showing (the hook's debounce).
   const debouncedSearch = useDebounce(search, 300);
   const { selectedLocation, selectedLocationId, isLoading: locationsLoading } = useLocation();
+  const sessionStatus = useSession().status;
 
   // A14: one read, not two: the list waits for the locations read, so its
   // first request already carries the confirmed location. A failed locations
   // read leaves no confirmed location, and the list reads without one.
+  //
+  // REV 12 FR2-1: it never waits on locations without a client session. With
+  // none (next-auth turns a failed `/api/auth/session` into `null` and stops
+  // re-checking) the locations read never runs and never ends, so the list
+  // reads WITHOUT `hereLocationId`; the server's `requireApproved` still guards
+  // it. While the session is `loading` it still waits, so the first load never
+  // reads twice.
   const query = useProducts(
     {
       search,
@@ -110,7 +119,7 @@ export function ProductListOptimized({
       stock: stockFilter,
       hereLocationId: selectedLocationId,
     },
-    { enabled: !locationsLoading },
+    { enabled: !locationsLoading || sessionStatus === "unauthenticated" },
   );
   const { data, isError, isPlaceholderData, refetch } = query;
 
@@ -356,6 +365,20 @@ export function ProductListOptimized({
       </div>
     );
 
+  // REV 12 FR2-3: a failed page change keeps a way back. A read that failed
+  // with no data on a later page says so, then offers the page before it.
+  const loadError =
+    page > 1 ? (
+      <>
+        <p>Couldn&apos;t load products.</p>
+        <Button variant="outline" size="sm" className="mt-2" onClick={() => goToPage(page - 1)}>
+          {`Back to page ${page - 1}`}
+        </Button>
+      </>
+    ) : (
+      "Couldn't load products."
+    );
+
   const actions = {
     isAdmin,
     onAdjust: onQuickAdjust,
@@ -468,7 +491,7 @@ export function ProductListOptimized({
         idle={skeleton}
         isEmpty={(d) => d.total === 0}
         empty={empty}
-        errorText="Couldn't load products."
+        errorText={loadError}
       >
         {(d) => (
           <>

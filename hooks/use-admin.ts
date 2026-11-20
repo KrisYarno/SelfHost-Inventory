@@ -681,7 +681,12 @@ export function useSaveThresholds() {
   return useMutation({
     mutationFn: (updates: ThresholdUpdate[]) =>
       mutateJSON("/api/admin/products/thresholds", "PATCH", { updates }, csrfToken),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin", "thresholds"] }),
+    onSuccess: () => {
+      // Facelift F2 FR2-2 (REV 12): the Products list's stock state is computed
+      // from the thresholds, so its cached answers are stale too.
+      queryClient.invalidateQueries({ queryKey: ["products"] });
+      return queryClient.invalidateQueries({ queryKey: ["admin", "thresholds"] });
+    },
   });
 }
 
@@ -706,6 +711,8 @@ export function useSaveLowStockDefault() {
       queryClient.invalidateQueries({ queryKey: ["admin", "thresholds"] });
       queryClient.invalidateQueries({ queryKey: ["admin", "settings"] });
       queryClient.invalidateQueries({ queryKey: ["settings", "low-stock-default"] });
+      // Facelift F2 FR2-2 (REV 12): and the Products list, whose stock state follows the default.
+      queryClient.invalidateQueries({ queryKey: ["products"] });
     },
   });
 }

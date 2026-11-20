@@ -945,6 +945,66 @@ describe("F2-9 / A11 — a failed read", () => {
   });
 });
 
+// Fix round FR2-3 (plan 2026-11-19-facelift-f2 REV 12; Q/A QA-3): a failed page
+// change keeps a way back. A read that failed with no data on page > 1 shows,
+// after `Couldn't load products.`, an outline sm `Back to page {page - 1}` that
+// sets the page to page - 1.
+describe("REV 12 FR2-3 — a failed page change keeps a way back", () => {
+  const onPage = (n: number) => (u: URL) => u.searchParams.get("page") === String(n);
+
+  it("Next answers 500: after `Couldn't load products.`, an outline sm `Back to page 1`; pressing it reads page 1 and shows its rows", async () => {
+    renderList();
+    await screen.findByText("Showing 1–25 of 60 products");
+    failIf = onPage(2);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    const alert = await screen.findByRole("alert");
+    const text = within(alert).getByText("Couldn't load products.");
+    const back = within(alert).getByRole("button", { name: "Back to page 1" });
+    expect(text.compareDocumentPosition(back) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(classesOf(back)).toContain("border-input"); // variant="outline"
+    expect(classesOf(back)).toContain("h-8"); // size="sm"
+    expect(mainButtons()).toHaveLength(0);
+
+    const before = listCalls().length;
+    fireEvent.click(back);
+    expect(await screen.findByText("Showing 1–25 of 60 products")).toBeInTheDocument();
+    await waitFor(() => expect(listCalls().length).toBe(before + 1));
+    expect(lastListCall().searchParams.get("page")).toBe("1");
+    expect(mainButtons()).toHaveLength(25);
+    expect(screen.getByText("Page 1 of 3")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("from page 2, Next to page 3 answers 500: `Back to page 2`, which reads page 2 and shows rows 26–50", async () => {
+    renderList();
+    await screen.findByText("Showing 1–25 of 60 products");
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await screen.findByText("Showing 26–50 of 60 products");
+    failIf = onPage(3);
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).queryByRole("button", { name: "Back to page 1" })).toBeNull();
+    const before = listCalls().length;
+    fireEvent.click(within(alert).getByRole("button", { name: "Back to page 2" }));
+    expect(await screen.findByText("Showing 26–50 of 60 products")).toBeInTheDocument();
+    await waitFor(() => expect(listCalls().length).toBe(before + 1));
+    expect(lastListCall().searchParams.get("page")).toBe("2");
+    expect(mainButtons()).toHaveLength(25);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("a failed read on page 1 offers no `Back to page` button (Retry only)", async () => {
+    failIf = () => true;
+    renderList();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Couldn't load products.");
+    expect(within(alert).queryByRole("button", { name: /^Back to page/ })).toBeNull();
+    expect(within(alert).getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+});
+
 describe("F2-9 — placeholder data", () => {
   it("a new search: the rows container is aria-busy and opacity-60 until the answer", async () => {
     const { container } = renderList();
