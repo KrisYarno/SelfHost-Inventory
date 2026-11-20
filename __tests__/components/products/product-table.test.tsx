@@ -11,9 +11,24 @@
 //     and the "…" (REV 5 C2: its header is a `w-12` th with an sr-only `Actions`);
 //   - rows are not clickable; the "…" carries the actions;
 //   - B12: no duplicate ids with the row, the tile and the table all mounted.
+//
+// Fix round FR3 (REV 15), FR3-1: a table row opens its actions menu on
+// right-click (Kris, Firefox on Fedora: the desktop List view's rows had no
+// right-click handler, so the browser's own menu showed).
+//   - `contextmenu` on the row (any cell, the "…" too) is default-prevented and
+//     opens THAT row's menu, the same instance as its "…" (anchored to it);
+//   - the FR1-1 guard: a right-click open is a press open (`openedByPress`), so
+//     the release over an item (button 2 on Linux, button 0 for a macOS
+//     ctrl-click) chooses nothing until a pointerdown inside the menu; Enter
+//     always works;
+//   - a left click on a row opens nothing; the "…" path is unchanged;
+//   - no long press and no `select-none` on the table (registered: a touch long
+//     press at `lg`);
+//   - a right-click INSIDE the open menu (portaled, but bubbling to the row
+//     through React) is left to the browser, as in the List row and Grid tile.
 
 import * as React from "react";
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ProductTable } from "@/components/products/product-table";
 import { ProductRow } from "@/components/products/product-row";
@@ -258,5 +273,186 @@ describe("FR1-8 — a product with no base name still has a title", () => {
     const title = cell.querySelector(".font-semibold") as HTMLElement;
     expect(title).not.toBeNull();
     expect(title.textContent).toBe("Delta 2mg");
+  });
+});
+
+describe("FR3-1 — a table row opens its actions menu on right-click", () => {
+  // jsdom has no PointerEvent: without it a pointer event's `button` is lost
+  // (the recipe of product-press.test.tsx / product-actions-menu.test.tsx).
+  class PointerEvent extends MouseEvent {
+    pointerType: string;
+    pointerId: number;
+    constructor(type: string, init: PointerEventInit = {}) {
+      super(type, init);
+      this.pointerType = init.pointerType ?? "";
+      this.pointerId = init.pointerId ?? 0;
+    }
+  }
+  beforeAll(() => {
+    Object.defineProperty(window, "PointerEvent", { value: PointerEvent, configurable: true, writable: true });
+  });
+  afterAll(() => {
+    delete (window as unknown as { PointerEvent?: unknown }).PointerEvent;
+  });
+
+  const mouse = (button: number) => ({ pointerType: "mouse", pointerId: 1, button });
+  const menuIsOpen = () => screen.queryByRole("menu") !== null;
+  const item = (name: string) => screen.getByRole("menuitem", { name });
+  // `hidden`: an open (modal) menu hides the rest of the page from the a11y tree.
+  const dots = (name: string) => screen.getByRole("button", { name: `More actions for ${name}`, hidden: true });
+
+  function setup() {
+    const handlers = { onAdjust: jest.fn(), onStockIn: jest.fn(), onEdit: jest.fn(), onDelete: jest.fn() };
+    renderTable({ isAdmin: true, handlers });
+    // Read before any menu opens (the open menu hides the table's roles).
+    return { ...handlers, rows: bodyRows() };
+  }
+
+  it("contextMenu(row) -> default-prevented, and THAT row's menu opens (the same instance as its \"…\", anchored to it)", () => {
+    const { rows } = setup();
+    expect(fireEvent.contextMenu(rows[1])).toBe(false);
+    expect(screen.getAllByRole("menu")).toHaveLength(1);
+    expect(dots("Beta")).toHaveAttribute("aria-expanded", "true");
+    expect(dots("Beta").getAttribute("aria-controls")).toBe(screen.getByRole("menu").id);
+    expect(dots("Alpha 5mg")).toHaveAttribute("aria-expanded", "false");
+    expect(dots("Gamma")).toHaveAttribute("aria-expanded", "false");
+    // The admin's full menu.
+    expect(screen.getAllByRole("menuitem").map((el) => el.textContent)).toEqual([
+      "Adjust stock", "Stock In", "Analytics", "History", "Edit", "Delete",
+    ]);
+  });
+
+  it("a right-click on a cell's text (it bubbles to the row) and on the row's \"…\" open that row's menu", () => {
+    const { rows } = setup();
+    const gammaText = within(rows[2]).getByText("Gamma");
+    expect(fireEvent.contextMenu(gammaText)).toBe(false);
+    expect(dots("Gamma")).toHaveAttribute("aria-expanded", "true");
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    expect(menuIsOpen()).toBe(false);
+    expect(fireEvent.contextMenu(dots("Alpha 5mg"))).toBe(false);
+    expect(dots("Alpha 5mg")).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("then pointerUp(menuitem, {button: 2}) -> no handler, the menu still open", () => {
+    const { rows, onStockIn, onAdjust, onDelete } = setup();
+    fireEvent.contextMenu(rows[0]);
+    expect(fireEvent.pointerUp(item("Stock In"), mouse(2))).toBe(false);
+    expect(fireEvent.pointerUp(item("Delete"), mouse(2))).toBe(false);
+    expect(onStockIn).not.toHaveBeenCalled();
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(onAdjust).not.toHaveBeenCalled();
+    expect(menuIsOpen()).toBe(true);
+  });
+
+  it("the Linux right-click in full (mouse-down 2 on the row, contextmenu, the release over an item) chooses nothing", () => {
+    const { rows, onStockIn } = setup();
+    const cell = within(rows[0]).getAllByRole("cell")[0];
+    fireEvent.pointerDown(cell, mouse(2));
+    expect(fireEvent.contextMenu(cell)).toBe(false);
+    fireEvent.pointerUp(item("Stock In"), mouse(2));
+    expect(onStockIn).not.toHaveBeenCalled();
+    expect(menuIsOpen()).toBe(true);
+  });
+
+  it("FR1-1 guard: a button-0 release over an item (a macOS ctrl-click) and a pointer click with no pointerdown inside choose nothing", () => {
+    const { rows, onStockIn } = setup();
+    fireEvent.contextMenu(rows[0]);
+    expect(fireEvent.pointerUp(item("Stock In"), mouse(0))).toBe(false);
+    expect(fireEvent.click(item("Stock In"), { detail: 1 })).toBe(false);
+    expect(fireEvent.click(item("Analytics"), { detail: 1 })).toBe(false);
+    expect(onStockIn).not.toHaveBeenCalled();
+    expect(menuIsOpen()).toBe(true);
+  });
+
+  it("then a real pointerDown + click on an item -> its handler runs, with THAT row's product", () => {
+    const { rows, onAdjust } = setup();
+    fireEvent.contextMenu(rows[1]);
+    fireEvent.pointerUp(item("Adjust stock"), mouse(2));
+    expect(onAdjust).not.toHaveBeenCalled();
+    fireEvent.pointerDown(item("Adjust stock"), mouse(0));
+    fireEvent.pointerUp(item("Adjust stock"), mouse(0));
+    fireEvent.click(item("Adjust stock"), { detail: 1 });
+    expect(onAdjust).toHaveBeenCalledTimes(1);
+    expect(onAdjust).toHaveBeenCalledWith(PRODUCTS[1]);
+    expect(menuIsOpen()).toBe(false);
+  });
+
+  it("after a right-click open, Enter on an item runs its handler (a keyboard selection always works)", () => {
+    const { rows, onEdit } = setup();
+    fireEvent.contextMenu(rows[2]);
+    act(() => item("Edit").focus());
+    fireEvent.keyDown(item("Edit"), { key: "Enter" });
+    expect(onEdit).toHaveBeenCalledTimes(1);
+    expect(onEdit).toHaveBeenCalledWith(PRODUCTS[2]);
+    expect(menuIsOpen()).toBe(false);
+  });
+
+  it("a second right-click on the open row keeps its menu open (the opener never closes it)", () => {
+    const { rows } = setup();
+    expect(fireEvent.contextMenu(rows[0])).toBe(false);
+    expect(fireEvent.contextMenu(rows[0])).toBe(false);
+    expect(screen.getAllByRole("menu")).toHaveLength(1);
+    expect(dots("Alpha 5mg")).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("a left click on a row opens no menu and runs nothing", async () => {
+    const user = userEvent.setup();
+    const { rows, onAdjust, onStockIn } = setup();
+    await user.click(rows[0]);
+    await user.click(within(rows[2]).getAllByRole("cell")[0]);
+    fireEvent.pointerDown(rows[1], mouse(0));
+    fireEvent.pointerUp(rows[1], mouse(0));
+    fireEvent.click(rows[1], { detail: 1 });
+    expect(menuIsOpen()).toBe(false);
+    expect(onAdjust).not.toHaveBeenCalled();
+    expect(onStockIn).not.toHaveBeenCalled();
+  });
+
+  it("the \"…\" path is unchanged: a \"…\" open is never press-guarded, even after a right-click open was closed", () => {
+    const { rows, onStockIn } = setup();
+    // A fresh mouse "…" open: Radix's press-drag-release (a primary pointerup
+    // with no pointerdown on the item) chooses it.
+    fireEvent.pointerDown(dots("Alpha 5mg"), mouse(0));
+    expect(menuIsOpen()).toBe(true);
+    fireEvent.pointerUp(item("Stock In"), mouse(0));
+    expect(onStockIn).toHaveBeenCalledTimes(1);
+    expect(menuIsOpen()).toBe(false);
+    // A right-click open, closed by Escape; then the "…" by keyboard / AT
+    // (a detail-0 click) -> the items work at once (the guard is per opening).
+    fireEvent.contextMenu(rows[0]);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    expect(menuIsOpen()).toBe(false);
+    fireEvent.click(dots("Alpha 5mg"), { detail: 0 });
+    expect(menuIsOpen()).toBe(true);
+    fireEvent.click(item("Stock In"), { detail: 1 });
+    expect(onStockIn).toHaveBeenCalledTimes(2);
+    expect(onStockIn).toHaveBeenLastCalledWith(PRODUCTS[0]);
+  });
+
+  it("no long press and no select-none: the table's text stays selectable, and a touch hold opens nothing (registered: a touch long press at lg)", () => {
+    jest.useFakeTimers();
+    try {
+      const { rows } = setup();
+      expect(screen.getByRole("table")).not.toHaveClass("select-none");
+      for (const row of rows) {
+        expect(row).not.toHaveClass("select-none");
+        for (const cell of within(row).getAllByRole("cell")) expect(cell).not.toHaveClass("select-none");
+      }
+      fireEvent.pointerDown(rows[0], { pointerType: "touch", pointerId: 1, button: 0, clientX: 50, clientY: 20 });
+      act(() => {
+        jest.advanceTimersByTime(1000);
+      });
+      expect(menuIsOpen()).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("a right-click INSIDE the open menu is left to the browser (the portal bubbles to the row through React, not the DOM)", () => {
+    const { rows } = setup();
+    fireEvent.contextMenu(rows[0]);
+    expect(fireEvent.contextMenu(item("Analytics"))).toBe(true);
+    expect(fireEvent.contextMenu(screen.getByRole("menu"))).toBe(true);
+    expect(screen.getAllByRole("menu")).toHaveLength(1);
   });
 });

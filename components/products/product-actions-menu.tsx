@@ -65,7 +65,7 @@ export function ProductActionsMenu({
 }: {
   product: ProductWithQuantity; isAdmin: boolean;
   open: boolean; onOpenChange: (open: boolean) => void;
-  /** FR1-1: true when the owner opened the menu through `useLongPress`; false through the "…" or the keyboard. */
+  /** FR1-1: true when the owner opened the menu by a press — `useLongPress` (rows, tiles) or a right-click on a table row (FR3-1); false through the "…" or the keyboard. */
   openedByPress: boolean;
   onAdjust: (p: ProductWithQuantity) => void; onStockIn: (p: ProductWithQuantity) => void; onEdit?: (p: ProductWithQuantity) => void; onDelete?: (p: ProductWithQuantity) => void;
 }): JSX.Element {

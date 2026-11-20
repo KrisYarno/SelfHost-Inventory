@@ -33,9 +33,10 @@ function Price({ value }: { value: ProductWithQuantity["costPrice"] | undefined 
 
 /**
  * The List view at `lg` and up (facelift F2-8, A15, B10). The rows are not
- * clickable; each product's actions are through its "…" menu. The `Here` column
- * is OMITTED with no confirmed location, or when the answer's `hereLocationId`
- * is not that location.
+ * clickable; each product's actions are through its "…" menu, which a
+ * right-click on the row also opens (FR3-1). The `Here` column is OMITTED with
+ * no confirmed location, or when the answer's `hereLocationId` is not that
+ * location.
  */
 export function ProductTable({
   products,
@@ -73,7 +74,11 @@ export function ProductTable({
   );
 }
 
-/** One table row; it owns its product's menu state (A2). Nothing presses it open: `openedByPress` is false (FR1-1). */
+/**
+ * One table row; it owns its product's menu state (A2). A right-click on the
+ * row opens the menu (FR3-1), anchored to the row's "…". The table has no long
+ * press and no `select-none`: its text stays selectable.
+ */
 function ProductTableRow({
   product,
   showHere,
@@ -91,10 +96,30 @@ function ProductTableRow({
   selectedLocationId: number | null;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  // FR1-1 / FR3-1: whether THIS row's right-click opened the menu; the "…" and
+  // the keyboard open it with false.
+  const [openedByPress, setOpenedByPress] = useState(false);
+  // Idempotent opener (A2): a right-click never closes the menu.
+  const openFromPress = () => {
+    setOpenedByPress(true);
+    setMenuOpen(true);
+  };
   const isPending = product.approvalStatus === "PENDING_REVIEW";
 
   return (
-    <TableRow className="h-12">
+    <TableRow
+      className="h-12"
+      onContextMenu={(event) => {
+        // The menu's content is portaled, yet its events still bubble here
+        // through React: a right-click inside the open menu is not one on the
+        // row, and is left to the browser (as in the List row and Grid tile).
+        if (!event.currentTarget.contains(event.target as Node)) return;
+        // Linux and macOS fire `contextmenu` on mouse-DOWN; the press guard
+        // keeps the release over an item from choosing it.
+        event.preventDefault();
+        openFromPress();
+      }}
+    >
       <TableCell>
         <div className="font-semibold">{product.baseName || product.name}</div>
         {(product.variant || isPending) && (
@@ -129,8 +154,11 @@ function ProductTableRow({
           product={product}
           isAdmin={isAdmin}
           open={menuOpen}
-          onOpenChange={setMenuOpen}
-          openedByPress={false}
+          onOpenChange={(next) => {
+            if (next) setOpenedByPress(false);
+            setMenuOpen(next);
+          }}
+          openedByPress={openedByPress}
           onAdjust={onAdjust}
           onStockIn={onStockIn}
           onEdit={onEdit}
