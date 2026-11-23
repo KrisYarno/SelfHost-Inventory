@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
+import { AppError } from "@/lib/error-handling";
 import prisma from "@/lib/prisma";
 import { getStockSeries, getSales } from "@/lib/analytics/queries";
 import { resolveCallerCompanyIds, serializeSalesRows } from "@/lib/analytics/company-scope";
@@ -18,13 +19,33 @@ export const dynamic = "force-dynamic";
 //     non-member, anti-enumeration), then scope sales to that one company. Omit => sum the
 //     caller's OWN memberships (default; zero memberships => getSales returns []).
 //
+// N0 (C7, RB-8 narrowed): this is a SHOW surface — a PENDING_REVIEW product is real
+// stock and is served (see read-path-isolation). What it must not do is invent one:
+//   - the id must be a positive Int (/^[1-9]\d{0,9}$/ and <= 2147483647), else 400;
+//   - the EXISTENCE check runs FIRST, before any series read: an unknown id is a
+//     404, never a 200 of nulls and zeros;
+//   - a SOFT-DELETED product is served (identity by ID, like the History route),
+//     with product.deletedAt set so the page can say so. deletedAt is always present.
+//
+const PRODUCT_ID_RE = /^[1-9]\d{0,9}$/;
+const MAX_INT = 2147483647;
+
 export const GET = apiHandler(
   async (request: NextRequest, { params }: { params: { id: string } }) => {
     const { user } = await requireApproved();
 
-    const productId = parseInt(params.id, 10);
-    if (isNaN(productId)) {
+    if (!PRODUCT_ID_RE.test(params.id) || Number(params.id) > MAX_INT) {
       return NextResponse.json({ error: "Invalid product ID" }, { status: 400 });
+    }
+    const productId = Number(params.id);
+
+    // Existence FIRST — nothing else is read for a product that does not exist.
+    const identity = await prisma.product.findUnique({
+      where: { id: productId },
+      select: { name: true, baseName: true, variant: true, deletedAt: true },
+    });
+    if (!identity) {
+      throw new AppError("Product not found", "NOT_FOUND", 404);
     }
 
     const sp = request.nextUrl.searchParams;
@@ -36,16 +57,12 @@ export const GET = apiHandler(
     // sum the caller's OWN memberships. A non-member NEVER reaches the data layer.
     const companyIds = await resolveCallerCompanyIds(user, companyId);
 
-    // The D-L2 History-host header consumes product identity (name/baseName/variant)
-    // + current GLOBAL stock (sum across all locations — the physical pool, never
-    // company-scoped). The historical payload carried no identity fields; add them.
-    const [stock, salesRows, identity, stockAgg] = await Promise.all([
+    // The D-L2 History-host header consumes product identity (name/baseName/variant,
+    // read above) + current GLOBAL stock (sum across all locations — the physical
+    // pool, never company-scoped).
+    const [stock, salesRows, stockAgg] = await Promise.all([
       getStockSeries({ productId, from, to }),
       getSales({ companyIds, productId, from, to }),
-      prisma.product.findUnique({
-        where: { id: productId },
-        select: { name: true, baseName: true, variant: true },
-      }),
       prisma.product_locations.aggregate({
         _sum: { quantity: true },
         where: { productId },
@@ -59,10 +76,11 @@ export const GET = apiHandler(
     return NextResponse.json({
       productId,
       product: {
-        name: identity?.name ?? null,
-        baseName: identity?.baseName ?? null,
-        variant: identity?.variant ?? null,
+        name: identity.name ?? null,
+        baseName: identity.baseName ?? null,
+        variant: identity.variant ?? null,
         currentStock: stockAgg._sum.quantity ?? 0,
+        deletedAt: identity.deletedAt ? identity.deletedAt.toISOString() : null,
       },
       stock: { series: stock, mode: "historical (GLOBAL inventory)" },
       sales: {

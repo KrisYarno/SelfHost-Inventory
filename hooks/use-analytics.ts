@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 // --- rebuild-state note (analytics hub) ------------------------------------
 
@@ -73,11 +73,13 @@ export type SalesRow = {
 // Product identity for the D-L2 History-host header (added by the T5 route
 // alongside the existing stock/sales payload). currentStock = GLOBAL sum across
 // all locations (the physical pool). Optional so an older payload never crashes.
+// deletedAt (N0 C7): ISO string when the product is soft-deleted, else null.
 export type ProductIdentity = {
   name: string | null;
   baseName: string | null;
   variant: string | null;
   currentStock: number;
+  deletedAt?: string | null;
 };
 export type ProductAnalytics = {
   productId: number;
@@ -104,14 +106,35 @@ export interface ProductAnalyticsResult {
   salesByDay: SalesByDay | null;
 }
 
+// N0 (C7): a failed per-product read carries its HTTP status, so the page can tell
+// "this product does not exist" (404) from "could not load" (anything else).
+export class ProductAnalyticsError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super("Failed to load analytics");
+    this.name = "ProductAnalyticsError";
+    this.status = status;
+  }
+}
+
 // Both reads for the per-product page in ONE query so they share a single loading/error
 // gate keyed by [id, scope]. The per-product payload is required; the sales-by-day series
 // is best-effort — a rejected fetch (null) OR a non-2xx must never blank the page.
 export function useProductAnalytics(id: string | undefined, scope: ProductAnalyticsScope) {
   const { from, to, companyId } = scope;
-  return useQuery<ProductAnalyticsResult>({
+  const queryClient = useQueryClient();
+  return useQuery<ProductAnalyticsResult, ProductAnalyticsError>({
     queryKey: ["analytics-product", id, { from, to, companyId }],
     enabled: !!id,
+    // A 404 is an answer, not a failure worth retrying; every other failure keeps
+    // the client's own retry default (lib/query-client.ts).
+    retry: (failureCount, error) => {
+      if (error?.status === 404) return false;
+      const fallback = queryClient.getDefaultOptions().queries?.retry;
+      if (typeof fallback === "function") return fallback(failureCount, error);
+      if (typeof fallback === "number") return failureCount < fallback;
+      return fallback ?? failureCount < 3;
+    },
     queryFn: async ({ signal }) => {
       // Thread the selected company + date range into BOTH reads (T5 route accepts them).
       const qp = new URLSearchParams();
@@ -131,7 +154,7 @@ export function useProductAnalytics(id: string | undefined, scope: ProductAnalyt
         fetch(`/api/analytics/sales?${salesQp.toString()}`, { signal }).catch(() => null),
       ]);
 
-      if (!productRes.ok) throw new Error("Failed to load analytics");
+      if (!productRes.ok) throw new ProductAnalyticsError(productRes.status);
       const product = (await productRes.json()) as ProductAnalytics;
 
       const salesByDay =

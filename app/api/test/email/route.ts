@@ -1,8 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { emailService } from "@/lib/email";
+import type { DeliveryNotSentReason } from "@/lib/email";
 
 export const dynamic = "force-dynamic";
+
+// N0 (C4): the true text for each reason the delivery switch can withhold a send.
+const NOT_SENT_TEXT: Record<DeliveryNotSentReason, string> = {
+  unconfigured: "SendGrid is not configured on this server.",
+  off: "Email delivery is off on this server (EMAIL_DELIVERY).",
+  not_allowlisted: "Your address is not on this server's email allowlist (EMAIL_ALLOWLIST).",
+};
 
 export async function POST(_request: NextRequest) {
   try {
@@ -41,7 +49,17 @@ export async function POST(_request: NextRequest) {
       return NextResponse.json({ error: "No email address found for user" }, { status: 400 });
     }
 
-    await emailService.sendLowStockDigest(session.user.email, testData);
+    const result = await emailService.sendLowStockDigest(session.user.email, testData);
+
+    // No "sent" claim without a send (N0 C3): anything other than exactly
+    // { sent: true } is a 409 carrying the reason's true text (a missing result
+    // throws here and lands in the 500 below — never a success).
+    if (result.sent !== true) {
+      return NextResponse.json(
+        { success: false, error: NOT_SENT_TEXT[result.reason] },
+        { status: 409 }
+      );
+    }
 
     return NextResponse.json({
       success: true,

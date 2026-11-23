@@ -17,9 +17,13 @@ jest.mock("@/lib/prisma", () => ({
 }));
 
 // Keep the email service inert — this test only inspects the query shape.
+// N0 (C8): the senders now return a DeliveryResult.
 jest.mock("@/lib/email", () => ({
   __esModule: true,
-  emailService: { sendLowStockDigest: jest.fn(), sendMinimumsDigest: jest.fn() },
+  emailService: {
+    sendLowStockDigest: jest.fn(async () => ({ sent: true, recipients: 1 })),
+    sendMinimumsDigest: jest.fn(async () => ({ sent: true, recipients: 1 })),
+  },
 }));
 
 import prisma from "@/lib/prisma";

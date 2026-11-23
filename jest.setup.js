@@ -110,6 +110,20 @@ if (typeof window !== "undefined") Object.defineProperty(window, "matchMedia", {
   })),
 });
 
+// N0 (C2(i)): NO TEST CAN EVER SEND A REAL EMAIL. `next/jest` layers the repo's
+// `.env` into the test env, so a real SENDGRID_API_KEY can be present here; this
+// global mock replaces the provider for EVERY suite. `send` resolves a fake 202
+// (the shape lib/email.ts's choke point awaits) and records the call, so a suite
+// can assert on exactly what WOULD have gone out. A suite that genuinely needs the
+// real module must opt in with `jest.unmock("@sendgrid/mail")`.
+jest.mock("@sendgrid/mail", () => {
+  const mockSgMail = {
+    setApiKey: jest.fn(),
+    send: jest.fn(async () => [{ statusCode: 202, headers: {} }, {}]),
+  };
+  return { __esModule: true, default: mockSgMail, ...mockSgMail };
+});
+
 // Mock next-auth
 jest.mock("next-auth", () => ({
   getServerSession: jest.fn(),

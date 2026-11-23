@@ -37,7 +37,12 @@ beforeEach(() => {
   stockMock.mockResolvedValue([]);
   salesMock.mockResolvedValue([]);
   m.userCompany.findMany.mockResolvedValue([{ companyId: "c1" }]);
-  m.product.findUnique.mockResolvedValue({ name: "BPC 5mg", baseName: "BPC", variant: "5mg" });
+  m.product.findUnique.mockResolvedValue({
+    name: "BPC 5mg",
+    baseName: "BPC",
+    variant: "5mg",
+    deletedAt: null,
+  });
   m.product_locations.aggregate.mockResolvedValue({ _sum: { quantity: 42 } });
 });
 
@@ -95,15 +100,17 @@ test("payload carries product identity + GLOBAL current stock for the D-L2 heade
   const res = await GET(new NextRequest("http://x/api/analytics/product/5"), ctx("5"));
   expect(res.status).toBe(200);
   const body = await (res as Response).json();
+  // N0 (FV-6): deletedAt is ALWAYS present on the product object (null when live).
   expect(body.product).toEqual({
     name: "BPC 5mg",
     baseName: "BPC",
     variant: "5mg",
     currentStock: 42,
+    deletedAt: null,
   });
   expect(m.product.findUnique).toHaveBeenCalledWith({
     where: { id: 5 },
-    select: { name: true, baseName: true, variant: true },
+    select: { name: true, baseName: true, variant: true, deletedAt: true },
   });
   expect(m.product_locations.aggregate).toHaveBeenCalledWith({
     _sum: { quantity: true },
@@ -111,11 +118,80 @@ test("payload carries product identity + GLOBAL current stock for the D-L2 heade
   });
 });
 
-test("missing product row => identity nulls + zero stock (no crash)", async () => {
+// N0 (C7) SUPERSEDES "missing product row => identity nulls + zero stock (200)": an
+// unknown id is a 404 and NOTHING else is read — never a 200 of nulls and zeros.
+test("unknown product => 404 Product not found; no series read, no stock sum, no sales scope", async () => {
   m.product.findUnique.mockResolvedValue(null);
-  m.product_locations.aggregate.mockResolvedValue({ _sum: { quantity: null } });
+  // apiHandler is a pass-through here; the thrown AppError is what it maps to a 404
+  // (the mapping itself is pinned in analytics-stock-trend.test.ts, real apiHandler).
+  await expect(GET(new NextRequest("http://x/api/analytics/product/5"), ctx("5"))).rejects.toMatchObject({
+    name: "AppError",
+    message: "Product not found",
+    code: "NOT_FOUND",
+    statusCode: 404,
+  });
+  expect(stockMock).not.toHaveBeenCalled();
+  expect(salesMock).not.toHaveBeenCalled();
+  expect(m.product_locations.aggregate).not.toHaveBeenCalled();
+  expect(m.userCompany.findMany).not.toHaveBeenCalled();
+});
+
+test("the existence check runs FIRST, before any series read", async () => {
+  await GET(new NextRequest("http://x/api/analytics/product/5"), ctx("5"));
+  const existence = m.product.findUnique.mock.invocationCallOrder[0];
+  expect(existence).toBeLessThan(stockMock.mock.invocationCallOrder[0]);
+  expect(existence).toBeLessThan(salesMock.mock.invocationCallOrder[0]);
+  expect(existence).toBeLessThan(m.product_locations.aggregate.mock.invocationCallOrder[0]);
+});
+
+test("a SOFT-DELETED product => 200 with its data plus product.deletedAt (ISO)", async () => {
+  m.product.findUnique.mockResolvedValue({
+    name: "Old 5mg",
+    baseName: "Old",
+    variant: "5mg",
+    deletedAt: new Date("2026-11-20T10:00:00.000Z"),
+  });
+  stockMock.mockResolvedValue([{ dayKey: "2026-11-01", locationId: 1, quantity: 3 }]);
   const res = await GET(new NextRequest("http://x/api/analytics/product/5"), ctx("5"));
   expect(res.status).toBe(200);
   const body = await (res as Response).json();
-  expect(body.product).toEqual({ name: null, baseName: null, variant: null, currentStock: 0 });
+  expect(body.product).toEqual({
+    name: "Old 5mg",
+    baseName: "Old",
+    variant: "5mg",
+    currentStock: 42,
+    deletedAt: "2026-11-20T10:00:00.000Z",
+  });
+  expect(body.stock.series).toHaveLength(1);
+});
+
+test("a PENDING_REVIEW product is still served (SHOW surface): 200, no approval filter", async () => {
+  m.product.findUnique.mockResolvedValue({
+    name: "New 5mg",
+    baseName: "New",
+    variant: "5mg",
+    deletedAt: null,
+  });
+  const res = await GET(new NextRequest("http://x/api/analytics/product/5"), ctx("5"));
+  expect(res.status).toBe(200);
+  expect(m.product.findUnique.mock.calls[0][0].where).toEqual({ id: 5 });
+  expect((await (res as Response).json()).product.name).toBe("New 5mg");
+});
+
+test.each([["0"], ["-1"], ["05"], ["5.0"], ["1e3"], [" 5"], ["5abc"], ["2147483648"], ["12345678901"]])(
+  "malformed id %p => 400 Invalid product ID, no reads",
+  async (raw) => {
+    const res = await GET(new NextRequest("http://x/api/analytics/product/x"), ctx(raw));
+    expect(res.status).toBe(400);
+    expect(await (res as Response).json()).toEqual({ error: "Invalid product ID" });
+    expect(m.product.findUnique).not.toHaveBeenCalled();
+    expect(stockMock).not.toHaveBeenCalled();
+    expect(salesMock).not.toHaveBeenCalled();
+  }
+);
+
+test("the largest Int id (2147483647) is accepted", async () => {
+  const res = await GET(new NextRequest("http://x/api/analytics/product/2147483647"), ctx("2147483647"));
+  expect(res.status).toBe(200);
+  expect(m.product.findUnique.mock.calls[0][0].where).toEqual({ id: 2147483647 });
 });

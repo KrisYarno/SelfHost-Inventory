@@ -18,7 +18,9 @@ const OLD_ENV = process.env;
 
 beforeEach(() => {
   jest.clearAllMocks();
-  process.env = { ...OLD_ENV };
+  // N0 (C8): the delivery switch is OFF unless set; these pins exercise a stack
+  // where delivery is deliberately on.
+  process.env = { ...OLD_ENV, EMAIL_DELIVERY: "on" };
 });
 
 afterAll(() => {

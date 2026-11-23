@@ -166,8 +166,11 @@ export const GET = apiHandler(async (request: NextRequest) => {
 
   const dateRange = `${formatDate(sevenDaysAgo)} - ${formatDate(now)}`;
 
-  // Send email to each user
+  // Send email to each user. emailsSent counts ONLY mail actually handed to the
+  // provider ({ sent: true }); emailsNotSent counts mail the delivery switch withheld
+  // (N0 C3c). A provider throw stays a logged error, as before (address-free).
   let emailsSent = 0;
+  let emailsNotSent = 0;
   for (const user of users) {
     try {
       const html = emailService.generateWeeklyReportHTML({
@@ -192,25 +195,26 @@ export const GET = apiHandler(async (request: NextRequest) => {
         stockByLocation,
       });
 
-      await emailService.sendEmail({
+      const result = await emailService.sendEmail({
         to: user.email,
         subject: `Weekly Inventory Report — ${dateRange}`,
         html,
         text,
       });
 
-      emailsSent++;
+      if (result?.sent === true) {
+        emailsSent++;
+      } else {
+        emailsNotSent++;
+      }
     } catch (error) {
-      console.error(
-        `Failed to send weekly report to ${user.email}:`,
-        error
-      );
+      console.error("Failed to send a weekly report:", error);
     }
   }
 
   const duration = Date.now() - startTime;
   console.log(
-    `Weekly report completed in ${duration}ms — sent ${emailsSent} emails`
+    `Weekly report completed in ${duration}ms — sent ${emailsSent} emails, ${emailsNotSent} not sent`
   );
 
   return NextResponse.json({
@@ -218,6 +222,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
     timestamp: new Date().toISOString(),
     duration,
     emailsSent,
+    emailsNotSent,
     totalProducts,
     totalStock,
     lowStockCount: lowStockItems.length,

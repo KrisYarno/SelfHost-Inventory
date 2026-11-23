@@ -1,5 +1,6 @@
 import prisma from '@/lib/prisma';
 import { emailService, LowStockItem } from '@/lib/email';
+import type { DeliveryNotSentReason, DeliveryResult } from '@/lib/email';
 import type { CombinedMinBreach, LocationMinBreach } from '@/types/inventory';
 import {
   getLowStockDefault,
@@ -7,6 +8,39 @@ import {
   isLowStock,
 } from '@/lib/stock-threshold';
 import { outboundVelocity } from '@/lib/reports/demand';
+
+/**
+ * N0 (C3/D1): what a notification run actually did, per email (one per user).
+ *   - emailsSent      deliver returned { sent: true };
+ *   - emailsNotSent   deliver returned anything else (the switch withheld it);
+ *   - emailsFailed    the provider threw;
+ *   - notSentReasons  emailsNotSent, by reason.
+ * NotificationHistory (the 24 h dedupe) is written ONLY for sent email, so a run
+ * the switch withheld never silences the next one.
+ */
+export interface EmailRunCounts {
+  emailsSent: number;
+  emailsNotSent: number;
+  emailsFailed: number;
+  notSentReasons: Record<DeliveryNotSentReason, number>;
+}
+
+function emptyEmailRunCounts(): EmailRunCounts {
+  return {
+    emailsSent: 0,
+    emailsNotSent: 0,
+    emailsFailed: 0,
+    notSentReasons: { unconfigured: 0, off: 0, not_allowlisted: 0 },
+  };
+}
+
+// Fail-closed: anything other than exactly { sent: true } is "not sent".
+function countNotSent(counts: EmailRunCounts, result: DeliveryResult | undefined): void {
+  counts.emailsNotSent++;
+  const reason = result && result.sent === false ? result.reason : undefined;
+  if (reason && reason in counts.notSentReasons) counts.notSentReasons[reason]++;
+  console.log(`email not sent (${reason ?? 'no delivery result'})`);
+}
 
 export interface LowStockProduct {
   id: number;
@@ -229,18 +263,20 @@ export class StockChecker {
   /**
    * Send low stock notifications to users who have opted in
    */
-  async sendLowStockNotifications(lowStockProducts: LowStockProduct[]): Promise<void> {
-    if (lowStockProducts.length === 0) return;
+  async sendLowStockNotifications(lowStockProducts: LowStockProduct[]): Promise<EmailRunCounts> {
+    const counts = emptyEmailRunCounts();
+    if (lowStockProducts.length === 0) return counts;
 
-    // Get users who have opted in for email alerts
+    // Get users who have opted in for email alerts (never a soft-deleted user — N0 C1)
     const users = await prisma.user.findMany({
       where: {
         emailAlerts: true,
         isApproved: true,
+        deletedAt: null,
       },
     });
 
-    if (users.length === 0) return;
+    if (users.length === 0) return counts;
 
     // Check notification history to avoid spam
     const yesterday = new Date();
@@ -268,24 +304,37 @@ export class StockChecker {
 
       if (productsToNotify.length === 0) continue;
 
-      try {
-        // Send email
-        const emailItems: LowStockItem[] = productsToNotify.map(p => ({
-          productName: p.name,
-          currentStock: p.currentStock,
-          threshold: p.threshold,
-          daysUntilEmpty: p.daysUntilEmpty,
-        }));
+      // Send email
+      const emailItems: LowStockItem[] = productsToNotify.map(p => ({
+        productName: p.name,
+        currentStock: p.currentStock,
+        threshold: p.threshold,
+        daysUntilEmpty: p.daysUntilEmpty,
+      }));
 
-        await emailService.sendLowStockDigest(
+      let result: DeliveryResult | undefined;
+      try {
+        result = await emailService.sendLowStockDigest(
           user.email,
           {
             recipientName: user.username,
             items: emailItems,
           }
         );
+      } catch (error) {
+        counts.emailsFailed++;
+        console.error(`Failed to send low stock notification (user ${user.id}):`, error);
+        continue;
+      }
 
-        // Record notification history
+      if (result?.sent !== true) {
+        countNotSent(counts, result);
+        continue;
+      }
+      counts.emailsSent++;
+
+      try {
+        // Record notification history — only for the items in an email actually sent
         await prisma.notificationHistory.createMany({
           data: productsToNotify.map(p => ({
             userId: user.id,
@@ -294,11 +343,13 @@ export class StockChecker {
           })),
         });
 
-        console.log(`Sent low stock notification to ${user.email} for ${productsToNotify.length} products`);
+        console.log(`Sent low stock notification (user ${user.id}) for ${productsToNotify.length} products`);
       } catch (error) {
-        console.error(`Failed to send notification to ${user.email}:`, error);
+        console.error(`Failed to record low stock notification history (user ${user.id}):`, error);
       }
     }
+
+    return counts;
   }
 
   /**
@@ -307,14 +358,17 @@ export class StockChecker {
   async sendMinimumNotifications(
     locationBreaches: LocationMinBreach[],
     combinedBreaches: CombinedMinBreach[]
-  ): Promise<void> {
+  ): Promise<EmailRunCounts> {
+    const counts = emptyEmailRunCounts();
     if (!locationBreaches.length && !combinedBreaches.length) {
-      return;
+      return counts;
     }
 
+    // Never a soft-deleted user (N0 C1).
     const users = await prisma.user.findMany({
       where: {
         isApproved: true,
+        deletedAt: null,
         OR: [
           { minLocationEmailAlerts: true },
           { minCombinedEmailAlerts: true },
@@ -323,7 +377,7 @@ export class StockChecker {
       },
     });
 
-    if (!users.length) return;
+    if (!users.length) return counts;
 
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
@@ -369,81 +423,93 @@ export class StockChecker {
         continue;
       }
 
-      // Email notifications
+      // The items THIS user's email includes (by their flags).
+      const locationIncluded = user.minLocationEmailAlerts ? locToNotify : [];
+      const combinedIncluded =
+        user.minCombinedEmailAlerts || user.emailAlerts ? combinedToNotify : [];
+
+      // Email notifications. A flag mismatch (no email attempted) writes no history.
+      // NOTE (N0 C3b): this loop deliberately has no try/catch yet — a provider throw
+      // still ends the run, as before; per-recipient isolation is N1 (RC-11).
       if (
         (user.minLocationEmailAlerts && locToNotify.length > 0) ||
         (user.minCombinedEmailAlerts && combinedToNotify.length > 0) ||
         (user.emailAlerts && combinedToNotify.length > 0)
       ) {
-        await emailService.sendMinimumsDigest(user.email, {
-          recipientName: user.username,
-          locationItems: user.minLocationEmailAlerts
-            ? locToNotify
-            : [],
-          combinedItems:
-            user.minCombinedEmailAlerts || user.emailAlerts
-              ? combinedToNotify
-              : [],
+        const result: DeliveryResult | undefined = await emailService.sendMinimumsDigest(
+          user.email,
+          {
+            recipientName: user.username,
+            locationItems: locationIncluded,
+            combinedItems: combinedIncluded,
+          }
+        );
+
+        if (result?.sent !== true) {
+          countNotSent(counts, result);
+          continue;
+        }
+        counts.emailsSent++;
+
+        // History ONLY for the items included in an email actually sent.
+        await prisma.notificationHistory.createMany({
+          data: [
+            ...locationIncluded.map((item) => ({
+              userId: user.id,
+              productId: item.productId,
+              locationId: item.locationId,
+              notificationType: "LOW_STOCK_LOCATION",
+            })),
+            ...combinedIncluded.map((item) => ({
+              userId: user.id,
+              productId: item.productId,
+              locationId: null,
+              notificationType: "LOW_STOCK_COMBINED",
+            })),
+          ],
         });
       }
-
-      await prisma.notificationHistory.createMany({
-        data: [
-          ...locToNotify.map((item) => ({
-            userId: user.id,
-            productId: item.productId,
-            locationId: item.locationId,
-            notificationType: "LOW_STOCK_LOCATION",
-          })),
-          ...combinedToNotify.map((item) => ({
-            userId: user.id,
-            productId: item.productId,
-            locationId: null,
-            notificationType: "LOW_STOCK_COMBINED",
-          })),
-        ],
-      });
     }
+
+    return counts;
   }
 
   /**
    * Run the complete stock check and notification process
    */
-  async runDailyCheck(): Promise<{
-    lowStockCount: number;
-    notificationsSent: number;
-  }> {
+  async runDailyCheck(): Promise<{ lowStockCount: number } & EmailRunCounts> {
     console.log('Starting daily stock check...');
     
     const lowStockProducts = await this.checkLowStock();
     console.log(`Found ${lowStockProducts.length} products below threshold`);
 
-    if (lowStockProducts.length > 0) {
-      await this.sendLowStockNotifications(lowStockProducts);
-    }
+    const counts =
+      lowStockProducts.length > 0
+        ? await this.sendLowStockNotifications(lowStockProducts)
+        : emptyEmailRunCounts();
 
     return {
       lowStockCount: lowStockProducts.length,
-      notificationsSent: lowStockProducts.length, // This could be more accurate
+      ...counts,
     };
   }
 
   /**
    * Run combined + location minimum checks and notify
    */
-  async runMinimumsCheck(): Promise<{
-    locationBreaches: number;
-    combinedBreaches: number;
-  }> {
+  async runMinimumsCheck(): Promise<
+    { locationBreaches: number; combinedBreaches: number } & EmailRunCounts
+  > {
     const { locationBreaches, combinedBreaches } =
       await this.checkMinimums();
-    await this.sendMinimumNotifications(
+    const counts = await this.sendMinimumNotifications(
       locationBreaches,
       combinedBreaches
     );
     return {
       locationBreaches: locationBreaches.length,
       combinedBreaches: combinedBreaches.length,
+      ...counts,
     };
   }
 }

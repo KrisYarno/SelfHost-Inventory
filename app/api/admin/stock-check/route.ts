@@ -23,17 +23,23 @@ export const POST = apiHandler(async (request: NextRequest) => {
 
   const startTime = Date.now();
 
-  const lowStockResult = await stockChecker.runDailyCheck();
-  const minimumResult = await stockChecker.runMinimumsCheck();
+  const { lowStockCount, ...lowStock } = await stockChecker.runDailyCheck();
+  const { locationBreaches, combinedBreaches, ...minimums } =
+    await stockChecker.runMinimumsCheck();
 
   const duration = Date.now() - startTime;
 
+  // N0 (D1): each run's email counts are NESTED under their own key — the two runs
+  // carry the same field names, so spreading them would let one overwrite the other.
   const response = NextResponse.json({
     success: true,
     timestamp: new Date().toISOString(),
     duration,
-    ...lowStockResult,
-    ...minimumResult,
+    lowStockCount,
+    locationBreaches,
+    combinedBreaches,
+    lowStock,
+    minimums,
   });
   return applyRateLimitHeaders(response, rateLimitHeaders);
 });

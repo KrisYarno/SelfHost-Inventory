@@ -74,7 +74,6 @@ export default function PendingApprovalPage() {
               <div className="mt-2 text-sm text-foreground/80">
                 <p>
                   Your account is currently pending approval from an administrator.
-                  You will receive an email notification once your account has been approved.
                 </p>
                 <p className="mt-2">
                   This process typically takes 1-2 business days. If you need immediate access,

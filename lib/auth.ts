@@ -14,12 +14,40 @@ const allowedDomains = (process.env.ALLOWED_EMAIL_DOMAINS || 'advancedresearchpe
 const allowAllDomains = allowedDomains.includes('*');
 
 /**
- * Check if an email domain is allowed
+ * The ONE email-domain rule (N0 C6), shared by signup, credentials sign-in and
+ * Google sign-in. An address passes only when, after trimming:
+ *   1. it has EXACTLY ONE "@";
+ *   2. the local part and the domain are both non-empty;
+ *   3. it contains no whitespace or control characters;
+ *   4. THEN the wildcard ("*") is configured, or the domain is allowed.
+ * So "a@allowed.com@evil.com" is refused in BOTH modes (the old split('@')[1]
+ * read it as allowed.com). Signup deliberately does not .email()-validate
+ * (lib/validation/auth.ts): an odd address falls through to this refusal.
  */
-function isAllowedDomain(email: string): boolean {
-  const domain = email.toLowerCase().split('@')[1];
-  if (!domain) return false;
-  return allowAllDomains || allowedDomains.includes(domain);
+export function emailDomainAllowed(email: string): boolean {
+  const address = email.trim();
+  if (/\s/.test(address)) return false;
+  for (let i = 0; i < address.length; i++) {
+    const code = address.charCodeAt(i);
+    // C0 controls, DEL, and C1 controls.
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return false;
+  }
+  const parts = address.split('@');
+  if (parts.length !== 2) return false;
+  const [local, domain] = parts;
+  if (local === '' || domain === '') return false;
+  return allowAllDomains || allowedDomains.includes(domain.toLowerCase());
+}
+
+// D0: a claims re-read needs a real primary key. Anything else re-reads nothing
+// (and so grants nothing).
+function isUserIdKey(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value > 0 &&
+    value <= 2147483647
+  );
 }
 
 /**
@@ -69,7 +97,7 @@ export const authOptions: NextAuthOptions = {
         const email = credentials.email.toLowerCase();
 
         // Check domain restriction
-        if (!isAllowedDomain(email)) {
+        if (!emailDomainAllowed(email)) {
           console.warn('[auth] Credentials sign-in blocked by domain policy', { email });
           return null;
         }
@@ -184,7 +212,7 @@ export const authOptions: NextAuthOptions = {
 
       const email = profile.email.toLowerCase();
 
-      if (!isAllowedDomain(email)) {
+      if (!emailDomainAllowed(email)) {
         console.warn('[auth] Sign-in blocked by domain policy', {
           email,
           allowedDomains,
@@ -243,7 +271,7 @@ export const authOptions: NextAuthOptions = {
         return false;
       }
     },
-    async jwt({ token, user, account, profile, trigger, session }) {
+    async jwt({ token, user, account, profile }) {
       // Handle credentials provider sign-in
       if (account?.provider === 'credentials' && user?.email) {
         const dbUser = await prisma.user.findUnique({
@@ -262,7 +290,7 @@ export const authOptions: NextAuthOptions = {
 
       // Handle Google OAuth sign-in
       if (account?.provider === 'google' && profile?.email) {
-        if (!isAllowedDomain(profile.email)) {
+        if (!emailDomainAllowed(profile.email)) {
           return token;
         }
 
@@ -281,10 +309,41 @@ export const authOptions: NextAuthOptions = {
         }
       }
 
-      // Handle session updates (e.g., when user is approved)
-      if (trigger === 'update' && session) {
-        token.isAdmin = session.user.isAdmin;
-        token.isApproved = session.user.isApproved;
+      // N0 D0: on EVERY run that is not a sign-in (every session read, and
+      // trigger 'update' included), the claims are re-read from the database by
+      // primary key. The client's `update` payload is NEVER read — it could carry
+      // { isAdmin: true }. A promotion, a demotion, an approval or a deletion is
+      // therefore picked up on the next session read, and a token minted with
+      // claims the row does not hold is downgraded. A missing row, a soft-deleted
+      // user, or a token without a usable id holds no rights. A FAILED read holds
+      // none either, for that read only: the cookie is kept and the next successful
+      // read restores the row's claims (a throw here would sign the user out).
+      if (!user) {
+        let row: {
+          isAdmin: boolean;
+          isApproved: boolean;
+          deletedAt: Date | null;
+          defaultLocationId: number | null;
+        } | null = null;
+        try {
+          row = isUserIdKey(token.id)
+            ? await prisma.user.findUnique({
+                where: { id: token.id },
+                select: { isAdmin: true, isApproved: true, deletedAt: true, defaultLocationId: true },
+              })
+            : null;
+        } catch {
+          console.error('[auth] jwt claims re-read failed');
+          row = null;
+        }
+        if (row && !row.deletedAt) {
+          token.isAdmin = row.isAdmin;
+          token.isApproved = row.isApproved;
+          token.defaultLocationId = row.defaultLocationId;
+        } else {
+          token.isAdmin = false;
+          token.isApproved = false;
+        }
       }
 
       return token;

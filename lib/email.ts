@@ -1,9 +1,110 @@
-import sgMail from '@sendgrid/mail';
+import sgMail, { type MailDataRequired } from '@sendgrid/mail';
 import type { CombinedMinBreach, LocationMinBreach } from '@/types/inventory';
+import {
+  emailDeliveryPosture,
+  emailProviderConfigured,
+  filterRecipients,
+} from '@/lib/notifications/delivery-posture';
 
 // Initialize SendGrid with API key
 if (process.env.SENDGRID_API_KEY) {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+}
+
+// ---------------------------------------------------------------------------
+// N0 (RC-6): THE ONE CHOKE POINT for real email. Every send in this codebase
+// goes through `deliver`, which applies the delivery switch
+// (lib/notifications/delivery-posture.ts) and is the ONLY place the provider's
+// send is called (pinned by __tests__/unit/lib/email-choke-point.test.ts).
+// ---------------------------------------------------------------------------
+
+/** Why a message was not handed to the provider. Each has its own true text. */
+export type DeliveryNotSentReason = 'unconfigured' | 'off' | 'not_allowlisted';
+
+export type DeliveryResult =
+  | { sent: true; recipients: number }
+  | { sent: false; reason: DeliveryNotSentReason };
+
+/**
+ * deliver's OWN narrow input. There is deliberately no cc / bcc /
+ * personalizations: every recipient rides in `to`, where the switch filters it.
+ */
+interface DeliveryMessage {
+  to: string | string[];
+  subject?: string;
+  text?: string;
+  html?: string;
+  templateId?: string;
+  dynamicTemplateData?: Record<string, unknown>;
+}
+
+// Fields that would carry recipients past the filter. A message carrying any of
+// them is a programming error: refused (thrown), never sent.
+const REFUSED_FIELDS = ['cc', 'bcc', 'personalizations'] as const;
+
+/**
+ * Hand one message to the provider, under the delivery switch.
+ *   - a refused field, a non-string recipient, or no recipient address at all
+ *     -> THROWS (a programming error, whatever the switch says);
+ *   - SENDGRID_API_KEY unset -> { sent:false, reason:'unconfigured' };
+ *   - EMAIL_DELIVERY off (or not understood) -> { sent:false, reason:'off' };
+ *   - allowlist mode with no allowed address -> { sent:false, reason:'not_allowlisted' };
+ *   - otherwise sends to ONLY the filtered recipients -> { sent:true, recipients }.
+ * A provider throw is RETHROWN, so callers' existing catch paths stay.
+ */
+export async function deliver(msg: DeliveryMessage): Promise<DeliveryResult> {
+  const carried = msg as unknown as Record<string, unknown>;
+  for (const field of REFUSED_FIELDS) {
+    if (carried[field] !== undefined) {
+      throw new Error(`deliver: refused a message carrying "${field}"`);
+    }
+  }
+  const addresses: unknown[] = Array.isArray(msg.to) ? msg.to : [msg.to];
+  if (addresses.some((address) => typeof address !== 'string')) {
+    throw new Error('deliver: refused a non-string recipient');
+  }
+  if (!(addresses as string[]).some((address) => address.trim() !== '')) {
+    throw new Error('deliver: refused a message with no recipient address');
+  }
+
+  if (!emailProviderConfigured()) return { sent: false, reason: 'unconfigured' };
+
+  const posture = emailDeliveryPosture();
+  if (posture.mode === 'off') return { sent: false, reason: 'off' };
+
+  const recipients = filterRecipients(msg.to, posture);
+  if (recipients.length === 0) return { sent: false, reason: 'not_allowlisted' };
+
+  const outbound = {
+    to: Array.isArray(msg.to) ? recipients : recipients[0],
+    from: process.env.SENDGRID_FROM_EMAIL || 'alerts@advancedresearchpep.com',
+    ...(msg.subject !== undefined ? { subject: msg.subject } : {}),
+    ...(msg.text !== undefined ? { text: msg.text } : {}),
+    ...(msg.html !== undefined ? { html: msg.html } : {}),
+    ...(msg.templateId !== undefined ? { templateId: msg.templateId } : {}),
+    ...(msg.dynamicTemplateData !== undefined
+      ? { dynamicTemplateData: msg.dynamicTemplateData }
+      : {}),
+  };
+  await sgMail.send(outbound as MailDataRequired);
+  return { sent: true, recipients: recipients.length };
+}
+
+const HTML_ESCAPES: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+};
+
+/**
+ * N0 (RC-4): every dynamic value interpolated into an email's HTML body or
+ * attribute goes through this. null / undefined render as "".
+ */
+export function escapeHtml(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value).replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);
 }
 
 export interface EmailOptions {
@@ -55,25 +156,16 @@ export interface WeeklyReportData {
 }
 
 export class EmailService {
-  private from = process.env.SENDGRID_FROM_EMAIL || 'alerts@advancedresearchpep.com';
   private templateId = process.env.TEMPLATE_ID;
   
-  async sendEmail(options: EmailOptions): Promise<void> {
-    if (!process.env.SENDGRID_API_KEY) {
-      console.warn('SendGrid API key not configured, email not sent:', options.subject);
-      return;
-    }
-
+  async sendEmail(options: EmailOptions): Promise<DeliveryResult> {
     try {
-      const msg = {
-        from: this.from,
+      return await deliver({
         to: options.to,
         subject: options.subject,
         text: options.text || '',
         html: options.html,
-      };
-      
-      await sgMail.send(msg);
+      });
     } catch (error) {
       console.error('Error sending email:', error);
       throw new Error('Failed to send email');
@@ -83,7 +175,8 @@ export class EmailService {
   /**
    * S5: notify administrators that a pending user is awaiting approval. Returns a
    * discriminated result so callers can record a TRUTHFUL change-tracking event:
-   *   - { attempted:false, sent:false } — SendGrid unconfigured or no admin recipients (skipped)
+   *   - { attempted:false, sent:false } — no admin recipients, SendGrid unconfigured,
+   *     or the delivery switch withheld it (off / not allowlisted) — nothing went out
    *   - { attempted:true,  sent:true }  — dispatched to the provider
    *   - { attempted:true,  sent:false } — provider throw (caught here; caller stays honest)
    */
@@ -92,10 +185,8 @@ export class EmailService {
     requestingUser: { email: string; username?: string | null }
   ): Promise<{ attempted: boolean; sent: boolean }> {
     const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
-    if (!process.env.SENDGRID_API_KEY || recipients.length === 0) {
-      console.warn(
-        'SendGrid not configured (or no admin recipients); approval reminder not sent'
-      );
+    if (recipients.length === 0) {
+      console.warn('No admin recipients; approval reminder not sent');
       return { attempted: false, sent: false };
     }
 
@@ -109,13 +200,15 @@ export class EmailService {
       reviewUrl ? `Review pending accounts: ${reviewUrl}` : 'Review pending accounts in the admin area.',
     ].join('\n\n');
     const html = `
-      <p>${name} (${requestingUser.email}) is waiting for account approval.</p>
-      <p>${reviewUrl ? `Review pending accounts at <a href="${reviewUrl}">${reviewUrl}</a>.` : 'Review pending accounts in the admin area.'}</p>
+      <p>${escapeHtml(name)} (${escapeHtml(requestingUser.email)}) is waiting for account approval.</p>
+      <p>${reviewUrl ? `Review pending accounts at <a href="${escapeHtml(reviewUrl)}">${escapeHtml(reviewUrl)}</a>.` : 'Review pending accounts in the admin area.'}</p>
     `;
 
     try {
-      await this.sendEmail({ to: recipients, subject, text, html });
-      return { attempted: true, sent: true };
+      const result = await this.sendEmail({ to: recipients, subject, text, html });
+      if (result.sent === true) return { attempted: true, sent: true };
+      console.warn(`Approval reminder not sent (${result.reason})`);
+      return { attempted: false, sent: false };
     } catch (error) {
       console.error('Failed to send approval reminder email:', error);
       return { attempted: true, sent: false };
@@ -125,17 +218,12 @@ export class EmailService {
   async sendMinimumsDigest(
     to: string | string[],
     data: MinimumDigestData
-  ): Promise<void> {
-    if (!process.env.SENDGRID_API_KEY) {
-      console.warn('SendGrid API key not configured, minimum email not sent');
-      return;
-    }
-
+  ): Promise<DeliveryResult> {
     const subject = `Minimum Alert – ${data.locationItems.length + data.combinedItems.length} item(s)`;
     const html = this.generateMinimumsHTML(data);
     const text = this.generateMinimumsText(data);
 
-    await this.sendEmail({
+    return this.sendEmail({
       to,
       subject,
       text,
@@ -146,19 +234,15 @@ export class EmailService {
   async sendLowStockDigest(
     to: string | string[],
     data: LowStockEmailData
-  ): Promise<void> {
-    if (!process.env.SENDGRID_API_KEY) {
-      console.warn('SendGrid API key not configured, email not sent');
-      return;
-    }
-
+  ): Promise<DeliveryResult> {
     try {
       // Use dynamic template if available
       if (this.templateId) {
-        // SendGrid dynamic templates don't use subject/text when templateId is provided
+        // SendGrid dynamic templates don't use subject/text when templateId is provided.
+        // dynamicTemplateData is NOT HTML-escaped here: the hosted template's
+        // Handlebars escapes it (N0 C9; the hosted template is registered for checking).
         const msg = {
           to,
-          from: this.from, // Try simple string format
           templateId: this.templateId,
           dynamicTemplateData: {
             subject: `Low Stock Alert - ${data.items.length} Product${data.items.length > 1 ? 's' : ''} Need Attention`,
@@ -179,18 +263,16 @@ export class EmailService {
         };
         
         console.log('Sending email with template:', this.templateId);
-        console.log('To:', to);
         console.log('Subject:', 'Low Stock Alert');
         
-        const response = await sgMail.send(msg);
-        console.log('SendGrid response:', response[0].statusCode);
+        return await deliver(msg);
       } else {
         // Fallback to inline HTML
         const subject = 'Daily Low Stock Alert - Action Required';
         const html = this.generateLowStockHTML(data);
         const text = this.generateLowStockText(data);
         
-        await this.sendEmail({
+        return await this.sendEmail({
           to,
           subject,
           text,
@@ -214,16 +296,16 @@ export class EmailService {
     const itemsHTML = data.items.map(item => `
       <tr>
         <td style="padding: 12px; border-bottom: 1px solid #e5e7eb;">
-          <strong>${item.productName}</strong>
+          <strong>${escapeHtml(item.productName)}</strong>
         </td>
         <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; text-align: center;">
-          ${item.currentStock}
+          ${escapeHtml(item.currentStock)}
         </td>
         <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; text-align: center;">
-          ${item.threshold}
+          ${escapeHtml(item.threshold)}
         </td>
         <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; text-align: center;">
-          ${item.daysUntilEmpty ? `${item.daysUntilEmpty} days` : 'N/A'}
+          ${item.daysUntilEmpty ? `${escapeHtml(item.daysUntilEmpty)} days` : 'N/A'}
         </td>
       </tr>
     `).join('');
@@ -242,11 +324,11 @@ export class EmailService {
             <h1 style="color: #1f2937; margin-bottom: 24px;">Low Stock Alert</h1>
             
             <p style="color: #4b5563; margin-bottom: 24px;">
-              Hi ${data.recipientName},
+              Hi ${escapeHtml(data.recipientName)},
             </p>
             
             <p style="color: #4b5563; margin-bottom: 12px;">
-              The following ${data.items.length} product${data.items.length > 1 ? 's are' : ' is'} at or below ${data.items.length > 1 ? 'their' : 'its'} alert threshold:
+              The following ${escapeHtml(data.items.length)} product${data.items.length > 1 ? 's are' : ' is'} at or below ${data.items.length > 1 ? 'their' : 'its'} alert threshold:
             </p>
 
             <p style="color: #6b7280; font-size: 13px; margin-bottom: 32px;">
@@ -268,7 +350,7 @@ export class EmailService {
             </table>
             
             <div style="text-align: center; margin-bottom: 32px;">
-              <a href="${process.env.NEXTAUTH_URL}/inventory" 
+              <a href="${escapeHtml(`${process.env.NEXTAUTH_URL}/inventory`)}" 
                  style="display: inline-block; background-color: #3b82f6; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: 500;">
                 View Inventory
               </a>
@@ -278,7 +360,7 @@ export class EmailService {
             
             <p style="color: #6b7280; font-size: 14px; text-align: center;">
               You're receiving this email because you've opted into low stock alerts.
-              ${data.unsubscribeToken ? `<br><a href="${process.env.NEXTAUTH_URL}/unsubscribe?token=${data.unsubscribeToken}" style="color: #3b82f6;">Unsubscribe</a>` : ''}
+              ${data.unsubscribeToken ? `<br><a href="${escapeHtml(`${process.env.NEXTAUTH_URL}/unsubscribe?token=${data.unsubscribeToken}`)}" style="color: #3b82f6;">Unsubscribe</a>` : ''}
             </p>
           </div>
         </div>
@@ -315,10 +397,10 @@ ${data.unsubscribeToken ? `Unsubscribe: ${process.env.NEXTAUTH_URL}/unsubscribe?
       .map(
         (item) => `
         <tr>
-          <td style="padding:8px;border-bottom:1px solid #1f2937;">${item.productName}</td>
-          <td style="padding:8px;border-bottom:1px solid #1f2937;">${item.locationName}</td>
-          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.currentQuantity}</td>
-          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.minQuantity}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;">${escapeHtml(item.productName)}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;">${escapeHtml(item.locationName)}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${escapeHtml(item.currentQuantity)}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${escapeHtml(item.minQuantity)}</td>
         </tr>`
       )
       .join("");
@@ -327,16 +409,16 @@ ${data.unsubscribeToken ? `Unsubscribe: ${process.env.NEXTAUTH_URL}/unsubscribe?
       .map(
         (item) => `
         <tr>
-          <td style="padding:8px;border-bottom:1px solid #1f2937;">${item.productName}</td>
-          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.totalQuantity}</td>
-          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.combinedMinimum}</td>
-          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.daysUntilEmpty ?? "N/A"}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;">${escapeHtml(item.productName)}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${escapeHtml(item.totalQuantity)}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${escapeHtml(item.combinedMinimum)}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${escapeHtml(item.daysUntilEmpty ?? "N/A")}</td>
         </tr>`
       )
       .join("");
 
     return `
-      <h2 style="color:#e5e7eb;margin-bottom:16px;">Hello ${data.recipientName},</h2>
+      <h2 style="color:#e5e7eb;margin-bottom:16px;">Hello ${escapeHtml(data.recipientName)},</h2>
       <p style="color:#cbd5f5;">Here are the current minimum alerts.</p>
       ${
         locationRows
@@ -370,7 +452,7 @@ ${data.unsubscribeToken ? `Unsubscribe: ${process.env.NEXTAUTH_URL}/unsubscribe?
              </table>`
           : ""
       }
-      <p style="color:#9ca3af;margin-top:24px;">Manage notifications at ${process.env.NEXTAUTH_URL}/account</p>
+      <p style="color:#9ca3af;margin-top:24px;">Manage notifications at ${escapeHtml(`${process.env.NEXTAUTH_URL}/account`)}</p>
     `;
   }
 
@@ -410,10 +492,10 @@ Manage notifications: ${process.env.NEXTAUTH_URL}/account
       .map(
         (item) => `
         <tr>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; color: #374151;">${item.name}</td>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #374151;">${item.currentStock}</td>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #374151;">${item.minimum}</td>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #dc2626; font-weight: 600;">${item.deficit}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; color: #374151;">${escapeHtml(item.name)}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #374151;">${escapeHtml(item.currentStock)}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #374151;">${escapeHtml(item.minimum)}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #dc2626; font-weight: 600;">${escapeHtml(item.deficit)}</td>
         </tr>`
       )
       .join("");
@@ -422,8 +504,8 @@ Manage notifications: ${process.env.NEXTAUTH_URL}/account
       .map(
         (item) => `
         <tr>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; color: #374151;">${item.name}</td>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #374151;">${item.unitsMoved}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; color: #374151;">${escapeHtml(item.name)}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #374151;">${escapeHtml(item.unitsMoved)}</td>
         </tr>`
       )
       .join("");
@@ -432,8 +514,8 @@ Manage notifications: ${process.env.NEXTAUTH_URL}/account
       .map(
         (loc) => `
         <tr>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; color: #374151;">${loc.name}</td>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #374151;">${loc.totalStock}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; color: #374151;">${escapeHtml(loc.name)}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #374151;">${escapeHtml(loc.totalStock)}</td>
         </tr>`
       )
       .join("");
@@ -456,14 +538,14 @@ Manage notifications: ${process.env.NEXTAUTH_URL}/account
           <tr>
             <td style="background-color: #1e40af; padding: 24px 32px;">
               <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 700;">Weekly Inventory Report</h1>
-              <p style="margin: 4px 0 0; color: #bfdbfe; font-size: 14px;">${data.dateRange}</p>
+              <p style="margin: 4px 0 0; color: #bfdbfe; font-size: 14px;">${escapeHtml(data.dateRange)}</p>
             </td>
           </tr>
 
           <!-- Greeting -->
           <tr>
             <td style="padding: 24px 32px 8px;">
-              <p style="margin: 0; color: #4b5563; font-size: 15px;">Hi ${data.recipientName},</p>
+              <p style="margin: 0; color: #4b5563; font-size: 15px;">Hi ${escapeHtml(data.recipientName)},</p>
               <p style="margin: 8px 0 0; color: #4b5563; font-size: 15px;">Here is your weekly inventory summary.</p>
             </td>
           </tr>
@@ -474,17 +556,17 @@ Manage notifications: ${process.env.NEXTAUTH_URL}/account
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
                 <tr>
                   <td width="33%" align="center" style="padding: 16px 8px; background-color: #eff6ff; border-radius: 8px;">
-                    <p style="margin: 0; font-size: 28px; font-weight: 700; color: #1e40af;">${data.totalProducts}</p>
+                    <p style="margin: 0; font-size: 28px; font-weight: 700; color: #1e40af;">${escapeHtml(data.totalProducts)}</p>
                     <p style="margin: 4px 0 0; font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px;">Products</p>
                   </td>
                   <td width="6"></td>
                   <td width="33%" align="center" style="padding: 16px 8px; background-color: #f0fdf4; border-radius: 8px;">
-                    <p style="margin: 0; font-size: 28px; font-weight: 700; color: #16a34a;">${data.totalStock}</p>
+                    <p style="margin: 0; font-size: 28px; font-weight: 700; color: #16a34a;">${escapeHtml(data.totalStock)}</p>
                     <p style="margin: 4px 0 0; font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px;">Total Stock</p>
                   </td>
                   <td width="6"></td>
                   <td width="33%" align="center" style="padding: 16px 8px; background-color: ${data.lowStockCount > 0 ? '#fef2f2' : '#f0fdf4'}; border-radius: 8px;">
-                    <p style="margin: 0; font-size: 28px; font-weight: 700; color: ${data.lowStockCount > 0 ? '#dc2626' : '#16a34a'};">${data.lowStockCount}</p>
+                    <p style="margin: 0; font-size: 28px; font-weight: 700; color: ${data.lowStockCount > 0 ? '#dc2626' : '#16a34a'};">${escapeHtml(data.lowStockCount)}</p>
                     <p style="margin: 4px 0 0; font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px;">Low Stock</p>
                   </td>
                 </tr>
@@ -554,7 +636,7 @@ Manage notifications: ${process.env.NEXTAUTH_URL}/account
           <!-- CTA Button -->
           <tr>
             <td align="center" style="padding: 0 32px 32px;">
-              <a href="${appUrl}/dashboard"
+              <a href="${escapeHtml(`${appUrl}/dashboard`)}"
                  style="display: inline-block; background-color: #1e40af; color: #ffffff; padding: 12px 28px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px;">
                 View Dashboard
               </a>
@@ -567,7 +649,7 @@ Manage notifications: ${process.env.NEXTAUTH_URL}/account
               <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center;">
                 You are receiving this email because you opted into email alerts.
                 <br>
-                <a href="${appUrl}/account" style="color: #3b82f6; text-decoration: underline;">Manage notification preferences</a>
+                <a href="${escapeHtml(`${appUrl}/account`)}" style="color: #3b82f6; text-decoration: underline;">Manage notification preferences</a>
               </p>
             </td>
           </tr>

@@ -20,6 +20,11 @@ services:
     restart: unless-stopped
     environment:
       NEXTAUTH_URL: ${NEXTAUTH_URL}
+      # N0 (RC-6): the ONLY place real email can be switched on. The base file pins
+      # EMAIL_DELIVERY to a literal "off"; prod sets EMAIL_DELIVERY=on in its .env.
+      # "on" | "allowlist" | "off", byte-exact; anything else fails closed to off.
+      EMAIL_DELIVERY: ${EMAIL_DELIVERY:-off}
+      EMAIL_ALLOWLIST: ${EMAIL_ALLOWLIST:-}
     networks:
       stack_network:
         aliases: [inventory]

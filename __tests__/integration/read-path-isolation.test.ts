@@ -12,6 +12,11 @@
  * on every outward / decision read path — and the SHOW surfaces must NOT apply
  * it (a PENDING_REVIEW product is real stock and stays visible in browse).
  *
+ * SHOW surface (N0 C7): GET /api/analytics/product/[id] — the per-product analytics
+ * page the Products list links to — serves PENDING_REVIEW products (and soft-deleted
+ * ones, flagged by product.deletedAt); only an UNKNOWN id is a 404. Pinned in
+ * __tests__/integration/api/analytics-product-id.test.ts.
+ *
  * Prisma is mocked with jest-mock-extended (no real DB). The real apiHandler is
  * preserved so ZodError -> 400 and AppError -> its status map centrally; only
  * the auth guards / CSRF / rate-limit / audit / email side-effects are stubbed.
@@ -66,7 +71,8 @@ jest.mock('@/lib/email', () => ({
   emailService: {
     generateWeeklyReportHTML: jest.fn(() => '<html></html>'),
     generateWeeklyReportText: jest.fn(() => 'text'),
-    sendEmail: jest.fn(async () => undefined),
+    // N0 (C8): the senders now return a DeliveryResult.
+    sendEmail: jest.fn(async () => ({ sent: true, recipients: 1 })),
   },
 }));
 

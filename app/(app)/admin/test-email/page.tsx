@@ -1,6 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+// A TYPE import only (erased at build): the client never pulls the checker's Prisma runtime.
+import type { EmailRunCounts } from "@/lib/stock-checker";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -8,14 +10,65 @@ import { Mail, CheckCircle2, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
+// "Low-stock emails: 0 sent, 3 not sent (off)." — every count stated, never a
+// "sent" the server did not report.
+function describeEmailCounts(label: string, counts: EmailRunCounts | undefined): string {
+  if (!counts) return `${label}: not reported.`;
+  const reasons = Object.entries(counts.notSentReasons ?? {}).filter(([, n]) => n > 0);
+  const why =
+    counts.emailsNotSent > 0 && reasons.length > 0
+      ? ` (${
+          reasons.length === 1
+            ? reasons[0][0]
+            : reasons.map(([reason, n]) => `${n} ${reason}`).join(", ")
+        })`
+      : "";
+  const failed = counts.emailsFailed > 0 ? `, ${counts.emailsFailed} failed` : "";
+  return `${label}: ${counts.emailsSent} sent, ${counts.emailsNotSent} not sent${why}${failed}.`;
+}
+
+type DeliveryModeView =
+  | { state: "loading" }
+  | { state: "ok"; mode: string; invalidEnv: boolean }
+  | { state: "unavailable" };
+
+// The current delivery mode, read from the public /api/healthz (FV-9).
+function deliveryModeText(view: DeliveryModeView): string {
+  if (view.state === "loading") return "Email delivery: checking...";
+  if (view.state === "unavailable") return "Email delivery mode could not be read.";
+  return `Email delivery: ${view.mode}${view.invalidEnv ? " (configuration not understood)" : ""}`;
+}
+
 export default function TestEmailPage() {
   const [isSending, setIsSending] = useState(false);
+  const [deliveryMode, setDeliveryMode] = useState<DeliveryModeView>({ state: "loading" });
   const [result, setResult] = useState<{
     success?: boolean;
     message?: string;
     details?: unknown;
   } | null>(null);
   const { token: csrfToken } = useCSRF();
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/healthz")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body) => {
+        if (cancelled) return;
+        const delivery = body?.emailDelivery;
+        setDeliveryMode(
+          typeof delivery?.mode === "string"
+            ? { state: "ok", mode: delivery.mode, invalidEnv: delivery.invalidEnv === true }
+            : { state: "unavailable" }
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setDeliveryMode({ state: "unavailable" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const sendTestEmail = async () => {
     setIsSending(true);
@@ -73,7 +126,11 @@ export default function TestEmailPage() {
       const data = await response.json();
 
       if (response.ok) {
-        const message = `Stock check completed. Found ${data.lowStockCount} low stock item(s).`;
+        const message = [
+          `Stock check completed. Found ${data.lowStockCount} low stock item(s).`,
+          describeEmailCounts("Low-stock emails", data.lowStock),
+          describeEmailCounts("Minimum emails", data.minimums),
+        ].join(" ");
         setResult({ success: true, message, details: data });
         toast.success(message);
       } else {
@@ -119,6 +176,8 @@ export default function TestEmailPage() {
               </ul>
             </div>
 
+            <p className="text-sm text-muted-foreground">{deliveryModeText(deliveryMode)}</p>
+
             <Button onClick={sendTestEmail} disabled={isSending} className="w-full">
               {isSending ? "Sending..." : "Send Test Email"}
             </Button>
@@ -142,6 +201,8 @@ export default function TestEmailPage() {
                 <li>Use real data from your inventory</li>
               </ul>
             </div>
+
+            <p className="text-sm text-muted-foreground">{deliveryModeText(deliveryMode)}</p>
 
             <Button
               onClick={runStockCheck}

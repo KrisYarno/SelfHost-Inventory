@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { encryptionKeyReadiness } from "@/lib/assistant/readiness";
 import { getPostureView } from "@/lib/platforms/egress";
+import {
+  emailDeliveryPosture,
+  emailProviderConfigured,
+} from "@/lib/notifications/delivery-posture";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +18,10 @@ export const dynamic = "force-dynamic";
 // visible at the boundary. `platformWrites.invalidEnv` is the RED flag: it means
 // PLATFORM_WRITES / PLATFORM_WRITE_CAPABILITIES contained a value we did not
 // understand, so writes fell closed to OFF.
+//
+// N0 (RC-6): the email delivery switch is exposed the same way. It carries the
+// allowlist COUNT only (never an address) and whether a provider key is configured
+// (a boolean, never the key). A posture read we could not complete reports "off".
 export async function GET() {
   const encryptionKey = encryptionKeyReadiness();
 
@@ -41,6 +49,26 @@ export async function GET() {
     };
   }
 
+  let emailDelivery;
+  try {
+    const posture = emailDeliveryPosture();
+    emailDelivery = {
+      mode: posture.mode,
+      allowlistCount: posture.allowlist.length,
+      invalidEnv: posture.invalidEnv,
+      invalidReasons: posture.invalidReasons,
+      providerConfigured: emailProviderConfigured(),
+    };
+  } catch {
+    emailDelivery = {
+      mode: "off" as const,
+      allowlistCount: 0,
+      invalidEnv: true,
+      invalidReasons: ["posture_read_failed"],
+      providerConfigured: false,
+    };
+  }
+
   return NextResponse.json({
     status: "ok",
     timestamp: new Date().toISOString(),
@@ -48,5 +76,6 @@ export async function GET() {
       encryptionKey,
     },
     platformWrites,
+    emailDelivery,
   });
 }

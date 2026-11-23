@@ -88,6 +88,11 @@ services:
       SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
       SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:-}
       TEMPLATE_ID: ${TEMPLATE_ID:-}
+      # N0 (RC-6): real email is OFF on every stack built on this base file — a
+      # LITERAL, deliberately NOT a passthrough, so no env file (a prod copy on dev,
+      # QA or StagingProduction) can turn it on. EMAIL_ALLOWLIST is not forwarded.
+      # Only the PROD overlay (compose.stack.yml) passes EMAIL_DELIVERY through.
+      EMAIL_DELIVERY: "off"
       ANALYTICS_SNAPSHOT_NIGHTLY_DAYS: ${ANALYTICS_SNAPSHOT_NIGHTLY_DAYS:-3}
       ANALYTICS_SALES_NIGHTLY_ROLLING_DAYS: ${ANALYTICS_SALES_NIGHTLY_ROLLING_DAYS:-14}
       ANALYTICS_SALES_NIGHTLY_LOOKBACK_HOURS: ${ANALYTICS_SALES_NIGHTLY_LOOKBACK_HOURS:-36}

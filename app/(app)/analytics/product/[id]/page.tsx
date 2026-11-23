@@ -3,7 +3,11 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, usePathname, useSearchParams } from "next/navigation";
-import { useProductAnalytics, type StockPoint } from "@/hooks/use-analytics";
+import {
+  useProductAnalytics,
+  type ProductAnalyticsError,
+  type StockPoint,
+} from "@/hooks/use-analytics";
 import { useProductHistory } from "@/hooks/use-product-history";
 import type { TimelineEntry } from "@/lib/history/union-timeline";
 import { TrendingUp, TrendingDown, Minus, Download, ImageIcon, Loader2 } from "lucide-react";
@@ -62,6 +66,15 @@ function toStockChartData(series: StockPoint[]): Array<{ date: string; quantity:
     .map(([date, quantity]) => ({ date, quantity }));
 }
 
+// The deleted-on date, formatted like the Deleted products list.
+function formatDeletedDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 // Stable React key for a timeline entry across accumulated pages.
 function entryKey(entry: TimelineEntry, index: number): string {
   if (entry.kind === "event") return `e-${entry.event.id}`;
@@ -101,14 +114,21 @@ export default function ProductAnalyticsPage() {
   const data = analyticsQuery.data?.product ?? null;
   const salesByDay = analyticsQuery.data?.salesByDay ?? null;
   const loading = analyticsQuery.isLoading;
-  const error = analyticsQuery.isError ? "Could not load analytics for this product." : null;
+  // N0 (C7): a 404 is "this product does not exist" — its own state, never the
+  // generic load error, and never a header that names a product that is not there.
+  const notFound =
+    (analyticsQuery.error as ProductAnalyticsError | null | undefined)?.status === 404;
+  const error =
+    analyticsQuery.isError && !notFound ? "Could not load analytics for this product." : null;
 
   // Product identity for the header (lazy — falls back to the id while loading).
   const identity = data?.product ?? null;
   const headerName = identity?.name ?? identity?.baseName ?? (id ? `Product #${id}` : "Product");
+  const deletedAt = identity?.deletedAt ?? null;
 
-  // History timeline — lazy: only fetched while the History tab is active.
-  const history = useProductHistory(id, { enabled: tab === "history" });
+  // History timeline — lazy: only fetched while the History tab is active (and never
+  // for a product that does not exist).
+  const history = useProductHistory(id, { enabled: tab === "history" && !notFound });
 
   const stockSeries = useMemo(() => data?.stock.series ?? [], [data]);
   const salesSeries = useMemo(() => data?.sales.series ?? [], [data]);
@@ -179,6 +199,30 @@ export default function ProductAnalyticsPage() {
     );
   }, [stockChartData, salesChartData]);
 
+  // N0 (C7): an unknown product. The header names no product and shows no stock
+  // figure; the whole body is one sentence (no Performance controls, no History tab).
+  if (notFound) {
+    return (
+      <div className="flex flex-col h-full overflow-x-hidden">
+        <div className="container mx-auto p-4 sm:p-6 space-y-6">
+          <div className="space-y-1">
+            <nav aria-label="Breadcrumb" className="text-sm text-muted-foreground">
+              <Link href="/products" className="hover:underline">
+                Products
+              </Link>
+              <span aria-hidden className="px-1.5">
+                /
+              </span>
+              <span className="text-foreground">Product</span>
+            </nav>
+            <h1 className="text-2xl font-semibold tracking-tight">Product</h1>
+          </div>
+          <p className="text-sm text-muted-foreground">This product does not exist.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-full overflow-x-hidden">
       <div className="container mx-auto p-4 sm:p-6 space-y-6">
@@ -206,6 +250,16 @@ export default function ProductAnalyticsPage() {
             <span className="tabular-nums">{formatUnits(identity?.currentStock)}</span> in stock
           </p>
         </div>
+
+        {/* N0 (C7): a soft-deleted product is served as itself, and says so. */}
+        {deletedAt && (
+          <div
+            role="note"
+            className="rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground"
+          >
+            This product was deleted on {formatDeletedDate(deletedAt)}.
+          </div>
+        )}
 
         <Tabs value={tab} onValueChange={handleTabChange}>
           <TabsList>

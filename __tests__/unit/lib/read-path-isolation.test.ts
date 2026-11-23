@@ -25,7 +25,11 @@ jest.mock('@/lib/prisma', () => {
 // the module under test can be imported without real transports.
 jest.mock('@/lib/email', () => ({
   __esModule: true,
-  emailService: { sendLowStockDigest: jest.fn(), sendMinimumsDigest: jest.fn() },
+  // N0 (C8): the senders now return a DeliveryResult.
+  emailService: {
+    sendLowStockDigest: jest.fn(async () => ({ sent: true, recipients: 1 })),
+    sendMinimumsDigest: jest.fn(async () => ({ sent: true, recipients: 1 })),
+  },
 }));
 
 import prisma from '@/lib/prisma';

@@ -5,19 +5,14 @@ import { apiHandler } from "@/lib/api-utils";
 import { recordChange } from "@/lib/change-tracking";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 import { SignupSchema } from "@/lib/validation/auth";
+import { emailDomainAllowed } from "@/lib/auth";
 
-// Allowed email domains, matching auth.ts
+// Allowed email domains, matching auth.ts — named in the refusal message only.
+// The CHECK is lib/auth.ts's emailDomainAllowed (N0 C6), shared with sign-in.
 const allowedDomains = (process.env.ALLOWED_EMAIL_DOMAINS || 'advancedresearchpep.com')
   .split(',')
   .map((d) => d.trim().toLowerCase())
   .filter(Boolean);
-const allowAllDomains = allowedDomains.includes('*');
-
-function isAllowedDomain(email: string): boolean {
-  const domain = email.toLowerCase().split('@')[1];
-  if (!domain) return false;
-  return allowAllDomains || allowedDomains.includes(domain);
-}
 
 export const POST = apiHandler(async (request: NextRequest) => {
   const rateLimitHeaders = enforceRateLimit(request, "auth:signup");
@@ -33,7 +28,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
   } = SignupSchema.parse(raw);
 
   // Validate domain
-  if (!isAllowedDomain(normalizedEmail)) {
+  if (!emailDomainAllowed(normalizedEmail)) {
     return NextResponse.json(
       { error: `Sign up is restricted to company email addresses (${allowedDomains.join(', ')})` },
       { status: 403 }

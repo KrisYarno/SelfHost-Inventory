@@ -16,17 +16,23 @@ export const GET = apiHandler(async (request: NextRequest) => {
   console.log("Running stock check cron job...");
   const startTime = Date.now();
 
-  const lowStockResult = await stockChecker.runDailyCheck();
-  const minimumResult = await stockChecker.runMinimumsCheck();
+  const { lowStockCount, ...lowStock } = await stockChecker.runDailyCheck();
+  const { locationBreaches, combinedBreaches, ...minimums } =
+    await stockChecker.runMinimumsCheck();
 
   const duration = Date.now() - startTime;
   console.log(`Stock check completed in ${duration}ms`);
 
+  // N0 (D1): each run's email counts are NESTED under their own key — the two runs
+  // carry the same field names, so spreading them would let one overwrite the other.
   return NextResponse.json({
     success: true,
     timestamp: new Date().toISOString(),
     duration,
-    ...lowStockResult,
-    ...minimumResult,
+    lowStockCount,
+    locationBreaches,
+    combinedBreaches,
+    lowStock,
+    minimums,
   });
 });

@@ -359,6 +359,9 @@ function appEnv(databaseUrl: string): NodeJS.ProcessEnv {
     // allowed domain applies, which is where the seed emails live) AND it stops
     // @next/env from layering the repo's own .env value on top.
     ALLOWED_EMAIL_DOMAINS: "",
+    // N0 (C2(i)): the app under test can never send real email, whatever the repo's
+    // .env holds (@next/env never overwrites a key already present).
+    EMAIL_DELIVERY: "off",
   };
 }
 

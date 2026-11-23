@@ -37,7 +37,11 @@ jest.mock("@/lib/change-tracking", () => ({
 }));
 jest.mock("@/lib/email", () => ({
   __esModule: true,
-  emailService: { sendLowStockDigest: jest.fn(), sendMinimumsDigest: jest.fn() },
+  // N0 (C8): the senders now return a DeliveryResult.
+  emailService: {
+    sendLowStockDigest: jest.fn(async () => ({ sent: true, recipients: 1 })),
+    sendMinimumsDigest: jest.fn(async () => ({ sent: true, recipients: 1 })),
+  },
 }));
 jest.mock("@/lib/products", () => ({
   __esModule: true,

@@ -80,7 +80,8 @@ jest.mock("@/lib/email", () => ({
   emailService: {
     generateWeeklyReportHTML: jest.fn(() => "<html></html>"),
     generateWeeklyReportText: jest.fn(() => "text"),
-    sendEmail: jest.fn(async () => undefined),
+    // N0 (C8): the senders now return a DeliveryResult.
+    sendEmail: jest.fn(async () => ({ sent: true, recipients: 1 })),
   },
 }));
 
@@ -181,10 +182,6 @@ const PERMANENT_EXEMPT: Exemption[] = [
   {
     path: "app/api/test/email/route.ts",
     reason: "test endpoint (sends a canned test email); no persistent state",
-  },
-  {
-    path: "app/api/test/sendgrid-debug/route.ts",
-    reason: "test endpoint (SendGrid delivery debug); no persistent state",
   },
   {
     path: "app/api/csrf/route.ts",

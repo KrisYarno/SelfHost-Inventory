@@ -5,8 +5,7 @@ import ProductAnalyticsPage from "@/app/(app)/analytics/product/[id]/page";
 
 // The page's two reads now run through one useQuery, so renders need a client. A fresh
 // client per render keeps each test's cache isolated.
-function renderPage() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderPage(qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   return render(
     <QueryClientProvider client={qc}>
       <ProductAnalyticsPage />
@@ -73,12 +72,14 @@ function installFetch(opts: {
   product: unknown;
   sales?: unknown;
   productOk?: boolean;
+  productStatus?: number;
 }) {
   global.fetch = jest.fn(async (url: RequestInfo | URL) => {
     const u = String(url);
     if (u.startsWith("/api/analytics/product/")) {
       return {
         ok: opts.productOk ?? true,
+        status: opts.productStatus,
         json: async () => opts.product,
       } as unknown as Response;
     }
@@ -302,4 +303,113 @@ it("renders an error state when the per-product fetch fails", async () => {
   await waitFor(() =>
     expect(screen.getByText(/could not load analytics/i)).toBeInTheDocument(),
   );
+});
+
+// ---------------------------------------------------------------------------
+// N0 (C7 / FV-6): an unknown product, a deleted product, and other failures.
+// ---------------------------------------------------------------------------
+
+function productFetchCount(): number {
+  return (global.fetch as jest.Mock).mock.calls.filter(([u]) =>
+    String(u).startsWith("/api/analytics/product/"),
+  ).length;
+}
+
+it("a 404 shows ONE sentence: no stock figure, no 'Product #id', no controls, no History tab", async () => {
+  installFetch({
+    product: { error: "Product not found", code: "NOT_FOUND" },
+    productOk: false,
+    productStatus: 404,
+  });
+
+  renderPage();
+
+  expect(await screen.findByText("This product does not exist.")).toBeInTheDocument();
+  // Header: names no product and shows no stock figure.
+  expect(screen.queryByText(/Product #42/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/in stock/i)).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Product");
+  // The Performance controls and both tabs are gone.
+  expect(document.querySelectorAll('input[type="date"]').length).toBe(0);
+  expect(screen.queryByText("All my companies")).not.toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "History" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "Performance" })).not.toBeInTheDocument();
+  // ...and it is NOT the generic load error.
+  expect(screen.queryByText(/could not load analytics/i)).not.toBeInTheDocument();
+});
+
+it("a deleted product shows the 'deleted on {date}' banner, the page otherwise as normal", async () => {
+  const deletedAt = "2026-11-20T10:00:00.000Z";
+  installFetch({
+    product: {
+      productId: 42,
+      product: {
+        name: "Old 5mg",
+        baseName: "Old",
+        variant: "5mg",
+        currentStock: 7,
+        deletedAt,
+      },
+      stock: {
+        series: [{ dayKey: "2026-06-01", locationId: 3, quantity: 120 }],
+        mode: "historical (GLOBAL inventory)",
+      },
+      sales: { series: [], mode: "historical (your companies)", note: NOTE },
+    },
+  });
+
+  renderPage();
+
+  const expectedDate = new Date(deletedAt).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  expect(
+    await screen.findByText(`This product was deleted on ${expectedDate}.`),
+  ).toBeInTheDocument();
+  // Otherwise as normal: header, stock, chart, tabs.
+  expect(screen.getByRole("heading", { level: 1, name: "Old 5mg" })).toBeInTheDocument();
+  expect(screen.getByText("7")).toBeInTheDocument();
+  expect(screen.getByTestId("line-chart")).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "History" })).toBeInTheDocument();
+});
+
+it("a live product shows no deleted banner", async () => {
+  installFetch({
+    product: {
+      productId: 42,
+      product: { name: "Live", baseName: "Live", variant: null, currentStock: 1, deletedAt: null },
+      stock: { series: [{ dayKey: "2026-06-01", locationId: 3, quantity: 1 }], mode: "m" },
+      sales: { series: [], mode: "m", note: NOTE },
+    },
+  });
+  renderPage();
+  await screen.findByTestId("line-chart");
+  expect(screen.queryByText(/was deleted on/)).not.toBeInTheDocument();
+});
+
+it("other failures (e.g. 500) keep 'Could not load analytics for this product.'", async () => {
+  installFetch({ product: {}, productOk: false, productStatus: 500 });
+  renderPage();
+  expect(
+    await screen.findByText("Could not load analytics for this product."),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("This product does not exist.")).not.toBeInTheDocument();
+});
+
+it("the hook does NOT retry a 404, and keeps the client's retry default for other failures", async () => {
+  const retrying = () =>
+    new QueryClient({ defaultOptions: { queries: { retry: 2, retryDelay: 0 } } });
+
+  installFetch({ product: {}, productOk: false, productStatus: 404 });
+  renderPage(retrying());
+  await screen.findByText("This product does not exist.");
+  expect(productFetchCount()).toBe(1);
+
+  (global.fetch as jest.Mock).mockClear();
+  installFetch({ product: {}, productOk: false, productStatus: 503 });
+  renderPage(retrying());
+  await screen.findByText("Could not load analytics for this product.");
+  expect(productFetchCount()).toBe(3); // the first try + the client default's 2 retries
 });
