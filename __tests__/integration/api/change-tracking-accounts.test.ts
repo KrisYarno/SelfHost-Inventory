@@ -23,7 +23,8 @@ import { NextRequest } from "next/server";
 // stub only the auth guards.
 jest.mock("@/lib/api-utils", () => {
   const actual = jest.requireActual("@/lib/api-utils");
-  return { __esModule: true, ...actual, requireAuth: jest.fn(), requireAdmin: jest.fn() };
+  // N0 FR1 E3: the account routes now guard with requireApproved (was requireAuth).
+  return { __esModule: true, ...actual, requireApproved: jest.fn(), requireAdmin: jest.fn() };
 });
 
 jest.mock("@/lib/csrf", () => ({ validateCSRFToken: jest.fn(async () => true) }));
@@ -80,7 +81,7 @@ import { PATCH as defaultLocationPATCH } from "@/app/api/account/default-locatio
 import { PATCH as preferencesPATCH } from "@/app/api/user/preferences/route";
 import { POST as signupPOST } from "@/app/api/auth/signup/route";
 import { DELETE as userDELETE } from "@/app/api/admin/users/[userId]/route";
-import { requireAuth, requireAdmin } from "@/lib/api-utils";
+import { requireApproved, requireAdmin } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -127,7 +128,7 @@ function forbiddenKeyPaths(value: unknown, path = ""): string[] {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  (requireAuth as jest.Mock).mockResolvedValue({ user: SELF });
+  (requireApproved as jest.Mock).mockResolvedValue({ user: SELF });
   (requireAdmin as jest.Mock).mockResolvedValue({ user: ADMIN });
 });
 

@@ -13,7 +13,7 @@
  *     values and are therefore invalid (mode "off", invalidEnv true). Unset is the
  *     intended default: "off", NOT invalid.
  *   - EMAIL_ALLOWLIST: a comma-separated list, read only in "allowlist" mode. Each
- *     entry is trimmed and lowercased; empty entries are dropped. An allowlist that
+ *     entry is trimmed and ASCII-lowercased; empty entries are dropped. An allowlist that
  *     is empty after dropping is invalid (mode "off", invalidEnv true).
  *
  * The env is read on EVERY call (no caching), so a test or an operator always sees
@@ -43,10 +43,19 @@ type Env = NodeJS.ProcessEnv | Record<string, string | undefined>;
 // One warning per process, however many times the posture is read.
 let warnedInvalid = false;
 
+// N0 FR1 E11: allowlist matching is ASCII-only. Only A-Z are lowercased (Unicode
+// case folding maps lookalikes such as the Kelvin sign U+212A onto "k"), and an
+// address carrying ANY non-ASCII character never matches.
+function asciiLower(value: string): string {
+  return value.replace(/[A-Z]/g, (ch) => ch.toLowerCase());
+}
+
+const NON_ASCII = /[^\x00-\x7f]/;
+
 function parseAllowlist(raw: string | undefined): string[] {
   return (raw ?? "")
     .split(",")
-    .map((entry) => entry.trim().toLowerCase())
+    .map((entry) => asciiLower(entry.trim()))
     .filter((entry) => entry !== "");
 }
 
@@ -86,7 +95,7 @@ export function emailDeliveryPosture(env: Env = process.env): EmailDeliveryPostu
 /**
  * The addresses a message may actually go to under `posture`:
  *   - "on"        every non-empty address;
- *   - "allowlist" only the addresses whose lowercased form is on the allowlist;
+ *   - "allowlist" only ASCII addresses whose ASCII-lowercased form is on the allowlist;
  *   - "off"       none.
  */
 export function filterRecipients(to: string | string[], posture: EmailDeliveryPosture): string[] {
@@ -94,7 +103,7 @@ export function filterRecipients(to: string | string[], posture: EmailDeliveryPo
   const addresses = (Array.isArray(to) ? to : [to]).filter((address) => address.trim() !== "");
   if (posture.mode === "on") return addresses;
   const allowed = new Set(posture.allowlist);
-  return addresses.filter((address) => allowed.has(address.toLowerCase()));
+  return addresses.filter((address) => !NON_ASCII.test(address) && allowed.has(asciiLower(address)));
 }
 
 /**

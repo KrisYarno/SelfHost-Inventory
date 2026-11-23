@@ -18,7 +18,9 @@ const allowAllDomains = allowedDomains.includes('*');
  * Google sign-in. An address passes only when, after trimming:
  *   1. it has EXACTLY ONE "@";
  *   2. the local part and the domain are both non-empty;
- *   3. it contains no whitespace or control characters;
+ *   3. it contains no whitespace or control characters, and the local part is
+ *      printable ASCII only (N0 FR1 E5: no zero-width, bidi-override, fullwidth or
+ *      other non-ASCII lookalikes);
  *   4. THEN the wildcard ("*") is configured, or the domain is allowed.
  * So "a@allowed.com@evil.com" is refused in BOTH modes (the old split('@')[1]
  * read it as allowed.com). Signup deliberately does not .email()-validate
@@ -36,6 +38,7 @@ export function emailDomainAllowed(email: string): boolean {
   if (parts.length !== 2) return false;
   const [local, domain] = parts;
   if (local === '' || domain === '') return false;
+  if (!/^[\x21-\x7e]+$/.test(local)) return false;
   return allowAllDomains || allowedDomains.includes(domain.toLowerCase());
 }
 
@@ -315,16 +318,17 @@ export const authOptions: NextAuthOptions = {
       // { isAdmin: true }. A promotion, a demotion, an approval or a deletion is
       // therefore picked up on the next session read, and a token minted with
       // claims the row does not hold is downgraded. A missing row, a soft-deleted
-      // user, or a token without a usable id holds no rights. A FAILED read holds
-      // none either, for that read only: the cookie is kept and the next successful
-      // read restores the row's claims (a throw here would sign the user out).
+      // user, or a token without a usable id holds no rights. A FAILED read
+      // RETHROWS (N0 FR1 E1): next-auth's session route then clears the cookie (a
+      // clean sign-out) and getServerSession returns null — never a cookie
+      // re-encoded with made-up claims, never a false "pending approval" page.
       if (!user) {
         let row: {
           isAdmin: boolean;
           isApproved: boolean;
           deletedAt: Date | null;
           defaultLocationId: number | null;
-        } | null = null;
+        } | null;
         try {
           row = isUserIdKey(token.id)
             ? await prisma.user.findUnique({
@@ -332,9 +336,13 @@ export const authOptions: NextAuthOptions = {
                 select: { isAdmin: true, isApproved: true, deletedAt: true, defaultLocationId: true },
               })
             : null;
-        } catch {
-          console.error('[auth] jwt claims re-read failed');
-          row = null;
+        } catch (error) {
+          // ONE address-free line: the Prisma error code only, never the error.
+          const code = (error as { code?: unknown } | null)?.code;
+          console.error(
+            `[auth] jwt claims re-read failed (${typeof code === 'string' ? code : 'unknown'})`
+          );
+          throw error;
         }
         if (row && !row.deletedAt) {
           token.isAdmin = row.isAdmin;

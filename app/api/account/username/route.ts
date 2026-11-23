@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, apiHandler, requireCSRF } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { recordChange } from "@/lib/change-tracking";
 import { UpdateUsernameSchema } from "@/lib/validation/account";
@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
  * GET - Get current user's username
  */
 export const GET = apiHandler(async () => {
-  const { user: sessionUser } = await requireAuth();
+  const { user: sessionUser } = await requireApproved();
 
   const user = await prisma.user.findUnique({
     where: { email: sessionUser.email },
@@ -28,7 +28,7 @@ export const GET = apiHandler(async () => {
  * PATCH - Update username
  */
 export const PATCH = apiHandler(async (request: NextRequest) => {
-  const { user: sessionUser } = await requireAuth();
+  const { user: sessionUser } = await requireApproved();
 
   await requireCSRF(request);
 

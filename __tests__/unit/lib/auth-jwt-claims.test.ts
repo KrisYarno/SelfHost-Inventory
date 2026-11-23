@@ -109,22 +109,52 @@ describe("D0: claims come from the database on every non-sign-in run", () => {
     expect(token.isApproved).toBe(false);
   });
 
-  it("a FAILED re-read => both false for that read, no throw (cookie kept); the next good read restores", async () => {
+  // N0 FR1 E1 (REPLACES the REV 5 D3 pin "a FAILED re-read => both false, no throw"):
+  // a failed re-read RETHROWS, so next-auth's session route clears the cookie (a
+  // clean sign-out) and getServerSession returns null — never a cookie re-encoded
+  // with isApproved:false (which sent users to a false "pending approval" page).
+  it("a FAILED re-read THROWS, logging ONE address-free line with the Prisma code", async () => {
     const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     try {
-      findUnique.mockRejectedValueOnce(new Error("db down for member@advancedresearchpep.com"));
-      const failed = await jwt({ token: memberToken({ isAdmin: true, isApproved: true }) });
-      expect(failed.isAdmin).toBe(false);
-      expect(failed.isApproved).toBe(false);
-      // ONE address-free line, never the error (which may carry an address).
+      const prismaError = Object.assign(new Error("connection lost for member@advancedresearchpep.com"), {
+        code: "P1001",
+      });
+      findUnique.mockRejectedValueOnce(prismaError);
+      const token = memberToken({ isAdmin: true, isApproved: true });
+      await expect(jwt({ token })).rejects.toBe(prismaError);
+
       expect(errorSpy).toHaveBeenCalledTimes(1);
-      expect(errorSpy).toHaveBeenCalledWith("[auth] jwt claims re-read failed");
+      expect(errorSpy).toHaveBeenCalledWith("[auth] jwt claims re-read failed (P1001)");
+      const printed = errorSpy.mock.calls.flat().map(String).join(" ");
+      expect(printed).not.toContain("@");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("a failed re-read with no string code logs (unknown) — and still throws", async () => {
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      findUnique.mockRejectedValueOnce(new Error("boom for member@advancedresearchpep.com"));
+      await expect(jwt({ token: memberToken() })).rejects.toThrow("boom");
+      expect(errorSpy).toHaveBeenCalledWith("[auth] jwt claims re-read failed (unknown)");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("the next successful read after a failure is unaffected (claims from the row)", async () => {
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      findUnique.mockRejectedValueOnce(Object.assign(new Error("x"), { code: "P1001" }));
+      await expect(jwt({ token: memberToken() })).rejects.toBeDefined();
 
       findUnique.mockResolvedValueOnce(row({ isAdmin: true, isApproved: true, defaultLocationId: 4 }));
-      const healed = await jwt({ token: failed });
-      expect(healed.isAdmin).toBe(true);
-      expect(healed.isApproved).toBe(true);
-      expect(healed.defaultLocationId).toBe(4);
+      const next = await jwt({ token: memberToken({ isAdmin: false, isApproved: false }) });
+      expect(next.isAdmin).toBe(true);
+      expect(next.isApproved).toBe(true);
+      expect(next.defaultLocationId).toBe(4);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
     } finally {
       errorSpy.mockRestore();
     }

@@ -168,9 +168,11 @@ export const GET = apiHandler(async (request: NextRequest) => {
 
   // Send email to each user. emailsSent counts ONLY mail actually handed to the
   // provider ({ sent: true }); emailsNotSent counts mail the delivery switch withheld
-  // (N0 C3c). A provider throw stays a logged error, as before (address-free).
+  // (N0 C3c). A provider throw stays a logged error, as before (address-free), and
+  // is counted in emailsFailed (N0 FR1 E8).
   let emailsSent = 0;
   let emailsNotSent = 0;
+  let emailsFailed = 0;
   for (const user of users) {
     try {
       const html = emailService.generateWeeklyReportHTML({
@@ -208,13 +210,14 @@ export const GET = apiHandler(async (request: NextRequest) => {
         emailsNotSent++;
       }
     } catch (error) {
+      emailsFailed++;
       console.error("Failed to send a weekly report:", error);
     }
   }
 
   const duration = Date.now() - startTime;
   console.log(
-    `Weekly report completed in ${duration}ms — sent ${emailsSent} emails, ${emailsNotSent} not sent`
+    `Weekly report completed in ${duration}ms — sent ${emailsSent} emails, ${emailsNotSent} not sent, ${emailsFailed} failed`
   );
 
   return NextResponse.json({
@@ -223,6 +226,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
     duration,
     emailsSent,
     emailsNotSent,
+    emailsFailed,
     totalProducts,
     totalStock,
     lowStockCount: lowStockItems.length,

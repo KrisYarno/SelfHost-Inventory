@@ -103,6 +103,12 @@ describe.each(MODES)("emailDomainAllowed with %s", (_label, domains) => {
     ["user\u0000@advancedresearchpep.com"],
     ["user\u0085@advancedresearchpep.com"],
     ["user @advancedresearchpep.com"],
+    // N0 FR1 E5: the local part is printable ASCII only.
+    ["us\u200ber@advancedresearchpep.com"], // zero-width space
+    ["\u202euser@advancedresearchpep.com"], // right-to-left override
+    ["us\uff20er@advancedresearchpep.com"], // fullwidth commercial at
+    ["jos\u00e9@advancedresearchpep.com"], // a non-ASCII letter
+    ["\u212aris@advancedresearchpep.com"], // Kelvin-sign lookalike
   ])("refuses %j", (email) => {
     expect(emailDomainAllowed(email)).toBe(false);
   });
@@ -110,6 +116,12 @@ describe.each(MODES)("emailDomainAllowed with %s", (_label, domains) => {
   it("allows a normal address (surrounding whitespace trimmed, domain case-insensitive)", () => {
     expect(emailDomainAllowed("user@advancedresearchpep.com")).toBe(true);
     expect(emailDomainAllowed("  User@AdvancedResearchPep.COM  ")).toBe(true);
+  });
+
+  it("allows every printable-ASCII local part shape real addresses use", () => {
+    for (const local of ["first.last", "first+tag", "o'brien", "a_b-c", "x!#$%&*/=?^`{|}~"]) {
+      expect(emailDomainAllowed(`${local}@advancedresearchpep.com`)).toBe(true);
+    }
   });
 });
 

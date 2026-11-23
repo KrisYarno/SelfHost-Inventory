@@ -168,15 +168,26 @@ describe("C3c / FV-7: the weekly report counts only mail actually sent", () => {
     expect(res.status).toBe(200);
     expect(body.emailsSent).toBe(1);
     expect(body.emailsNotSent).toBe(2);
+    expect(body.emailsFailed).toBe(1); // N0 FR1 E8
 
     const printed = [...logSpy.mock.calls, ...errorSpy.mock.calls]
       .flat()
       .map((a) => (a instanceof Error ? a.message : String(a)))
       .join(" ");
-    expect(printed).toContain("sent 1 emails, 2 not sent");
+    expect(printed).toContain("sent 1 emails, 2 not sent, 1 failed"); // FR1 E8 adds the failed count
     // FV-7: the provider-throw log line is address-free.
     expect(printed).not.toMatch(/@example\.com/);
     expect(errorSpy).toHaveBeenCalledWith("Failed to send a weekly report:", expect.any(Error));
+  });
+
+  it("FR1 E8: an all-throw run => emailsFailed equals the recipient count; nothing sent or not-sent", async () => {
+    (emailService.sendEmail as jest.Mock).mockRejectedValue(new Error("provider 500"));
+    const body = await (await weeklyReportGET(cronReq())).json();
+    expect(body.emailsFailed).toBe(4);
+    expect(body.emailsSent).toBe(0);
+    expect(body.emailsNotSent).toBe(0);
+    const printed = logSpy.mock.calls.flat().map(String).join(" ");
+    expect(printed).toContain("sent 0 emails, 0 not sent, 4 failed");
   });
 
   it("a fully suppressed run reports 0 sent, never the recipient count", async () => {

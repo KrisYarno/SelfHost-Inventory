@@ -182,6 +182,35 @@ describe("filterRecipients — per mode, case-insensitive", () => {
     expect(filterRecipients("other@example.com", posture)).toEqual([]);
   });
 
+  // N0 FR1 E11: matching is ASCII-only — Unicode case folding maps the Kelvin sign
+  // (U+212A) onto "k", so toLowerCase() would let a lookalike through.
+  it("a Kelvin-sign lookalike address does NOT match an ASCII allowlist entry", () => {
+    const { emailDeliveryPosture, filterRecipients } = freshModule();
+    const posture = emailDeliveryPosture({ EMAIL_DELIVERY: "allowlist", EMAIL_ALLOWLIST: "kris@example.com" });
+    expect(filterRecipients(["\u212Aris@example.com"], posture)).toEqual([]);
+    expect(filterRecipients(["KRIS@example.com"], posture)).toEqual(["KRIS@example.com"]);
+  });
+
+  it("a lookalike in the ALLOWLIST does not admit the ASCII address either", () => {
+    const { emailDeliveryPosture, filterRecipients } = freshModule();
+    const posture = emailDeliveryPosture({
+      EMAIL_DELIVERY: "allowlist",
+      EMAIL_ALLOWLIST: "\u212Aris@example.com",
+    });
+    expect(filterRecipients(["kris@example.com"], posture)).toEqual([]);
+  });
+
+  it("an address with ANY non-ASCII character never matches, even an identical entry", () => {
+    const { emailDeliveryPosture, filterRecipients } = freshModule();
+    const posture = emailDeliveryPosture({
+      EMAIL_DELIVERY: "allowlist",
+      EMAIL_ALLOWLIST: "jos\u00e9@example.com,kris@example.com",
+    });
+    expect(filterRecipients(["jos\u00e9@example.com", "kris@example.com"], posture)).toEqual([
+      "kris@example.com",
+    ]);
+  });
+
   it("off => none", () => {
     const { emailDeliveryPosture, filterRecipients } = freshModule();
     expect(filterRecipients(to, emailDeliveryPosture({ EMAIL_DELIVERY: "off" }))).toEqual([]);

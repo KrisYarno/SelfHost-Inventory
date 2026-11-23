@@ -106,14 +106,18 @@ export interface ProductAnalyticsResult {
   salesByDay: SalesByDay | null;
 }
 
-// N0 (C7): a failed per-product read carries its HTTP status, so the page can tell
-// "this product does not exist" (404) from "could not load" (anything else).
+// N0 (C7, FR1 E4): a failed per-product read carries its HTTP status AND the
+// response body's `error` string, so the page can tell "this product does not
+// exist" (a 404 whose error is "Product not found") from every other failure — a
+// company-scope 404 ("Resource not found") included.
 export class ProductAnalyticsError extends Error {
   readonly status: number;
-  constructor(status: number) {
+  readonly bodyError: string | null;
+  constructor(status: number, bodyError: string | null) {
     super("Failed to load analytics");
     this.name = "ProductAnalyticsError";
     this.status = status;
+    this.bodyError = bodyError;
   }
 }
 
@@ -154,7 +158,13 @@ export function useProductAnalytics(id: string | undefined, scope: ProductAnalyt
         fetch(`/api/analytics/sales?${salesQp.toString()}`, { signal }).catch(() => null),
       ]);
 
-      if (!productRes.ok) throw new ProductAnalyticsError(productRes.status);
+      if (!productRes.ok) {
+        const body = (await productRes.json().catch(() => null)) as { error?: unknown } | null;
+        throw new ProductAnalyticsError(
+          productRes.status,
+          typeof body?.error === "string" ? body.error : null
+        );
+      }
       const product = (await productRes.json()) as ProductAnalytics;
 
       const salesByDay =

@@ -60,3 +60,34 @@ test.each([
   expect(await res.json()).toMatchObject({ error: "productId is required", code: "VALIDATION_ERROR" });
   expect(m.productStockSnapshot.findMany).not.toHaveBeenCalled();
 });
+
+// N0 FR1 E6: an optional locationId follows the same rule when present.
+test.each([
+  ["locationId=abc", "abc"],
+  ["locationId=0", "0"],
+  ["locationId=-2", "-2"],
+  ["locationId=2x", "2x"],
+  ["locationId=02", "02"],
+  ["locationId empty", ""],
+  ["locationId past Int", "2147483648"],
+])("%s => 400 Invalid locationId, no snapshot read", async (_label, raw) => {
+  (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 1, isApproved: true } });
+  const res = await GET(
+    new NextRequest(`http://x/api/analytics/stock-trend?productId=42&locationId=${encodeURIComponent(raw)}`)
+  );
+  expect(res.status).toBe(400);
+  expect(await res.json()).toMatchObject({ error: "Invalid locationId", code: "VALIDATION_ERROR" });
+  expect(m.productStockSnapshot.findMany).not.toHaveBeenCalled();
+});
+
+test("a valid locationId reaches the read as a number; absent stays absent", async () => {
+  (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 1, isApproved: true } });
+  m.productStockSnapshot.findMany.mockResolvedValue([]);
+  const res = await GET(new NextRequest("http://x/api/analytics/stock-trend?productId=42&locationId=7"));
+  expect(res.status).toBe(200);
+  expect(m.productStockSnapshot.findMany.mock.calls[0][0].where).toMatchObject({ productId: 42, locationId: 7 });
+
+  m.productStockSnapshot.findMany.mockClear();
+  await GET(new NextRequest("http://x/api/analytics/stock-trend?productId=42"));
+  expect(m.productStockSnapshot.findMany.mock.calls[0][0].where).not.toHaveProperty("locationId");
+});

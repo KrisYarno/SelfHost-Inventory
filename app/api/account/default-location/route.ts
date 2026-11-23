@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, apiHandler, requireCSRF } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { recordChange, diff } from "@/lib/change-tracking";
 import { UpdateDefaultLocationSchema } from "@/lib/validation/account";
@@ -7,7 +7,7 @@ import { UpdateDefaultLocationSchema } from "@/lib/validation/account";
 export const dynamic = "force-dynamic";
 
 export const PATCH = apiHandler(async (request: NextRequest) => {
-  const { user } = await requireAuth();
+  const { user } = await requireApproved();
 
   await requireCSRF(request);
 

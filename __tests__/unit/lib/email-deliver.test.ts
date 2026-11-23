@@ -238,3 +238,139 @@ describe("FV-8: every sender is gated by the switch", () => {
     expect(printed).not.toContain("private.person@example.com");
   });
 });
+
+// ---------------------------------------------------------------------------
+// N0 FR1 E2: a send failure never logs the error object. A network-level failure
+// rejects with a raw HTTP-client error whose config carries the Authorization
+// header (the API key) and the request body (every recipient).
+// ---------------------------------------------------------------------------
+
+function everyLoggedArgument(): string {
+  const inspect = jest.requireActual("node:util").inspect as typeof import("node:util").inspect;
+  return [...errorSpy.mock.calls, ...warnSpy.mock.calls, ...logSpy.mock.calls]
+    .flat()
+    .map((a) => (typeof a === "string" ? a : inspect(a, { depth: null, showHidden: true })))
+    .join("\n");
+}
+
+const LEAK_TO = "leak.person@example.com";
+
+function rawClientError() {
+  return Object.assign(new Error("connect ECONNRESET 104.18.0.1:443"), {
+    code: "ECONNRESET",
+    config: {
+      headers: { Authorization: "Bearer SG.secret-key-value" },
+      data: JSON.stringify({ personalizations: [{ to: [{ email: LEAK_TO }] }] }),
+    },
+    request: { _header: "POST /v3/mail/send\r\nAuthorization: Bearer SG.secret-key-value" },
+  });
+}
+
+describe("E2: send-failure logs carry no secret and no address", () => {
+  const RUNS: Array<[string, (svc: EmailService) => Promise<unknown>, Record<string, string>]> = [
+    ["sendEmail", (svc) => svc.sendEmail({ to: LEAK_TO, subject: "S", text: "T" }).catch(() => undefined), {}],
+    ["sendLowStockDigest (inline)", (svc) => svc.sendLowStockDigest(LEAK_TO, LOW_STOCK).catch(() => undefined), {}],
+    [
+      "sendLowStockDigest (template)",
+      (svc) => svc.sendLowStockDigest(LEAK_TO, LOW_STOCK).catch(() => undefined),
+      { TEMPLATE_ID: "d-template" },
+    ],
+    ["sendMinimumsDigest", (svc) => svc.sendMinimumsDigest(LEAK_TO, MINIMUMS).catch(() => undefined), {}],
+    ["sendApprovalReminderEmail", (svc) => svc.sendApprovalReminderEmail([LEAK_TO], { email: LEAK_TO }), {}],
+  ];
+
+  it.each(RUNS)("%s: neither the Authorization value nor the address appears in any log argument", async (_n, run, extra) => {
+    setEnv({ SENDGRID_API_KEY: "SG.test", EMAIL_DELIVERY: "on", ...extra });
+    send.mockRejectedValue(rawClientError());
+    await run(new EmailService());
+
+    expect(errorSpy).toHaveBeenCalled();
+    const printed = everyLoggedArgument();
+    expect(printed).not.toContain("SG.secret");
+    expect(printed).not.toContain("Bearer");
+    expect(printed).not.toContain(LEAK_TO);
+    // What IS logged: the string code and the message.
+    expect(printed).toContain("ECONNRESET");
+    // NEVER the error object — not even a sanitized wrapper: every send-failure log
+    // argument is the label string or a { code, message, statusCode } summary.
+    for (const arg of [...errorSpy.mock.calls, ...warnSpy.mock.calls].flat()) {
+      if (typeof arg === "string") continue;
+      expect(arg).not.toBeInstanceOf(Error);
+      expect(Object.getPrototypeOf(arg)).toBe(Object.prototype);
+      for (const key of Object.keys(arg as object)) {
+        expect(["code", "message", "statusCode"]).toContain(key);
+      }
+    }
+  });
+
+  // FR1 E2 ruling: SendGrid's ResponseError carries the HTTP status in a NUMERIC
+  // `code`, and its `response` is { headers, body } with no statusCode.
+  it("a SendGrid ResponseError logs { code: 401, message } and none of its headers or body", async () => {
+    setEnv({ SENDGRID_API_KEY: "SG.test", EMAIL_DELIVERY: "on" });
+    send.mockRejectedValue(
+      Object.assign(new Error("Unauthorized"), {
+        code: 401,
+        response: {
+          headers: { "x-message-id": "hdr-marker-123", authorization: "Bearer SG.secret-key-value" },
+          body: { errors: [{ message: `bad ${LEAK_TO}`, field: "personalizations.0.to" }] },
+        },
+      })
+    );
+    await new EmailService().sendEmail({ to: LEAK_TO, subject: "S" }).catch(() => undefined);
+    expect(errorSpy).toHaveBeenCalledWith("Error sending email:", { code: 401, message: "Unauthorized" });
+    const printed = everyLoggedArgument();
+    expect(printed).not.toContain(LEAK_TO);
+    expect(printed).not.toContain("hdr-marker-123");
+    expect(printed).not.toContain("SG.secret");
+    expect(printed).not.toContain("personalizations");
+  });
+
+  it("a response carrying statusCode also logs it; a non-finite or object code is never logged", async () => {
+    setEnv({ SENDGRID_API_KEY: "SG.test", EMAIL_DELIVERY: "on" });
+    send.mockRejectedValueOnce(
+      Object.assign(new Error("Bad Request"), { code: 400, response: { statusCode: 400, body: { x: LEAK_TO } } })
+    );
+    await new EmailService().sendEmail({ to: LEAK_TO, subject: "S" }).catch(() => undefined);
+    expect(errorSpy).toHaveBeenLastCalledWith("Error sending email:", {
+      code: 400,
+      message: "Bad Request",
+      statusCode: 400,
+    });
+
+    for (const code of [Number.NaN, Number.POSITIVE_INFINITY, { status: LEAK_TO }]) {
+      send.mockRejectedValueOnce(Object.assign(new Error("odd"), { code }));
+      await new EmailService().sendEmail({ to: LEAK_TO, subject: "S" }).catch(() => undefined);
+      expect(errorSpy).toHaveBeenLastCalledWith("Error sending email:", { message: "odd" });
+    }
+    expect(everyLoggedArgument()).not.toContain(LEAK_TO);
+  });
+
+  it("the logged message is cut at 200 characters", async () => {
+    setEnv({ SENDGRID_API_KEY: "SG.test", EMAIL_DELIVERY: "on" });
+    send.mockRejectedValue(Object.assign(new Error("x".repeat(500)), { code: "E_LONG" }));
+    await new EmailService().sendEmail({ to: LEAK_TO, subject: "S" }).catch(() => undefined);
+    expect(errorSpy).toHaveBeenCalledWith("Error sending email:", { code: "E_LONG", message: "x".repeat(200) });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N0 FR1 E10: the template path claims a send ONLY when one happened.
+// ---------------------------------------------------------------------------
+describe("E10: no 'sending' claim when nothing is sent", () => {
+  it("under off: no 'Sending' and no 'email sent' log line", async () => {
+    setEnv({ SENDGRID_API_KEY: "SG.test", EMAIL_DELIVERY: "off", TEMPLATE_ID: "d-template" });
+    await new EmailService().sendLowStockDigest(LEAK_TO, LOW_STOCK);
+    const printed = everyLoggedArgument();
+    expect(printed).not.toMatch(/sending/i);
+    expect(printed).not.toContain("email sent");
+  });
+
+  it("when sent: exactly 'email sent (template)', with no address", async () => {
+    setEnv({ SENDGRID_API_KEY: "SG.test", EMAIL_DELIVERY: "on", TEMPLATE_ID: "d-template" });
+    await new EmailService().sendLowStockDigest(LEAK_TO, LOW_STOCK);
+    expect(logSpy).toHaveBeenCalledWith("email sent (template)");
+    const printed = everyLoggedArgument();
+    expect(printed).not.toMatch(/sending/i);
+    expect(printed).not.toContain(LEAK_TO);
+  });
+});

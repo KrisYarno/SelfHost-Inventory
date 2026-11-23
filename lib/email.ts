@@ -90,6 +90,34 @@ export async function deliver(msg: DeliveryMessage): Promise<DeliveryResult> {
   return { sent: true, recipients: recipients.length };
 }
 
+/**
+ * N0 FR1 E2: what a send failure may log — NEVER the error object. On a network
+ * failure the provider client rejects with a raw HTTP-client error whose config
+ * carries the Authorization header (the API key) and the request body (every
+ * recipient address), and Node's inspect would print both. So: the code (a string,
+ * or a finite number — SendGrid's ResponseError carries the HTTP status there), the
+ * message (at most 200 characters) and a response status — never the error object,
+ * its response, headers or body.
+ */
+function sendFailureSummary(
+  error: unknown
+): { code?: string | number; message?: string; statusCode?: number } {
+  const failure = (error ?? {}) as { code?: unknown; message?: unknown; response?: unknown };
+  const summary: { code?: string | number; message?: string; statusCode?: number } = {};
+  if (
+    typeof failure.code === 'string' ||
+    (typeof failure.code === 'number' && Number.isFinite(failure.code))
+  ) {
+    summary.code = failure.code;
+  }
+  if (typeof failure.message === 'string') summary.message = failure.message.slice(0, 200);
+  const response = failure.response as { statusCode?: unknown } | null | undefined;
+  if (response && typeof response === 'object' && typeof response.statusCode === 'number') {
+    summary.statusCode = response.statusCode;
+  }
+  return summary;
+}
+
 const HTML_ESCAPES: Record<string, string> = {
   '&': '&amp;',
   '<': '&lt;',
@@ -167,7 +195,7 @@ export class EmailService {
         html: options.html,
       });
     } catch (error) {
-      console.error('Error sending email:', error);
+      console.error('Error sending email:', sendFailureSummary(error));
       throw new Error('Failed to send email');
     }
   }
@@ -210,7 +238,7 @@ export class EmailService {
       console.warn(`Approval reminder not sent (${result.reason})`);
       return { attempted: false, sent: false };
     } catch (error) {
-      console.error('Failed to send approval reminder email:', error);
+      console.error('Failed to send approval reminder email:', sendFailureSummary(error));
       return { attempted: true, sent: false };
     }
   }
@@ -262,10 +290,12 @@ export class EmailService {
           },
         };
         
-        console.log('Sending email with template:', this.templateId);
         console.log('Subject:', 'Low Stock Alert');
         
-        return await deliver(msg);
+        const result = await deliver(msg);
+        // N0 FR1 E10: no "sending" claim when nothing is sent — and no address.
+        if (result.sent === true) console.log('email sent (template)');
+        return result;
       } else {
         // Fallback to inline HTML
         const subject = 'Daily Low Stock Alert - Action Required';
@@ -280,13 +310,7 @@ export class EmailService {
         });
       }
     } catch (error) {
-      console.error('Error sending low stock digest:', error);
-      
-      // Log more detailed SendGrid error info
-      if (error instanceof Error && 'response' in error && error.response) {
-        const sgError = error as { response: { body: unknown } };
-        console.error('SendGrid error response:', sgError.response.body);
-      }
+      console.error('Error sending low stock digest:', sendFailureSummary(error));
       
       throw new Error(`Failed to send email: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }

@@ -114,16 +114,19 @@ export default function ProductAnalyticsPage() {
   const data = analyticsQuery.data?.product ?? null;
   const salesByDay = analyticsQuery.data?.salesByDay ?? null;
   const loading = analyticsQuery.isLoading;
-  // N0 (C7): a 404 is "this product does not exist" — its own state, never the
-  // generic load error, and never a header that names a product that is not there.
-  const notFound =
-    (analyticsQuery.error as ProductAnalyticsError | null | undefined)?.status === 404;
+  // N0 (C7, FR1 E4): ONLY a 404 whose error is "Product not found" means "this
+  // product does not exist". Every other failure — a company-scope 404 ("Resource
+  // not found") included — is the generic error, with the controls kept.
+  const failure = analyticsQuery.error as ProductAnalyticsError | null | undefined;
+  const notFound = failure?.status === 404 && failure?.bodyError === "Product not found";
   const error =
     analyticsQuery.isError && !notFound ? "Could not load analytics for this product." : null;
 
-  // Product identity for the header (lazy — falls back to the id while loading).
+  // Product identity for the header. Until it has loaded (and in the error state)
+  // the header names no product and prints no stock figure (N0 FR1 E4): never
+  // `Product #id`, never a made-up "0 in stock".
   const identity = data?.product ?? null;
-  const headerName = identity?.name ?? identity?.baseName ?? (id ? `Product #${id}` : "Product");
+  const headerName = identity?.name ?? identity?.baseName ?? "Product";
   const deletedAt = identity?.deletedAt ?? null;
 
   // History timeline — lazy: only fetched while the History tab is active (and never
@@ -247,7 +250,10 @@ export default function ProductAnalyticsPage() {
                 </span>
               </>
             ) : null}
-            <span className="tabular-nums">{formatUnits(identity?.currentStock)}</span> in stock
+            <span className="tabular-nums">
+              {identity ? formatUnits(identity.currentStock) : "—"}
+            </span>{" "}
+            in stock
           </p>
         </div>
 

@@ -398,11 +398,84 @@ it("other failures (e.g. 500) keep 'Could not load analytics for this product.'"
   expect(screen.queryByText("This product does not exist.")).not.toBeInTheDocument();
 });
 
+// ---------------------------------------------------------------------------
+// N0 FR1 E4 (GR-4 = OCR-4, GR-5)
+// ---------------------------------------------------------------------------
+
+it("a company-scope 404 is NOT 'does not exist': the generic error, with every control kept", async () => {
+  installFetch({
+    product: { error: "Resource not found", code: "NOT_FOUND" },
+    productOk: false,
+    productStatus: 404,
+  });
+
+  renderPage();
+
+  expect(
+    await screen.findByText("Could not load analytics for this product."),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("This product does not exist.")).not.toBeInTheDocument();
+  // The header controls are kept — the Company select included — so the user can
+  // switch back to a company they belong to.
+  expect(screen.getByText("All my companies")).toBeInTheDocument();
+  expect(document.querySelectorAll('input[type="date"]').length).toBe(2);
+  expect(screen.getByRole("tab", { name: "Performance" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "History" })).toBeInTheDocument();
+});
+
+it("a 404 with no body error is the generic error too (only 'Product not found' means gone)", async () => {
+  installFetch({ product: {}, productOk: false, productStatus: 404 });
+  renderPage();
+  expect(
+    await screen.findByText("Could not load analytics for this product."),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("This product does not exist.")).not.toBeInTheDocument();
+});
+
+function identityLine(): string {
+  const h1 = screen.getByRole("heading", { level: 1 });
+  return (h1.nextElementSibling as HTMLElement | null)?.textContent ?? "";
+}
+
+it("while loading, the header names no product and prints no stock figure", async () => {
+  global.fetch = jest.fn(() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+  renderPage();
+
+  expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/^Product$/);
+  expect(screen.queryByText(/Product #42/)).not.toBeInTheDocument();
+  expect(identityLine()).toBe("— in stock");
+  expect(identityLine()).not.toMatch(/\d/);
+});
+
+it("in the error state, the header still prints no '0 in stock' and no 'Product #id'", async () => {
+  installFetch({ product: {}, productOk: false, productStatus: 500 });
+  renderPage();
+  await screen.findByText("Could not load analytics for this product.");
+  expect(screen.queryByText(/Product #42/)).not.toBeInTheDocument();
+  expect(identityLine()).toBe("— in stock");
+});
+
+it("once identity has loaded, the real stock figure is shown", async () => {
+  installFetch({
+    product: {
+      productId: 42,
+      product: { name: "Live", baseName: "Live", variant: null, currentStock: 0, deletedAt: null },
+      stock: { series: [{ dayKey: "2026-06-01", locationId: 3, quantity: 0 }], mode: "m" },
+      sales: { series: [], mode: "m", note: NOTE },
+    },
+  });
+  renderPage();
+  await screen.findByRole("heading", { level: 1, name: "Live" });
+  // A KNOWN zero is a real figure once identity has loaded.
+  expect(identityLine()).toBe("0 in stock");
+});
+
 it("the hook does NOT retry a 404, and keeps the client's retry default for other failures", async () => {
   const retrying = () =>
     new QueryClient({ defaultOptions: { queries: { retry: 2, retryDelay: 0 } } });
 
-  installFetch({ product: {}, productOk: false, productStatus: 404 });
+  // FR1 E4: the not-found state needs the route's "Product not found" body.
+  installFetch({ product: { error: "Product not found" }, productOk: false, productStatus: 404 });
   renderPage(retrying());
   await screen.findByText("This product does not exist.");
   expect(productFetchCount()).toBe(1);

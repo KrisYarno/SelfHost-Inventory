@@ -83,3 +83,19 @@ describe("D2: compose email delivery posture", () => {
     }
   );
 });
+
+// N0 FR1 E9 / E12: the launch gate's app can never send, and the env template says
+// where `on` may live.
+describe("FR1: no stack built from this repo can send by accident", () => {
+  it("launch-gate/spawn.ts pins EMAIL_DELIVERY off AND an empty provider key for the app under test", () => {
+    const spawn = lines("launch-gate/spawn.ts");
+    expect(keyLines(spawn, "EMAIL_DELIVERY")).toEqual(['    EMAIL_DELIVERY: "off",']);
+    expect(keyLines(spawn, "SENDGRID_API_KEY")).toEqual(['    SENDGRID_API_KEY: "",']);
+  });
+
+  it(".env.example says never to put EMAIL_DELIVERY=on in a repo-root .env", () => {
+    expect(lines(".env.example")).toContain(
+      "# NEVER set EMAIL_DELIVERY=on in a repo-root .env — only the production server's env read by compose.stack.yml."
+    );
+  });
+});

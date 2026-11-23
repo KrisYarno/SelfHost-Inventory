@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, apiHandler, requireCSRF } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { verifyPassword, hashPassword } from "@/lib/auth-helpers";
 import prisma from "@/lib/prisma";
 import { recordChange } from "@/lib/change-tracking";
@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
  * Used by users who signed up via Google OAuth and want to add password authentication
  */
 export const POST = apiHandler(async (request: NextRequest) => {
-  const { user: sessionUser } = await requireAuth();
+  const { user: sessionUser } = await requireApproved();
 
   await requireCSRF(request);
 
@@ -66,7 +66,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
  * PATCH - Change existing password (requires old password verification)
  */
 export const PATCH = apiHandler(async (request: NextRequest) => {
-  const { user: sessionUser } = await requireAuth();
+  const { user: sessionUser } = await requireApproved();
 
   await requireCSRF(request);
 

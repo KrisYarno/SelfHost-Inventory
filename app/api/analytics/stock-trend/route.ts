@@ -10,7 +10,8 @@ export const dynamic = "force-dynamic";
 //
 // N0 (C7, RB-8 narrowed): `productId` is REQUIRED and must be a positive Int
 // (/^[1-9]\d{0,9}$/ and <= 2147483647) — without it this read returned the WHOLE
-// snapshot table. No UI calls this route.
+// snapshot table. No UI calls this route. `locationId` is optional, but when present
+// it follows the same rule (N0 FR1 E6), else 400 — never a NaN reaching the query.
 const PRODUCT_ID_RE = /^[1-9]\d{0,9}$/;
 const MAX_INT = 2147483647;
 
@@ -22,7 +23,14 @@ export const GET = apiHandler(async (request: NextRequest) => {
     throw new AppError("productId is required", "VALIDATION_ERROR", 400);
   }
   const productId = Number(rawProductId);
-  const locationId = sp.get("locationId") ? parseInt(sp.get("locationId")!, 10) : undefined;
+  const rawLocationId = sp.get("locationId");
+  if (
+    rawLocationId !== null &&
+    (!PRODUCT_ID_RE.test(rawLocationId) || Number(rawLocationId) > MAX_INT)
+  ) {
+    throw new AppError("Invalid locationId", "VALIDATION_ERROR", 400);
+  }
+  const locationId = rawLocationId === null ? undefined : Number(rawLocationId);
   const from = sp.get("from") ?? undefined;
   const to = sp.get("to") ?? undefined;
 

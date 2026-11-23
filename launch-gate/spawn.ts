@@ -362,6 +362,9 @@ function appEnv(databaseUrl: string): NodeJS.ProcessEnv {
     // N0 (C2(i)): the app under test can never send real email, whatever the repo's
     // .env holds (@next/env never overwrites a key already present).
     EMAIL_DELIVERY: "off",
+    // N0 FR1 E9: and it holds no provider key at all, so even a switch slip could
+    // not reach the provider ("" stops @next/env layering the repo's key on top).
+    SENDGRID_API_KEY: "",
   };
 }
 
