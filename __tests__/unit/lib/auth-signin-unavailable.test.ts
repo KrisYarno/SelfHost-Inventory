@@ -32,6 +32,7 @@ const provider: any = (authOptions.providers as any[]).find(
 );
 const authorize: (creds: any, req: any) => Promise<any> = provider.options?.authorize ?? provider.authorize;
 const signIn = authOptions.callbacks!.signIn! as unknown as (args: Record<string, unknown>) => Promise<unknown>;
+const jwt = authOptions.callbacks!.jwt! as unknown as (args: Record<string, unknown>) => Promise<unknown>;
 
 const DB_HOST = "db.internal.example:3306";
 const DB_USER = "inventory_app_user";
@@ -148,6 +149,44 @@ describe("G2: the credentials signIn callback never throws Prisma text", () => {
     expect(await signIn({ user: { email: EMAIL }, account: { provider: "credentials" } })).toBe(
       "/auth/pending-approval"
     );
+  });
+});
+
+// N0 FR4 H2: the jwt callback's SIGN-IN reads (credentials, Google) go through the
+// same lookup — the fixed ServiceUnavailable, a code-only log, no Prisma text.
+describe("H2: the jwt callback's sign-in reads never throw Prisma text", () => {
+  it("credentials sign-in: a real-shaped init error => exactly ServiceUnavailable", async () => {
+    db.user.findUnique.mockRejectedValue(initError());
+    expectServiceUnavailable(
+      await thrownBy(() => jwt({ token: {}, user: { id: 1, email: EMAIL }, account: { provider: "credentials" } }))
+    );
+  });
+
+  it("Google sign-in: a real-shaped init error => exactly ServiceUnavailable", async () => {
+    db.user.findUnique.mockRejectedValue(initError());
+    expectServiceUnavailable(
+      await thrownBy(() =>
+        jwt({
+          token: {},
+          user: { id: 1, email: EMAIL },
+          account: { provider: "google" },
+          profile: { email: EMAIL },
+        })
+      )
+    );
+  });
+
+  it("the healthy sign-in reads are unchanged (same query, the token minted from the row)", async () => {
+    db.user.findUnique.mockResolvedValue({
+      id: 7, email: EMAIL, username: "m", isAdmin: false, isApproved: true, defaultLocationId: null,
+    });
+    const token = (await jwt({
+      token: {},
+      user: { id: 7, email: "Member@AdvancedResearchPep.com" },
+      account: { provider: "credentials" },
+    })) as Record<string, unknown>;
+    expect(db.user.findUnique).toHaveBeenCalledWith({ where: { email: EMAIL } });
+    expect(token).toMatchObject({ id: 7, email: EMAIL, isApproved: true });
   });
 });
 

@@ -143,6 +143,39 @@ describe("G1: everything else is delegated to NextAuth unchanged", () => {
     expect(findUnique).toHaveBeenCalledTimes(1); // D0's re-read ran: NextAuth handled it
   });
 
+  // N0 FR4 H3: a credentials sign-in POST is NextAuth's, end to end — a refused
+  // sign-in still runs authorize() and answers NextAuth's CredentialsSignin, never
+  // the _log 204.
+  it("POST callback/credentials (a refused sign-in) reaches NextAuth and authorize(), not the 204", async () => {
+    const csrfRes = await route.GET(new NextRequest("http://localhost/api/auth/csrf"), {
+      params: { nextauth: ["csrf"] },
+    });
+    const { csrfToken } = await csrfRes.json();
+    const csrfCookie = /next-auth\.csrf-token=([^;]+)/.exec(csrfRes.headers.get("set-cookie") ?? "")![1];
+    requestCookies = [{ name: "next-auth.csrf-token", value: decodeURIComponent(csrfCookie) }];
+    findUnique.mockResolvedValue(null); // no such account
+
+    const res = await route.POST(
+      new NextRequest("http://localhost/api/auth/callback/credentials", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", host: "localhost", "x-forwarded-for": "198.18.0.7" },
+        body: new URLSearchParams({
+          csrfToken,
+          email: "nobody@advancedresearchpep.com",
+          password: "wrong-password",
+          json: "true",
+        }).toString(),
+      }),
+      { params: { nextauth: ["callback", "credentials"] } }
+    );
+
+    expect(res.status).not.toBe(204);
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(String(body.url)).toContain("error=CredentialsSignin");
+    expect(findUnique).toHaveBeenCalledWith({ where: { email: "nobody@advancedresearchpep.com" } });
+  });
+
   it("a session POST without CSRF is NextAuth's own 400 (not the 204)", async () => {
     const res = await post("session", {});
     expect(res.status).toBe(400);

@@ -327,9 +327,14 @@ export const authOptions: NextAuthOptions = {
     async jwt({ token, user, account, profile }) {
       // Handle credentials provider sign-in
       if (account?.provider === 'credentials' && user?.email) {
-        const dbUser = await prisma.user.findUnique({
-          where: { email: user.email.toLowerCase() },
-        });
+        // N0 FR4 H2: like every sign-in read, a DB failure here is the fixed
+        // ServiceUnavailable with a code-only log — never raw Prisma text.
+        const email = user.email.toLowerCase();
+        const dbUser = await signInLookup(() =>
+          prisma.user.findUnique({
+            where: { email },
+          })
+        );
 
         if (dbUser) {
           token.id = dbUser.id;
@@ -347,10 +352,14 @@ export const authOptions: NextAuthOptions = {
           return token;
         }
 
-        // For Google sign-in, fetch the user from our database
-        const dbUser = await prisma.user.findUnique({
-          where: { email: profile.email.toLowerCase() },
-        });
+        // For Google sign-in, fetch the user from our database (N0 FR4 H2: through
+        // signInLookup, like every sign-in read).
+        const email = profile.email.toLowerCase();
+        const dbUser = await signInLookup(() =>
+          prisma.user.findUnique({
+            where: { email },
+          })
+        );
 
         if (dbUser) {
           token.id = dbUser.id;

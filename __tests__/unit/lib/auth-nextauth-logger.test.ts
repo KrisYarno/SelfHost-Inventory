@@ -202,6 +202,17 @@ describe("F3: the logger itself", () => {
     for (const call of errorSpy.mock.calls) expect(String(call[0])).not.toMatch(/[\r\n]/);
   });
 
+  // N0 FR4 H3: the numeric-code branch (SendGrid-style status codes and the like).
+  it("H3: a finite numeric code is printed; NaN / Infinity fall back to the name", () => {
+    error("SIGNIN_OAUTH_ERROR", Object.assign(new Error(`x ${DB_HOST}`), { code: 401 }));
+    expect(errorSpy).toHaveBeenLastCalledWith("[next-auth] SIGNIN_OAUTH_ERROR (401)");
+    for (const code of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      error("SIGNIN_OAUTH_ERROR", Object.assign(new Error(`y ${DB_HOST}`), { code, name: "HTTPError" }));
+      expect(errorSpy).toHaveBeenLastCalledWith("[next-auth] SIGNIN_OAUTH_ERROR (HTTPError)");
+    }
+    expect(printed()).not.toContain(DB_HOST);
+  });
+
   it("no code: the name; neither: the code alone", () => {
     error("SIGNIN_EMAIL_ERROR", Object.assign(new Error(`x ${DB_HOST}`), { name: "TypeError" }));
     expect(errorSpy).toHaveBeenLastCalledWith("[next-auth] SIGNIN_EMAIL_ERROR (TypeError)");
