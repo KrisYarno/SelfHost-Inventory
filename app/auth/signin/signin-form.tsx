@@ -1,12 +1,34 @@
 'use client';
 
-import { signIn } from 'next-auth/react';
-import { useState } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { signIn, useSession } from 'next-auth/react';
+import { useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
+
+// N0 FR3 G2: the text for a credentials sign-in error. next-auth puts a thrown
+// error's MESSAGE in `result.error`, so the raw value is NEVER rendered — only one
+// of these three fixed sentences.
+function credentialsErrorText(error: string): string {
+  if (error === 'CredentialsSignin') return 'Invalid email or password';
+  if (error === 'ServiceUnavailable') {
+    return 'Sign-in is unavailable right now. Please try again in a few minutes.';
+  }
+  return 'Sign-in failed. Please try again.';
+}
 
 export function SignInForm() {
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const { status } = useSession();
+  // N0 FR3 G5: the app layout sends a user here with `reauth=1` when its server
+  // session read failed. Once the client session is (again) authenticated, go back
+  // to the FIXED /workbench — never `callbackUrl`, which is attacker-controlled.
+  const reauth = searchParams.get('reauth') === '1';
+  useEffect(() => {
+    if (reauth && status === 'authenticated') {
+      router.replace('/workbench');
+    }
+  }, [reauth, status, router]);
   const callbackUrl = searchParams.get('callbackUrl') || '/workbench';
   const errorParam = searchParams.get('error');
   const [email, setEmail] = useState('');
@@ -29,12 +51,8 @@ export function SignInForm() {
       });
 
       if (result?.error) {
-        // Map common errors to user-friendly messages
-        if (result.error === 'CredentialsSignin') {
-          setError('Invalid email or password');
-        } else {
-          setError(result.error);
-        }
+        // Map to a fixed sentence — never the raw error (N0 FR3 G2).
+        setError(credentialsErrorText(result.error));
       } else if (result?.url) {
         window.location.href = result.url;
       }

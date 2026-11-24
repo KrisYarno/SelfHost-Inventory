@@ -34,6 +34,16 @@ function emptyEmailRunCounts(): EmailRunCounts {
   };
 }
 
+// N0 FR3 G6: a failure's code for a log line — Prisma's `code`, else its
+// `errorCode` (an initialization error), else the error's name. Never the message.
+function errorCodeOrName(error: unknown): string {
+  const failure = error as { code?: unknown; errorCode?: unknown; name?: unknown } | null | undefined;
+  if (typeof failure?.code === 'string') return failure.code;
+  if (typeof failure?.errorCode === 'string') return failure.errorCode;
+  if (typeof failure?.name === 'string') return failure.name;
+  return 'unknown';
+}
+
 // Fail-closed: anything other than exactly { sent: true } is "not sent".
 function countNotSent(counts: EmailRunCounts, result: DeliveryResult | undefined): void {
   counts.emailsNotSent++;
@@ -349,7 +359,11 @@ export class StockChecker {
 
         console.log(`Sent low stock notification (user ${user.id}) for ${productsToNotify.length} products`);
       } catch (error) {
-        console.error(`Failed to record low stock notification history (user ${user.id}):`, error);
+        // N0 FR3 G6: the context and the error's code or name — never the object
+        // (a Prisma message can name the database host or user).
+        console.error(
+          `Failed to record low stock notification history (user ${user.id}) (${errorCodeOrName(error)})`
+        );
       }
     }
 

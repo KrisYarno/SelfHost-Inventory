@@ -61,6 +61,36 @@ function isUserIdKey(value: unknown): value is number {
   );
 }
 
+// N0 FR3 G3: a Prisma error's code for a log line — `code` when it is a string (a
+// known request error), else `errorCode` when it is a string (an initialization
+// error carries it there, with no `code`). Never the message: a Prisma message can
+// name the database host or user.
+function prismaErrorCode(error: unknown): string | undefined {
+  const failure = error as { code?: unknown; errorCode?: unknown } | null | undefined;
+  if (typeof failure?.code === 'string') return failure.code;
+  if (typeof failure?.errorCode === 'string') return failure.errorCode;
+  return undefined;
+}
+
+// N0 FR3 G2: a sign-in database call that throws never reaches the sign-in form
+// as raw Prisma text (next-auth turns a thrown error's message into the result's
+// `error`). One address-free line, then the fixed `ServiceUnavailable`.
+async function signInLookup<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    console.error(`[auth] sign-in lookup failed (${prismaErrorCode(error) ?? 'unknown'})`);
+    throw new Error('ServiceUnavailable');
+  }
+}
+
+// N0 FR3 G1/G4: what next-auth's error logger may print. Each value is printed
+// only when it is a plain token; anything else (a newline, a forged string) is
+// `invalid` — or, for the optional parts, left out.
+const LOG_TOKEN = /^[A-Za-z0-9_.-]{1,64}$/;
+const PROVIDER_ID = /^[A-Za-z0-9_-]{1,32}$/;
+const OAUTH_ERROR = /^[a-z_]{1,40}$/;
+
 /**
  * Generate a username from Google profile name or email
  * Normalizes to lowercase alphanumeric with dots
@@ -131,9 +161,11 @@ export const authOptions: NextAuthOptions = {
         }
 
         // Find user
-        const user = await prisma.user.findUnique({
-          where: { email },
-        });
+        const user = await signInLookup(() =>
+          prisma.user.findUnique({
+            where: { email },
+          })
+        );
 
         if (!user) {
           return null;
@@ -162,19 +194,23 @@ export const authOptions: NextAuthOptions = {
           // Increment failed attempts, lock after 5
           const attempts = (user.failedLoginAttempts || 0) + 1;
           const lockout = attempts >= 5 ? { lockedUntil: new Date(Date.now() + 15 * 60 * 1000) } : {};
-          await prisma.user.update({
-            where: { id: user.id },
-            data: { failedLoginAttempts: attempts, ...lockout },
-          });
+          await signInLookup(() =>
+            prisma.user.update({
+              where: { id: user.id },
+              data: { failedLoginAttempts: attempts, ...lockout },
+            })
+          );
           return null;
         }
 
         // Reset failed attempts on successful login
         if (user.failedLoginAttempts > 0) {
-          await prisma.user.update({
-            where: { id: user.id },
-            data: { failedLoginAttempts: 0, lockedUntil: null },
-          });
+          await signInLookup(() =>
+            prisma.user.update({
+              where: { id: user.id },
+              data: { failedLoginAttempts: 0, lockedUntil: null },
+            })
+          );
         }
 
         // Return user object matching the User type in types/next-auth.d.ts
@@ -201,9 +237,11 @@ export const authOptions: NextAuthOptions = {
       // Handle credentials provider - user already validated in authorize()
       if (account?.provider === 'credentials') {
         // Fetch user to check approval status
-        const dbUser = await prisma.user.findUnique({
-          where: { email: user.email! },
-        });
+        const dbUser = await signInLookup(() =>
+          prisma.user.findUnique({
+            where: { email: user.email! },
+          })
+        );
 
         if (!dbUser) {
           return false;
@@ -278,7 +316,11 @@ export const authOptions: NextAuthOptions = {
 
         return '/auth/pending-approval';
       } catch (error) {
-        console.error('Error in signIn callback:', error);
+        // N0 FR3 G6: the context and the error's code or name — never the object.
+        const name = (error as { name?: unknown } | null)?.name;
+        console.error(
+          `Error in signIn callback (${prismaErrorCode(error) ?? (typeof name === 'string' ? name : 'unknown')})`
+        );
         return false;
       }
     },
@@ -353,10 +395,7 @@ export const authOptions: NextAuthOptions = {
             : null;
         } catch (error) {
           // ONE address-free line: the Prisma error code only, never the error.
-          const code = (error as { code?: unknown } | null)?.code;
-          console.error(
-            `[auth] jwt claims re-read failed (${typeof code === 'string' ? code : 'unknown'})`
-          );
+          console.error(`[auth] jwt claims re-read failed (${prismaErrorCode(error) ?? 'unknown'})`);
           throw error;
         }
         if (row && !row.deletedAt) {
@@ -391,22 +430,38 @@ export const authOptions: NextAuthOptions = {
   debug: process.env.NODE_ENV === 'development',
   // N0 FR2 F3: next-auth's default error logger prints the error's message, stack
   // and metadata object — and a Prisma message can name the database host or user.
-  // So: the code, plus the error's own code or name when present, nothing else.
-  // `warn` and `debug` keep next-auth's defaults.
+  // So: the code, plus the error's own code (Prisma's `code` or `errorCode`) or name,
+  // the provider id and an OAuth error token — each only as a plain token (N0 FR3
+  // G1/G3/G4). Never a message, an `error_description` or a URL. `warn` and `debug`
+  // keep next-auth's defaults. (Setting a logger switches on next-auth's
+  // unauthenticated `_log` action; the route file answers that with 204 — G1.)
   logger: {
     error(code, metadata) {
-      const source = metadata as { error?: unknown } | null | undefined;
-      const error = (source && typeof source === 'object' && 'error' in source && source.error
-        ? source.error
-        : source) as { code?: unknown; name?: unknown } | null | undefined;
+      const meta = (metadata ?? {}) as { error?: unknown; providerId?: unknown };
+      // The nested error — unless `.error` is a STRING: then the metadata IS the
+      // error (an OAuth OPError) and `.error` is its OAuth token (G4).
+      const error = (meta.error && typeof meta.error === 'object' ? meta.error : meta) as {
+        code?: unknown;
+        name?: unknown;
+        error?: unknown;
+      };
       const detail =
-        typeof error?.code === 'string' ||
-        (typeof error?.code === 'number' && Number.isFinite(error.code))
-          ? error.code
-          : typeof error?.name === 'string'
+        prismaErrorCode(error) ??
+        (typeof error.code === 'number' && Number.isFinite(error.code)
+          ? String(error.code)
+          : typeof error.name === 'string'
             ? error.name
-            : undefined;
-      console.error(`[next-auth] ${code}${detail !== undefined ? ` (${detail})` : ''}`);
+            : undefined);
+      const token = (value: string) => (LOG_TOKEN.test(value) ? value : 'invalid');
+      let line = `[next-auth] ${token(String(code))}`;
+      if (detail !== undefined) line += ` (${token(detail)})`;
+      if (typeof meta.providerId === 'string' && PROVIDER_ID.test(meta.providerId)) {
+        line += ` provider=${meta.providerId}`;
+      }
+      if (typeof error.error === 'string' && OAUTH_ERROR.test(error.error)) {
+        line += ` oauth=${error.error}`;
+      }
+      console.error(line);
     },
   },
 };

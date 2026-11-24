@@ -22,6 +22,7 @@ jest.mock("@/lib/prisma", () => ({
 
 import { getServerSession } from "next-auth/next";
 import { encode } from "next-auth/jwt";
+import { Prisma } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import { authOptions } from "@/lib/auth";
 
@@ -30,10 +31,13 @@ const TEST_SECRET = "n0-fr2-logger-test-secret-not-a-real-one";
 const DB_HOST = "db.internal.example:3306";
 const DB_USER = "inventory_app_user";
 
+// N0 FR3 G3: the REAL Prisma class — an initialization error carries its code in
+// `errorCode`, with NO `code` (the FR2 fixture had invented a `code`).
 function prismaShapedError() {
-  return Object.assign(
-    new Error(`Can't reach database server at \`${DB_HOST}\` as user \`${DB_USER}\``),
-    { name: "PrismaClientInitializationError", code: "P1001", clientVersion: "6.0.0" }
+  return new Prisma.PrismaClientInitializationError(
+    `Can't reach database server at \`${DB_HOST}\` as user \`${DB_USER}\``,
+    "6.0.0",
+    "P1001"
   );
 }
 
@@ -115,19 +119,87 @@ describe("F3: JWT_SESSION_ERROR through the real session route", () => {
 describe("F3: the logger itself", () => {
   const error = authOptions.logger!.error!;
 
-  it("an Error metadata: its code wins over its name", () => {
-    error("JWT_SESSION_ERROR", prismaShapedError());
+  it("G3: a REAL PrismaClientInitializationError logs its errorCode (it has no code)", () => {
+    const real = prismaShapedError();
+    expect((real as unknown as { code?: unknown }).code).toBeUndefined();
+    error("JWT_SESSION_ERROR", real);
     expect(errorSpy).toHaveBeenCalledWith("[next-auth] JWT_SESSION_ERROR (P1001)");
   });
 
-  it("a { error } metadata (OAuth-style): the nested error's code, never the sibling fields", () => {
+  it("G3: a known request error's string code wins over its errorCode and name", () => {
+    error(
+      "JWT_SESSION_ERROR",
+      new Prisma.PrismaClientKnownRequestError(`Unique constraint for ${DB_USER}`, {
+        code: "P2002",
+        clientVersion: "6.0.0",
+      })
+    );
+    expect(errorSpy).toHaveBeenCalledWith("[next-auth] JWT_SESSION_ERROR (P2002)");
+    expect(printed()).not.toContain(DB_USER);
+  });
+
+  // FR3 G4 CHANGED this pin: a valid providerId is now printed as provider=<id>.
+  it("a { error } metadata (OAuth-style): the nested error's code and the provider, never the sibling fields", () => {
     error("OAUTH_CALLBACK_ERROR", {
       error: Object.assign(new Error(`bad state for ${DB_USER}`), { code: "E_STATE" }),
       providerId: "google",
       message: `secret detail ${DB_HOST}`,
     });
-    expect(errorSpy).toHaveBeenCalledWith("[next-auth] OAUTH_CALLBACK_ERROR (E_STATE)");
+    expect(errorSpy).toHaveBeenCalledWith("[next-auth] OAUTH_CALLBACK_ERROR (E_STATE) provider=google");
     expect(printed()).not.toContain(DB_HOST);
+  });
+
+  // N0 FR3 G4: an OAuth OPError's `.error` is a STRING — the OAuth token, never "a
+  // nested error"; error_description, messages and URLs never print.
+  it("G4: an OPError-shaped metadata => (OPError) provider=google oauth=invalid_client, no description", () => {
+    error("OAUTH_CALLBACK_ERROR", {
+      name: "OPError",
+      error: "invalid_client",
+      error_description: "secret text",
+      error_uri: "https://accounts.example/secret",
+      message: "invalid_client (secret text)",
+      providerId: "google",
+    } as never);
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[next-auth] OAUTH_CALLBACK_ERROR (OPError) provider=google oauth=invalid_client"
+    );
+    const out = printed();
+    expect(out).not.toContain("secret text");
+    expect(out).not.toContain("https://");
+  });
+
+  it("G4: a nested OPError also yields its OAuth token", () => {
+    error("OAUTH_CALLBACK_ERROR", {
+      error: Object.assign(new Error("invalid_grant (secret text)"), {
+        name: "OPError",
+        error: "invalid_grant",
+        error_description: "secret text",
+      }),
+      providerId: "google",
+    });
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[next-auth] OAUTH_CALLBACK_ERROR (OPError) provider=google oauth=invalid_grant"
+    );
+    expect(printed()).not.toContain("secret text");
+  });
+
+  it("G4: a providerId or OAuth token that is not a plain token is left out", () => {
+    error("OAUTH_CALLBACK_ERROR", {
+      name: "OPError",
+      error: "Invalid Client: see https://x",
+      providerId: "goo gle\nFAKE",
+    } as never);
+    expect(errorSpy).toHaveBeenCalledWith("[next-auth] OAUTH_CALLBACK_ERROR (OPError)");
+  });
+
+  // N0 FR3 G1 (defence in depth): a forged code or detail is printed as `invalid`.
+  it("G1: a newline-bearing code or detail prints `invalid`, never a newline", () => {
+    error("JWT_SESSION_ERROR\n[next-auth] FORGED ADMIN LOGIN", Object.assign(new Error("x"), { code: "P1\nFORGED" }));
+    expect(errorSpy).toHaveBeenCalledWith("[next-auth] invalid (invalid)");
+    error("x".repeat(65), {} as never);
+    expect(errorSpy).toHaveBeenLastCalledWith("[next-auth] invalid");
+    expect(printed()).not.toContain("FORGED");
+    for (const call of errorSpy.mock.calls) expect(String(call[0])).not.toMatch(/[\r\n]/);
   });
 
   it("no code: the name; neither: the code alone", () => {

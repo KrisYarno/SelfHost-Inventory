@@ -194,6 +194,31 @@ describe("low-stock loop: history only for mail actually sent", () => {
     );
   });
 
+  // N0 FR3 G6: a failed history write logs its context and the code or name only.
+  it("a failed history write logs ONE line with the Prisma errorCode, never the error object", async () => {
+    const { Prisma } = jest.requireActual("@prisma/client") as typeof import("@prisma/client");
+    m.user.findMany.mockResolvedValue([USER_A]);
+    lowStockSend.mockResolvedValue(SENT);
+    m.notificationHistory.createMany.mockRejectedValue(
+      new Prisma.PrismaClientInitializationError("Can't reach database server at `db.internal.example:3306`", "6.0.0", "P1001")
+    );
+
+    const counts = await new StockChecker().sendLowStockNotifications(LOW);
+
+    expect(counts.emailsSent).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith("Failed to record low stock notification history (user 11) (P1001)");
+    for (const arg of errorSpy.mock.calls.flat()) expect(arg).not.toBeInstanceOf(Error);
+    expect(everythingLogged()).not.toContain("db.internal");
+  });
+
+  it("a failed history write with no code logs the error's name", async () => {
+    m.user.findMany.mockResolvedValue([USER_A]);
+    lowStockSend.mockResolvedValue(SENT);
+    m.notificationHistory.createMany.mockRejectedValue(new TypeError("bad db.internal.example"));
+    await new StockChecker().sendLowStockNotifications(LOW);
+    expect(errorSpy).toHaveBeenCalledWith("Failed to record low stock notification history (user 11) (TypeError)");
+  });
+
   it("no log line carries an address (sent, not sent, and failed paths)", async () => {
     m.user.findMany.mockResolvedValue([USER_A, USER_B, { ...USER_A, id: 13, email: "carol.private@example.com" }]);
     lowStockSend

@@ -132,6 +132,26 @@ describe("D0: claims come from the database on every non-sign-in run", () => {
     }
   });
 
+  // N0 FR3 G3: the REAL PrismaClientInitializationError has no `code` — its code is
+  // in `errorCode` — so the line must read that.
+  it("a REAL PrismaClientInitializationError logs its errorCode (P1001) — and still throws", async () => {
+    const { Prisma } = jest.requireActual("@prisma/client") as typeof import("@prisma/client");
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const real = new Prisma.PrismaClientInitializationError(
+        "Can't reach database server at `db.internal.example:3306`",
+        "6.0.0",
+        "P1001"
+      );
+      findUnique.mockRejectedValueOnce(real);
+      await expect(jwt({ token: memberToken() })).rejects.toBe(real);
+      expect(errorSpy).toHaveBeenCalledWith("[auth] jwt claims re-read failed (P1001)");
+      expect(errorSpy.mock.calls.flat().map(String).join(" ")).not.toContain("db.internal");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it("a failed re-read with no string code logs (unknown) — and still throws", async () => {
     const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     try {
