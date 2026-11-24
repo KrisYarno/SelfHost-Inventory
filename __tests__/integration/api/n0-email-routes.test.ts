@@ -177,7 +177,8 @@ describe("C3c / FV-7: the weekly report counts only mail actually sent", () => {
     expect(printed).toContain("sent 1 emails, 2 not sent, 1 failed"); // FR1 E8 adds the failed count
     // FV-7: the provider-throw log line is address-free.
     expect(printed).not.toMatch(/@example\.com/);
-    expect(errorSpy).toHaveBeenCalledWith("Failed to send a weekly report:", expect.any(Error));
+    // FR2 F2 (changed pin): the outer catch logs the MESSAGE only, never the error object.
+    expect(errorSpy).toHaveBeenCalledWith("Failed to send a weekly report:", "provider 500");
   });
 
   it("FR1 E8: an all-throw run => emailsFailed equals the recipient count; nothing sent or not-sent", async () => {

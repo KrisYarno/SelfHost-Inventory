@@ -323,7 +323,11 @@ export class StockChecker {
         );
       } catch (error) {
         counts.emailsFailed++;
-        console.error(`Failed to send low stock notification (user ${user.id}):`, error);
+        // N0 FR2 F2: the message only (cut at 200), never the error object.
+        console.error(
+          `Failed to send low stock notification (user ${user.id}):`,
+          error instanceof Error ? error.message.slice(0, 200) : "unknown"
+        );
         continue;
       }
 

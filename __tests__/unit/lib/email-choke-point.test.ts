@@ -87,6 +87,14 @@ describe("N0 C2d / FR1 E7 — the email choke point (grep pins over git's file l
     expect(filesNaming(scope, API_HOST_MARKER).filter((file) => !allowedToNameProvider(file))).toEqual([]);
   });
 
+  // N0 FR2 F4: inside lib/email.ts the package is named EXACTLY ONCE — the one
+  // import — so a second import (of @sendgrid/client, say) cannot hide there.
+  it("lib/email.ts names the provider package exactly once (its one import)", () => {
+    const source = fs.readFileSync(path.join(REPO_ROOT, "lib", "email.ts"), "utf8");
+    expect(source.split(PACKAGE_MARKER)).toHaveLength(2);
+    expect(source).toMatch(/^import sgMail, \{ type MailDataRequired \} from '@sendgrid\/mail';\r?$/m);
+  });
+
   it("inside lib/email.ts there is exactly ONE `.send(` call", () => {
     const source = fs.readFileSync(path.join(REPO_ROOT, "lib", "email.ts"), "utf8");
     const calls = source.match(/\.send\s*\(/g) ?? [];

@@ -72,7 +72,11 @@ export async function POST(_request: NextRequest) {
       apiKeyConfigured: !!process.env.SENDGRID_API_KEY,
     });
   } catch (error) {
-    console.error("Test email failed:", error);
+    // N0 FR2 F2: the message only (cut at 200), never the error object.
+    console.error(
+      "Test email failed:",
+      error instanceof Error ? error.message.slice(0, 200) : "unknown"
+    );
     return NextResponse.json(
       {
         error: "Failed to send test email",

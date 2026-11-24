@@ -312,7 +312,10 @@ export class EmailService {
     } catch (error) {
       console.error('Error sending low stock digest:', sendFailureSummary(error));
       
-      throw new Error(`Failed to send email: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // N0 FR2 F2: the wrapped message is cut at 200 like every other send-failure text.
+      throw new Error(
+        `Failed to send email: ${(error instanceof Error ? error.message : 'Unknown error').slice(0, 200)}`
+      );
     }
   }
 

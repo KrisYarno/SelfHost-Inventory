@@ -8,7 +8,13 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const session = await getSession();
 
   if (!session) {
-    redirect("/auth/signin");
+    // N0 FR2 F1: `reauth=1` tells the middleware NOT to bounce a cookie-holder back
+    // to /workbench. Under a sustained DB failure the claims re-read throws, so
+    // getServerSession is null while the (uncleared) cookie still looks approved:
+    // without the marker, /auth/signin -> /workbench -> /auth/signin loops forever.
+    // On the sign-in page the client session fetch clears the stale cookie, or the
+    // user signs in normally once the database is back.
+    redirect("/auth/signin?reauth=1");
   }
 
   if (!session.user.isApproved) {

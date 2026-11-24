@@ -125,6 +125,43 @@ describe.each(MODES)("emailDomainAllowed with %s", (_label, domains) => {
   });
 });
 
+// N0 FR2 F6 (QA-3): in WILDCARD mode the domain was never checked at all. Its shape
+// is now required in BOTH modes, before the wildcard or list check.
+describe("F6: the DOMAIN shape in wildcard mode", () => {
+  const { emailDomainAllowed } = load("*");
+
+  it.each([
+    ["bidi override", "user@evil\u202e.com"],
+    ["zero-width space", "user@exa\u200bmple.com"],
+    ["fullwidth letters", "user@\uff45xample.com"],
+    ["a script tag", "user@<script>.com"],
+    ["a quote", 'user@exa"mple.com'],
+    ["a trailing dot", "user@example.com."],
+    ["a leading hyphen", "user@-example.com"],
+    ["a trailing hyphen in a label", "user@example-.com"],
+    ["a single label", "user@localhost"],
+    ["an empty label", "user@example..com"],
+    ["an underscore", "user@exa_mple.com"],
+  ])("refuses %s (%j)", (_label, email) => {
+    expect(emailDomainAllowed(email)).toBe(false);
+  });
+
+  it.each([["user@example.com"], ["user@sub.example.co"], ["u@a-b.c-d.example"], ["USER@Example.COM"]])(
+    "allows %j",
+    (email) => {
+      expect(emailDomainAllowed(email)).toBe(true);
+    }
+  );
+});
+
+describe("F6: the same shape in list mode (an allowed name is still a plain DNS name)", () => {
+  it("a listed domain passes; the shape check does not loosen the list", () => {
+    const { emailDomainAllowed } = load("advancedresearchpep.com");
+    expect(emailDomainAllowed("user@advancedresearchpep.com")).toBe(true);
+    expect(emailDomainAllowed("user@example.com")).toBe(false);
+  });
+});
+
 describe("the domain list vs the wildcard", () => {
   it("a list refuses an unlisted domain; the wildcard allows any single-@ address", () => {
     expect(load("advancedresearchpep.com").emailDomainAllowed("user@evil.com")).toBe(false);

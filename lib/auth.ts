@@ -13,6 +13,11 @@ const allowedDomains = (process.env.ALLOWED_EMAIL_DOMAINS || 'advancedresearchpe
   .filter(Boolean);
 const allowAllDomains = allowedDomains.includes('*');
 
+// N0 FR2 F6: a plain DNS name — letters, digits and hyphens per label (never a
+// leading or trailing hyphen), at least one dot. Checked in BOTH modes.
+const DOMAIN_SHAPE =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
+
 /**
  * The ONE email-domain rule (N0 C6), shared by signup, credentials sign-in and
  * Google sign-in. An address passes only when, after trimming:
@@ -21,7 +26,9 @@ const allowAllDomains = allowedDomains.includes('*');
  *   3. it contains no whitespace or control characters, and the local part is
  *      printable ASCII only (N0 FR1 E5: no zero-width, bidi-override, fullwidth or
  *      other non-ASCII lookalikes);
- *   4. THEN the wildcard ("*") is configured, or the domain is allowed.
+ *   4. the DOMAIN is a plain DNS name — letters, digits and hyphens per label, no
+ *      leading/trailing hyphen, at least one dot (N0 FR2 F6) — in BOTH modes;
+ *   5. THEN the wildcard ("*") is configured, or the domain is allowed.
  * So "a@allowed.com@evil.com" is refused in BOTH modes (the old split('@')[1]
  * read it as allowed.com). Signup deliberately does not .email()-validate
  * (lib/validation/auth.ts): an odd address falls through to this refusal.
@@ -39,6 +46,7 @@ export function emailDomainAllowed(email: string): boolean {
   const [local, domain] = parts;
   if (local === '' || domain === '') return false;
   if (!/^[\x21-\x7e]+$/.test(local)) return false;
+  if (!DOMAIN_SHAPE.test(domain)) return false;
   return allowAllDomains || allowedDomains.includes(domain.toLowerCase());
 }
 
@@ -319,9 +327,16 @@ export const authOptions: NextAuthOptions = {
       // therefore picked up on the next session read, and a token minted with
       // claims the row does not hold is downgraded. A missing row, a soft-deleted
       // user, or a token without a usable id holds no rights. A FAILED read
-      // RETHROWS (N0 FR1 E1): next-auth's session route then clears the cookie (a
-      // clean sign-out) and getServerSession returns null — never a cookie
-      // re-encoded with made-up claims, never a false "pending approval" page.
+      // RETHROWS (N0 FR1 E1), so a cookie is never re-encoded with made-up claims
+      // and no one lands on a false "pending approval" page:
+      //   - on the session route (GET/POST /api/auth/session) next-auth logs
+      //     JWT_SESSION_ERROR (code only — see `logger` below) and CLEARS the
+      //     cookie: a clean sign-out;
+      //   - in route handlers and server components getServerSession returns null
+      //     but CANNOT clear the cookie. Route handlers answer 401; the app layout
+      //     sends the user to /auth/signin?reauth=1, which the middleware lets
+      //     render despite the still-approved-looking cookie (N0 FR2 F1), and the
+      //     sign-in page's own session fetch then clears it.
       if (!user) {
         let row: {
           isAdmin: boolean;
@@ -374,6 +389,26 @@ export const authOptions: NextAuthOptions = {
     error: '/auth/error',
   },
   debug: process.env.NODE_ENV === 'development',
+  // N0 FR2 F3: next-auth's default error logger prints the error's message, stack
+  // and metadata object — and a Prisma message can name the database host or user.
+  // So: the code, plus the error's own code or name when present, nothing else.
+  // `warn` and `debug` keep next-auth's defaults.
+  logger: {
+    error(code, metadata) {
+      const source = metadata as { error?: unknown } | null | undefined;
+      const error = (source && typeof source === 'object' && 'error' in source && source.error
+        ? source.error
+        : source) as { code?: unknown; name?: unknown } | null | undefined;
+      const detail =
+        typeof error?.code === 'string' ||
+        (typeof error?.code === 'number' && Number.isFinite(error.code))
+          ? error.code
+          : typeof error?.name === 'string'
+            ? error.name
+            : undefined;
+      console.error(`[next-auth] ${code}${detail !== undefined ? ` (${detail})` : ''}`);
+    },
+  },
 };
 
 /**

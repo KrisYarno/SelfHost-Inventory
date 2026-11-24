@@ -110,6 +110,12 @@ export async function middleware(request: NextRequest) {
   // (auth pages are public but should redirect authenticated users to workbench)
   const isAuthRoute = authRoutes.some((route) => pathname.startsWith(route));
   if (isAuthRoute) {
+    // N0 FR2 F1: the app layout sends a cookie-holder whose SERVER session is null
+    // (e.g. the claims re-read failing) here with `reauth=1`. Let that page render —
+    // a redirect to /workbench would only send them straight back (a redirect loop).
+    if (request.nextUrl.searchParams.get("reauth") === "1") {
+      return NextResponse.next();
+    }
     const token = await getToken({ req: request, secret: process.env.NEXTAUTH_SECRET });
     if (token?.isApproved) {
       return NextResponse.redirect(new URL("/workbench", request.url));
