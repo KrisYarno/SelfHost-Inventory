@@ -18,14 +18,17 @@ function credentialsErrorText(error: string): string {
 
 export function SignInForm() {
   const searchParams = useSearchParams();
-  const { status } = useSession();
+  const { data, status } = useSession();
   // N0 FR4 H1 (withdraws FR3 G5's automatic return): the app layout sends a user
   // here with `reauth=1` when its server session read failed. If the client session
-  // is still authenticated, OFFER the way back — one line and a plain link to the
-  // FIXED /workbench (never `callbackUrl`, which is attacker-controlled). Nothing
-  // navigates by itself, so a flapping database can never cycle the user between
-  // here and the app: every bounce is one human click.
-  const stillSignedIn = searchParams.get('reauth') === '1' && status === 'authenticated';
+  // is still authenticated AND approved (FR5 I2), OFFER the way back — one line and
+  // a plain link to the FIXED /workbench (never `callbackUrl`, which is
+  // attacker-controlled). Nothing navigates by itself, so a flapping database can
+  // never cycle the user between here and the app: every bounce is one human click.
+  const stillSignedIn =
+    searchParams.get('reauth') === '1' &&
+    status === 'authenticated' &&
+    data?.user?.isApproved === true;
   const callbackUrl = searchParams.get('callbackUrl') || '/workbench';
   const errorParam = searchParams.get('error');
   const [email, setEmail] = useState('');
@@ -72,15 +75,21 @@ export function SignInForm() {
           <h2 className="mt-6 text-center text-3xl font-extrabold text-foreground">
             Sign in to your account
           </h2>
+          {/* N0 FR5 I3: an ALWAYS-rendered status region, so the line is announced
+              when it appears. I1: a PLAIN anchor — a document navigation, so the
+              middleware, the layout and SessionProvider all read fresh, and no stale
+              prefetched redirect can replay once the database is back. */}
+          <div role="status">
+            {stillSignedIn && (
+              <p className="mt-2 text-center text-sm text-muted-foreground">
+                You&apos;re still signed in.{' '}
+                <a href="/workbench" className="font-medium text-primary hover:text-primary/90">
+                  Return to the workbench
+                </a>
+              </p>
+            )}
+          </div>
         </div>
-        {stillSignedIn && (
-          <p className="text-center text-sm text-muted-foreground">
-            You&apos;re still signed in.{' '}
-            <Link href="/workbench" className="font-medium text-primary hover:text-primary/90">
-              Return to the workbench
-            </Link>
-          </p>
-        )}
         <form className="mt-8 space-y-6" onSubmit={handleCredentialsSignIn}>
           <input type="hidden" name="remember" defaultValue="true" />
           <div className="rounded-md shadow-sm -space-y-px">

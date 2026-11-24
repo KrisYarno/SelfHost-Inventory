@@ -20,6 +20,15 @@ jest.mock("next/navigation", () => ({
   useSearchParams: () => search,
 }));
 
+// N0 FR5 I1: next/link is replaced by a MARKER anchor, so a pin can tell a plain
+// <a> (a document navigation) from a next/link (a client-side one).
+jest.mock("next/link", () => ({
+  __esModule: true,
+  default: ({ href, children, ...rest }: { href: string; children: unknown }) =>
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- a jest.mock factory cannot close over the JSX runtime
+    require("react").createElement("a", { "data-next-link": "true", href, ...rest }, children),
+}));
+
 // jest.setup.js mocks next-auth/react with useSession only; give the form a signIn.
 jest.mock("next-auth/react", () => ({
   signIn: jest.fn(),
@@ -82,7 +91,7 @@ function returnLink(): HTMLAnchorElement | null {
 describe("H1: the reauth marker OFFERS a link back; nothing navigates by itself", () => {
   it("with reauth=1 and an authenticated session => the line and a link to /workbench, no navigation", async () => {
     search = new URLSearchParams("reauth=1");
-    useSessionMock.mockReturnValue({ data: { user: {} }, status: "authenticated" });
+    useSessionMock.mockReturnValue({ data: { user: { isApproved: true } }, status: "authenticated" });
     render(<SignInForm />);
 
     const link = returnLink();
@@ -103,7 +112,7 @@ describe("H1: the reauth marker OFFERS a link back; nothing navigates by itself"
 
   it("never navigates by itself, across an unmount and a remount", async () => {
     search = new URLSearchParams("reauth=1");
-    useSessionMock.mockReturnValue({ data: { user: {} }, status: "authenticated" });
+    useSessionMock.mockReturnValue({ data: { user: { isApproved: true } }, status: "authenticated" });
     const first = render(<SignInForm />);
     await new Promise((resolve) => setTimeout(resolve, 20));
     first.unmount();
@@ -116,7 +125,7 @@ describe("H1: the reauth marker OFFERS a link back; nothing navigates by itself"
 
   it("callbackUrl=https://evil.example => the link is still /workbench", () => {
     search = new URLSearchParams("reauth=1&callbackUrl=https%3A%2F%2Fevil.example%2Fphish");
-    useSessionMock.mockReturnValue({ data: { user: {} }, status: "authenticated" });
+    useSessionMock.mockReturnValue({ data: { user: { isApproved: true } }, status: "authenticated" });
     render(<SignInForm />);
     expect(returnLink()!.getAttribute("href")).toBe("/workbench");
     for (const anchor of Array.from(document.querySelectorAll("a"))) {
@@ -127,7 +136,7 @@ describe("H1: the reauth marker OFFERS a link back; nothing navigates by itself"
 
   it("without the marker => no line, even when authenticated", () => {
     search = new URLSearchParams("callbackUrl=%2Fworkbench");
-    useSessionMock.mockReturnValue({ data: { user: {} }, status: "authenticated" });
+    useSessionMock.mockReturnValue({ data: { user: { isApproved: true } }, status: "authenticated" });
     render(<SignInForm />);
     expect(screen.queryByText(/still signed in/)).not.toBeInTheDocument();
     expect(returnLink()).toBeNull();
@@ -143,7 +152,7 @@ describe("H1: the reauth marker OFFERS a link back; nothing navigates by itself"
 
   it("only the exact marker counts (reauth=true => no line)", () => {
     search = new URLSearchParams("reauth=true");
-    useSessionMock.mockReturnValue({ data: { user: {} }, status: "authenticated" });
+    useSessionMock.mockReturnValue({ data: { user: { isApproved: true } }, status: "authenticated" });
     render(<SignInForm />);
     expect(returnLink()).toBeNull();
   });
@@ -167,5 +176,58 @@ describe("H3: ?error=<raw text> renders no raw text", () => {
     search = new URLSearchParams("error=CredentialsSignin");
     render(<SignInForm />);
     expect(screen.getByText("Invalid email or password")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N0 FR5 (FD4): I1 a plain anchor, I2 approved only, I3 an always-present status region.
+// ---------------------------------------------------------------------------
+function statusRegion(): HTMLElement {
+  return screen.getByRole("status");
+}
+
+describe("FR5 I1: the way back is a PLAIN anchor (a document navigation), never next/link", () => {
+  it("the rendered link is a plain <a href=\"/workbench\">, not the next/link marker", () => {
+    search = new URLSearchParams("reauth=1");
+    useSessionMock.mockReturnValue({ data: { user: { isApproved: true } }, status: "authenticated" });
+    render(<SignInForm />);
+    const link = returnLink()!;
+    expect(link.tagName).toBe("A");
+    expect(link.getAttribute("href")).toBe("/workbench");
+    expect(link.hasAttribute("data-next-link")).toBe(false);
+    // The marker mock IS active: the page's other next/link (Sign up) carries it.
+    expect(screen.getByRole("link", { name: "Sign up" }).getAttribute("data-next-link")).toBe("true");
+  });
+});
+
+describe("FR5 I2: the line requires an APPROVED session", () => {
+  it.each([
+    ["isApproved: false", { user: { isApproved: false } }],
+    ["no isApproved", { user: {} }],
+    ["isApproved as a string", { user: { isApproved: "true" } }],
+    ["no user", {}],
+  ])("authenticated with %s => no line", (_label, data) => {
+    search = new URLSearchParams("reauth=1");
+    useSessionMock.mockReturnValue({ data, status: "authenticated" });
+    render(<SignInForm />);
+    expect(screen.queryByText(/still signed in/)).not.toBeInTheDocument();
+    expect(returnLink()).toBeNull();
+  });
+});
+
+describe("FR5 I3: the status region is always rendered; it holds the line only when shown", () => {
+  it.each([
+    ["marker + approved", "reauth=1", { data: { user: { isApproved: true } }, status: "authenticated" }, true],
+    ["marker + unapproved", "reauth=1", { data: { user: { isApproved: false } }, status: "authenticated" }, false],
+    ["marker + loading", "reauth=1", { data: null, status: "loading" }, false],
+    ["marker + unauthenticated", "reauth=1", { data: null, status: "unauthenticated" }, false],
+    ["no marker + approved", "", { data: { user: { isApproved: true } }, status: "authenticated" }, false],
+  ])("%s", (_label, query, session, shown) => {
+    search = new URLSearchParams(query);
+    useSessionMock.mockReturnValue(session);
+    render(<SignInForm />);
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+    expect(statusRegion().textContent).toBe(shown ? `${LINE} Return to the workbench` : "");
+    if (shown) expect(statusRegion().contains(returnLink())).toBe(true);
   });
 });

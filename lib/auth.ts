@@ -73,8 +73,17 @@ function prismaErrorCode(error: unknown): string | undefined {
 }
 
 // N0 FR3 G2: a sign-in database call that throws never reaches the sign-in form
-// as raw Prisma text (next-auth turns a thrown error's message into the result's
-// `error`). One address-free line, then the fixed `ServiceUnavailable`.
+// (or a log) as raw Prisma text: one address-free line, then the fixed
+// `ServiceUnavailable`. What the browser then sees depends on where it was thrown
+// (N0 FR5 I4):
+//   - in `authorize` or the credentials `signIn` callback, next-auth catches it and
+//     puts the message in the result's `error`, so the form shows its fixed
+//     "unavailable" sentence;
+//   - at the credentials `jwt` step next-auth does NOT catch it: the browser gets a
+//     bare 500, the form shows `An unexpected error occurred`, and the log holds
+//     `Error: ServiceUnavailable` with no Prisma text (a fixed sentence for this
+//     step is registered for the auth lane);
+//   - at the Google `jwt` step next-auth's inner catch answers `error=Callback`.
 async function signInLookup<T>(read: () => Promise<T>): Promise<T> {
   try {
     return await read();
